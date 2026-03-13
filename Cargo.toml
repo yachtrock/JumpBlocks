@@ -10,6 +10,11 @@ bevy-tnua = "0.30"
 bevy-tnua-avian3d = "0.10"
 bevy_egui = "0.39"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-game-controller = "0.3"
+
 # Fast compiles for dev
 [profile.dev]
 opt-level = 1

@@ -3568,6 +3568,9 @@ dependencies = [
  "bevy-tnua",
  "bevy-tnua-avian3d",
  "bevy_egui",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-game-controller",
 ]
 
 [[package]]
@@ -4259,8 +4262,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.11.0",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-game-controller"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1962c1882c5abcedb18e5f01acffeaad7b3cbd0a9d4cd8f5ca259ba8a64cb9a3"
+dependencies = [
+ "bitflags 2.11.0",
+ "block2 0.6.2",
+ "dispatch2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@ mod camera;
 mod debug_ui;
 mod edge_detection;
 mod layers;
+mod native_gamepad;
 mod player;
 mod world;
 
@@ -15,13 +16,16 @@ use player::ControlScheme;
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "JumpBlocks".to_string(),
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "JumpBlocks".to_string(),
+                        ..default()
+                    }),
                     ..default()
-                }),
-                ..default()
-            }),
+                })
+                .build()
+                .disable::<bevy::gilrs::GilrsPlugin>(),
             PhysicsPlugins::default()
                 .set(PhysicsInterpolationPlugin::interpolate_all()),
             TnuaControllerPlugin::<ControlScheme>::new(PhysicsSchedule),
@@ -33,6 +37,7 @@ fn main() {
             camera::CameraPlugin,
             debug_ui::DebugUiPlugin,
             edge_detection::EdgeDetectionPlugin,
+            native_gamepad::NativeGamepadPlugin,
         ))
         .run();
 }

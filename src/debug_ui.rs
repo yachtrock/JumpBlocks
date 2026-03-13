@@ -60,6 +60,7 @@ fn debug_ui_system(
     mut player_query: Query<(&Transform, &TnuaConfig<ControlScheme>, &mut PlayerSettings, &mut LeanSettings, &PrecariousEdge, &mut EdgeDetectionSettings), With<Player>>,
     mut camera_query: Query<&mut OrbitCamera>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
+    gamepads: Query<(Entity, &Gamepad)>,
 ) {
     if !state.visible {
         return;
@@ -156,5 +157,53 @@ fn debug_ui_system(
                 });
             }
         }
+
+        ui.separator();
+
+        // Gamepad debug
+        let gamepad_count = gamepads.iter().count();
+        ui.collapsing(format!("Gamepads ({gamepad_count})"), |ui| {
+            if gamepad_count == 0 {
+                ui.label("No gamepads detected");
+            }
+            for (entity, gamepad) in gamepads.iter() {
+                let vid = gamepad.vendor_id().map(|v| format!("{v:#06x}")).unwrap_or("??".into());
+                let pid = gamepad.product_id().map(|v| format!("{v:#06x}")).unwrap_or("??".into());
+                ui.label(format!("Entity: {entity}  VID: {vid}  PID: {pid}"));
+
+                let lx = gamepad.get(GamepadAxis::LeftStickX).unwrap_or(0.0);
+                let ly = gamepad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
+                let rx = gamepad.get(GamepadAxis::RightStickX).unwrap_or(0.0);
+                let ry = gamepad.get(GamepadAxis::RightStickY).unwrap_or(0.0);
+                ui.label(format!("L stick: ({lx:.3}, {ly:.3})"));
+                ui.label(format!("R stick: ({rx:.3}, {ry:.3})"));
+
+                let buttons = [
+                    ("South", GamepadButton::South),
+                    ("East", GamepadButton::East),
+                    ("West", GamepadButton::West),
+                    ("North", GamepadButton::North),
+                    ("LTrigger", GamepadButton::LeftTrigger),
+                    ("RTrigger", GamepadButton::RightTrigger),
+                    ("LTrigger2", GamepadButton::LeftTrigger2),
+                    ("RTrigger2", GamepadButton::RightTrigger2),
+                    ("DPadUp", GamepadButton::DPadUp),
+                    ("DPadDown", GamepadButton::DPadDown),
+                    ("DPadLeft", GamepadButton::DPadLeft),
+                    ("DPadRight", GamepadButton::DPadRight),
+                ];
+                let pressed: Vec<&str> = buttons
+                    .iter()
+                    .filter(|(_, btn)| gamepad.pressed(*btn))
+                    .map(|(name, _)| *name)
+                    .collect();
+                if pressed.is_empty() {
+                    ui.label("Buttons: (none)");
+                } else {
+                    ui.label(format!("Buttons: {}", pressed.join(", ")));
+                }
+                ui.separator();
+            }
+        });
     });
 }
