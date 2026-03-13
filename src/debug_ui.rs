@@ -132,6 +132,7 @@ fn debug_ui_system(
                         ui.add(egui::Slider::new(&mut cam.mouse_sensitivity.y, 0.001..=0.01).text("Mouse sens Y"));
                         ui.add(egui::Slider::new(&mut cam.gamepad_sensitivity.x, 0.5..=8.0).text("Gamepad sens X"));
                         ui.add(egui::Slider::new(&mut cam.gamepad_sensitivity.y, 0.5..=8.0).text("Gamepad sens Y"));
+                        ui.add(egui::Slider::new(&mut cam.collision_recovery_speed, 0.5..=20.0).text("Collision recovery"));
                     });
                 }
 

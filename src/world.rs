@@ -1,6 +1,8 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use crate::layers::GameLayer;
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
@@ -23,6 +25,7 @@ fn setup_world(
         })),
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
+        CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
     ));
 
     // Some platforms to jump on
@@ -47,6 +50,7 @@ fn setup_world(
             Transform::from_translation(pos),
             RigidBody::Static,
             Collider::cuboid(4.0, 0.5, 4.0),
+            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
         ));
     }
 

@@ -1,7 +1,9 @@
+use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
+use crate::layers::GameLayer;
 use crate::player::Player;
 
 pub struct CameraPlugin;
@@ -21,6 +23,8 @@ pub struct OrbitCamera {
     pub target_yaw: f32,
     pub distance: f32,
     pub target_distance: f32,
+    /// The actual distance used for positioning (accounts for collision).
+    pub effective_distance: f32,
     pub min_distance: f32,
     pub max_distance: f32,
     pub mouse_sensitivity: Vec2,
@@ -28,6 +32,8 @@ pub struct OrbitCamera {
     pub zoom_sensitivity: f32,
     /// How fast the camera smoothly catches up (higher = snappier).
     pub smoothing: f32,
+    /// How fast the camera eases back out after a collision clears.
+    pub collision_recovery_speed: f32,
     pub cursor_locked: bool,
 }
 
@@ -40,16 +46,21 @@ impl Default for OrbitCamera {
             target_yaw: 0.0,
             distance: 8.0,
             target_distance: 8.0,
+            effective_distance: 8.0,
             min_distance: 3.0,
             max_distance: 20.0,
             mouse_sensitivity: Vec2::new(0.003, 0.003),
             gamepad_sensitivity: Vec2::new(2.5, 1.5),
             zoom_sensitivity: 1.0,
             smoothing: 18.0,
+            collision_recovery_speed: 4.0,
             cursor_locked: true,
         }
     }
 }
+
+/// Small offset so the camera doesn't clip into geometry.
+const CAMERA_CLIP_OFFSET: f32 = 0.2;
 
 fn spawn_camera(
     mut commands: Commands,
@@ -120,10 +131,11 @@ fn camera_input(
 
 fn camera_follow(
     time: Res<Time>,
-    player_query: Query<&Transform, With<Player>>,
+    spatial_query: SpatialQuery,
+    player_query: Query<(Entity, &Transform), With<Player>>,
     mut camera_query: Query<(&mut OrbitCamera, &mut Transform), Without<Player>>,
 ) {
-    let Ok(player_transform) = player_query.single() else {
+    let Ok((player_entity, player_transform)) = player_query.single() else {
         return;
     };
     let Ok((mut cam, mut cam_transform)) = camera_query.single_mut() else {
@@ -133,15 +145,50 @@ fn camera_follow(
     let dt = time.delta_secs();
     let t = (cam.smoothing * dt).min(1.0);
 
-    // Smoothly interpolate toward target
+    // Smoothly interpolate toward target (ideal distance ignoring collision)
     cam.yaw = cam.yaw + (cam.target_yaw - cam.yaw) * t;
     cam.pitch = cam.pitch + (cam.target_pitch - cam.pitch) * t;
     cam.distance = cam.distance + (cam.target_distance - cam.distance) * t;
 
-    // Compute orbit position
+    // Compute ideal orbit direction
     let rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
-    let offset = rotation * Vec3::new(0.0, 0.0, cam.distance);
+    let orbit_dir = rotation * Vec3::Z; // direction from player toward camera
 
-    cam_transform.translation = player_transform.translation + offset;
-    cam_transform.look_at(player_transform.translation, Vec3::Y);
+    // Raycast from player toward ideal camera position to detect blocking geometry
+    let look_at_pos = player_transform.translation;
+    let filter = SpatialQueryFilter::from_mask(GameLayer::CameraBlocking)
+        .with_excluded_entities([player_entity]);
+
+    let max_allowed = if let Ok(ray_dir) = Dir3::new(orbit_dir) {
+        if let Some(hit) =
+            spatial_query.cast_ray(look_at_pos, ray_dir, cam.distance, true, &filter)
+        {
+            // Hit something — cap distance at hit point minus offset
+            (hit.distance - CAMERA_CLIP_OFFSET).max(cam.min_distance * 0.5)
+        } else {
+            cam.distance
+        }
+    } else {
+        cam.distance
+    };
+
+    // Snap in instantly when blocked, ease out slowly when clear
+    if cam.effective_distance > max_allowed {
+        // Blocked — instant snap closer
+        cam.effective_distance = max_allowed;
+    } else if cam.effective_distance < cam.distance {
+        // Clear — ease back toward ideal distance
+        let recovery_t = (cam.collision_recovery_speed * dt).min(1.0);
+        cam.effective_distance =
+            cam.effective_distance + (cam.distance - cam.effective_distance) * recovery_t;
+        // Don't overshoot the max allowed
+        cam.effective_distance = cam.effective_distance.min(max_allowed);
+    } else {
+        cam.effective_distance = cam.distance;
+    }
+
+    // Final camera position using effective distance
+    let offset = orbit_dir * cam.effective_distance;
+    cam_transform.translation = look_at_pos + offset;
+    cam_transform.look_at(look_at_pos, Vec3::Y);
 }

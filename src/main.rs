@@ -1,6 +1,7 @@
 mod camera;
 mod debug_ui;
 mod edge_detection;
+mod layers;
 mod player;
 mod world;
 
