@@ -3,8 +3,8 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
-use bevy_third_person_camera::ThirdPersonCamera;
-
+use crate::camera::OrbitCamera;
+use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
 use crate::player::{ControlScheme, ControlSchemeConfig, LeanSettings, Player, PlayerSettings};
 use bevy_tnua::prelude::*;
 
@@ -33,13 +33,13 @@ impl Default for DebugUiState {
 fn toggle_debug_ui(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<DebugUiState>,
-    mut camera_query: Query<&mut ThirdPersonCamera>,
+    mut camera_query: Query<&mut OrbitCamera>,
     mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     if keyboard.just_pressed(KeyCode::Backquote) {
         state.visible = !state.visible;
         if let Ok(mut cam) = camera_query.single_mut() {
-            cam.cursor_lock_active = !state.visible;
+            cam.cursor_locked = !state.visible;
         }
         if let Ok(mut cursor) = window_query.single_mut() {
             if state.visible {
@@ -57,7 +57,8 @@ fn debug_ui_system(
     mut contexts: EguiContexts,
     state: Res<DebugUiState>,
     diagnostics: Res<DiagnosticsStore>,
-    mut player_query: Query<(&Transform, &TnuaConfig<ControlScheme>, &mut PlayerSettings, &mut LeanSettings), With<Player>>,
+    mut player_query: Query<(&Transform, &TnuaConfig<ControlScheme>, &mut PlayerSettings, &mut LeanSettings, &PrecariousEdge, &mut EdgeDetectionSettings), With<Player>>,
+    mut camera_query: Query<&mut OrbitCamera>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
 ) {
     if !state.visible {
@@ -84,11 +85,17 @@ fn debug_ui_system(
         ui.separator();
 
         // Player info
-        if let Ok((transform, tnua_config, mut settings, mut lean)) = player_query.single_mut() {
+        if let Ok((transform, tnua_config, mut settings, mut lean, edge, mut edge_settings)) = player_query.single_mut() {
             ui.label(format!(
                 "Position: ({:.1}, {:.1}, {:.1})",
                 transform.translation.x, transform.translation.y, transform.translation.z
             ));
+            if edge.on_edge {
+                ui.colored_label(egui::Color32::ORANGE, format!(
+                    "ON EDGE  dist: {:.2}  dir: ({:.2}, {:.2})",
+                    edge.distance_from_edge, edge.overhang_direction.x, edge.overhang_direction.z
+                ));
+            }
 
             ui.separator();
 
@@ -115,6 +122,22 @@ fn debug_ui_system(
                     ui.add(egui::Slider::new(&mut lean.max_angle, 0.0..=45.0).text("Forward lean (deg)"));
                     ui.add(egui::Slider::new(&mut lean.turn_max_angle, 0.0..=45.0).text("Turn lean (deg)"));
                     ui.add(egui::Slider::new(&mut lean.lerp_speed, 1.0..=30.0).text("Lerp speed"));
+                });
+
+                // Camera config
+                if let Ok(mut cam) = camera_query.single_mut() {
+                    ui.collapsing("Camera", |ui| {
+                        ui.add(egui::Slider::new(&mut cam.smoothing, 1.0..=50.0).text("Smoothing"));
+                        ui.add(egui::Slider::new(&mut cam.mouse_sensitivity.x, 0.001..=0.01).text("Mouse sens X"));
+                        ui.add(egui::Slider::new(&mut cam.mouse_sensitivity.y, 0.001..=0.01).text("Mouse sens Y"));
+                        ui.add(egui::Slider::new(&mut cam.gamepad_sensitivity.x, 0.5..=8.0).text("Gamepad sens X"));
+                        ui.add(egui::Slider::new(&mut cam.gamepad_sensitivity.y, 0.5..=8.0).text("Gamepad sens Y"));
+                    });
+                }
+
+                // Edge detection config
+                ui.collapsing("Edge Detection", |ui| {
+                    ui.add(egui::Slider::new(&mut edge_settings.ray_max_distance, 0.5..=10.0).text("Ray distance"));
                 });
 
                 // Jump config

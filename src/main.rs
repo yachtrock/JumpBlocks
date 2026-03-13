@@ -1,11 +1,11 @@
 mod camera;
 mod debug_ui;
+mod edge_detection;
 mod player;
 mod world;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use bevy_third_person_camera::ThirdPersonCameraPlugin;
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dPlugin;
 
@@ -21,16 +21,17 @@ fn main() {
                 }),
                 ..default()
             }),
-            PhysicsPlugins::default(),
+            PhysicsPlugins::default()
+                .set(PhysicsInterpolationPlugin::interpolate_all()),
             TnuaControllerPlugin::<ControlScheme>::new(PhysicsSchedule),
             TnuaAvian3dPlugin::new(PhysicsSchedule),
-            ThirdPersonCameraPlugin,
         ))
         .add_plugins((
             world::WorldPlugin,
             player::PlayerPlugin,
             camera::CameraPlugin,
             debug_ui::DebugUiPlugin,
+            edge_detection::EdgeDetectionPlugin,
         ))
         .run();
 }

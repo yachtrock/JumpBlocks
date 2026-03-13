@@ -1,7 +1,8 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use bevy_third_person_camera::ThirdPersonCameraTarget;
 use bevy_tnua::builtins::{TnuaBuiltinJumpConfig, TnuaBuiltinWalkConfig};
+
+use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dSensorShape;
 
@@ -92,6 +93,8 @@ fn spawn_player(
                 lerp_speed: 8.0,
             },
             LeanState::default(),
+            EdgeDetectionSettings::default(),
+            PrecariousEdge::default(),
             Transform::from_xyz(0.0, 2.0, 0.0),
             Visibility::default(),
             // Physics
@@ -102,8 +105,6 @@ fn spawn_player(
             TnuaController::<ControlScheme>::default(),
             TnuaConfig::<ControlScheme>(config_handle),
             TnuaAvian3dSensorShape(Collider::cylinder(player_radius - 0.01, 0.0)),
-            // Camera target
-            ThirdPersonCameraTarget,
         ))
         .with_children(|parent| {
             // Visual pivot — rotates for facing + lean
