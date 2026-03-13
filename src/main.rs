@@ -1,4 +1,5 @@
 mod camera;
+mod debug_ui;
 mod player;
 mod world;
 
@@ -29,6 +30,7 @@ fn main() {
             world::WorldPlugin,
             player::PlayerPlugin,
             camera::CameraPlugin,
+            debug_ui::DebugUiPlugin,
         ))
         .run();
 }
