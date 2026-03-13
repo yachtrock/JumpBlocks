@@ -3,6 +3,8 @@ use bevy::prelude::*;
 use bevy_tnua::builtins::{TnuaBuiltinJumpConfig, TnuaBuiltinWalkConfig};
 
 use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
+use crate::network::LocalPlayer;
+use crate::player_state::PlayerState;
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dSensorShape;
 
@@ -85,30 +87,33 @@ fn spawn_player(
         ..default()
     });
 
-    commands
-        .spawn((
-            Player,
-            PlayerSettings { run_multiplier: 1.8 },
-            LeanSettings {
-                max_angle: 15.0,
-                turn_max_angle: 10.0,
-                lerp_speed: 8.0,
-            },
-            LeanState::default(),
-            EdgeDetectionSettings::default(),
-            PrecariousEdge::default(),
-            Transform::from_xyz(0.0, 2.0, 0.0),
-            Visibility::default(),
-            // Physics
-            RigidBody::Dynamic,
-            Collider::capsule(player_radius, player_height),
-            LockedAxes::ROTATION_LOCKED,
-            // Tnua character controller
-            TnuaController::<ControlScheme>::default(),
-            TnuaConfig::<ControlScheme>(config_handle),
-            TnuaAvian3dSensorShape(Collider::cylinder(player_radius - 0.01, 0.0)),
-        ))
-        .with_children(|parent| {
+    let mut player = commands.spawn((
+        Player,
+        LocalPlayer,
+        PlayerState::default(),
+        PlayerSettings { run_multiplier: 1.8 },
+        LeanSettings {
+            max_angle: 15.0,
+            turn_max_angle: 10.0,
+            lerp_speed: 8.0,
+        },
+        LeanState::default(),
+        EdgeDetectionSettings::default(),
+        PrecariousEdge::default(),
+        Transform::from_xyz(0.0, 2.0, 0.0),
+        Visibility::default(),
+    ));
+    player.insert((
+        // Physics
+        RigidBody::Dynamic,
+        Collider::capsule(player_radius, player_height),
+        LockedAxes::ROTATION_LOCKED,
+        // Tnua character controller
+        TnuaController::<ControlScheme>::default(),
+        TnuaConfig::<ControlScheme>(config_handle),
+        TnuaAvian3dSensorShape(Collider::cylinder(player_radius - 0.01, 0.0)),
+    ));
+    player.with_children(|parent| {
             // Visual pivot — rotates for facing + lean
             parent
                 .spawn((PlayerVisual, Transform::default(), Visibility::default()))
