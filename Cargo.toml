@@ -1,0 +1,18 @@
+[package]
+name = "jumpblocks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.18.1"
+avian3d = "0.5"
+bevy-tnua = "0.30"
+bevy-tnua-avian3d = "0.10"
+bevy_third_person_camera = "0.4"
+
+# Fast compiles for dev
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
