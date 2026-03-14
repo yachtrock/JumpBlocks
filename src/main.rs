@@ -1,4 +1,5 @@
 mod camera;
+mod curtain;
 mod debug_ui;
 mod edge_detection;
 mod layers;
@@ -589,6 +590,7 @@ fn main() {
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
             camera::CameraPlugin,
+            curtain::CurtainPlugin,
             debug_ui::DebugUiPlugin,
             edge_detection::EdgeDetectionPlugin,
             native_gamepad::NativeGamepadPlugin,

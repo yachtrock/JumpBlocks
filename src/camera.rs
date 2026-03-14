@@ -66,7 +66,14 @@ fn spawn_camera(
     mut commands: Commands,
     mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    commands.spawn((OrbitCamera::default(), Camera3d::default()));
+    commands.spawn((
+        OrbitCamera::default(),
+        Camera3d::default(),
+        Camera {
+            is_active: false, // disabled until curtain is ready
+            ..default()
+        },
+    ));
 
     // Lock cursor on startup
     if let Ok(mut cursor) = window_query.single_mut() {
