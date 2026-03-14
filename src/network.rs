@@ -236,11 +236,12 @@ fn setup_client(mut commands: Commands, addr: Res<ClientServerAddr>) {
 }
 
 /// Observer: when lightyear spawns a LinkOf entity for a new client connection on the server,
-/// add ReplicationSender + MessageManager so the server can replicate data to that client.
+/// add ReplicationSender + ReplicationReceiver + MessageManager so the server can
+/// send and receive replicated data to/from that client.
 fn add_replication_sender_on_link(trigger: On<Add, LinkOf>, mut commands: Commands) {
     let entity = trigger.entity;
     info!(
-        "Adding ReplicationSender to server link entity {:?}",
+        "Adding ReplicationSender + ReplicationReceiver to server link entity {:?}",
         entity
     );
     commands.entity(entity).insert((
@@ -249,12 +250,13 @@ fn add_replication_sender_on_link(trigger: On<Add, LinkOf>, mut commands: Comman
             SendUpdatesMode::SinceLastAck,
             false,
         ),
+        ReplicationReceiver::default(),
         MessageManager::default(),
     ));
 }
 
-/// When the client entity becomes Connected, add ReplicationSender + MessageManager
-/// so the client can replicate data to the server.
+/// When the client entity becomes Connected, add ReplicationSender + ReplicationReceiver
+/// + MessageManager so the client can send and receive replicated data.
 fn add_replication_sender_on_client_connected(
     mut commands: Commands,
     query: Query<
@@ -268,7 +270,7 @@ fn add_replication_sender_on_client_connected(
 ) {
     for entity in query.iter() {
         info!(
-            "Adding ReplicationSender to client entity {:?}",
+            "Adding ReplicationSender + ReplicationReceiver to client entity {:?}",
             entity
         );
         commands.entity(entity).insert((
@@ -277,6 +279,7 @@ fn add_replication_sender_on_client_connected(
                 SendUpdatesMode::SinceLastAck,
                 false,
             ),
+            ReplicationReceiver::default(),
             MessageManager::default(),
         ));
     }
