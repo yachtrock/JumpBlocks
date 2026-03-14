@@ -389,20 +389,20 @@ fn debug_replication_state(
     let replicated_count = replicated.iter().count();
     let remote_count = remote_players.iter().count();
 
-    info!(
+    debug!(
         "[NET DIAG] connected={}, local_players={}, replicated_entities={}, remote_players={}",
         connected_count, local_count, replicated_count, remote_count,
     );
 
     for (entity, has_sender, has_msg_mgr) in senders.iter() {
-        info!(
+        debug!(
             "[NET DIAG]   Sender {:?}: has_replication_sender={}, has_message_manager={}",
             entity, has_sender, has_msg_mgr,
         );
     }
 
     for (entity, net_pos, replicate, replicating, has_authority) in local_players.iter() {
-        info!(
+        debug!(
             "[NET DIAG]   LocalPlayer {:?}: has_net_pos={}, has_replicate={}, replicating={}, has_authority={}, pos={:?}",
             entity,
             net_pos.is_some(),
@@ -414,7 +414,7 @@ fn debug_replication_state(
     }
 
     for (entity, net_pos) in replicated.iter() {
-        info!(
+        debug!(
             "[NET DIAG]   Replicated {:?}: pos={:?}",
             entity,
             net_pos.map(|p| p.0),

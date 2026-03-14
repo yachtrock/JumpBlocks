@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use bevy::prelude::*;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -100,8 +101,20 @@ fn face_is_occluded(
 // ---------------------------------------------------------------------------
 
 pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshResult {
+    let t0 = Instant::now();
     let full_res = generate_chamfered_mesh(data, shapes);
+    let t1 = Instant::now();
     let lod = generate_lod_mesh(data, shapes);
+    let t2 = Instant::now();
+
+    let full_ms = (t1 - t0).as_secs_f64() * 1000.0;
+    let lod_ms = (t2 - t1).as_secs_f64() * 1000.0;
+    info!(
+        "Chunk meshed: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
+        full_ms, lod_ms, full_ms + lod_ms,
+        full_res.positions.len(), full_res.indices.len() / 3,
+        lod.positions.len(), lod.indices.len() / 3,
+    );
 
     let collider_vertices: Vec<Vec3> = lod.positions.iter().map(|p| Vec3::new(p[0], p[1], p[2])).collect();
     let collider_indices: Vec<[u32; 3]> = lod.indices.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
@@ -322,9 +335,13 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         .map(|(&key, info)| (key, info))
         .collect();
 
-    // For each face, for each edge of that face, compute the inward direction
-    // and whether the edge is sharp.
-    // Then compute per-face inner vertices (inset at sharp edges).
+    // Build vertex → faces map for clipping chamfer vertices against adjacent faces
+    let mut vertex_faces: Vec<Vec<usize>> = vec![Vec::new(); solid.positions.len()];
+    for (fi, face) in solid.faces.iter().enumerate() {
+        for &vi in &face.verts {
+            vertex_faces[vi as usize].push(fi);
+        }
+    }
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -333,7 +350,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
     let mut indices: Vec<u32> = Vec::new();
 
     // Per-face: compute inner vertices, emit inner face + chamfer strips
-    for (fi, face) in solid.faces.iter().enumerate() {
+    for (_fi, face) in solid.faces.iter().enumerate() {
         let n = face.verts.len();
         let normal = face.normal;
         let normal_arr = normal.to_array();
@@ -355,19 +372,57 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             edge_inward.push(edge_dir.cross(normal).normalize_or_zero());
         }
 
-        // Compute inner position for each vertex of this face
+        // Compute inner position for each vertex of this face, then clip
+        // against adjacent faces connected by SMOOTH edges to prevent z-fighting.
+        // (Faces connected by sharp edges are the chamfer target — don't clip those.)
         let inner: Vec<Vec3> = (0..n).map(|vi| {
             let mut offset = Vec3::ZERO;
-            // Previous edge (vi is the end vertex of edge vi-1)
             let prev = (vi + n - 1) % n;
             if edge_sharp[prev] {
                 offset += edge_inward[prev] * CHAMFER_WIDTH;
             }
-            // Current edge (vi is the start vertex of edge vi)
             if edge_sharp[vi] {
                 offset += edge_inward[vi] * CHAMFER_WIDTH;
             }
-            solid.positions[face.verts[vi] as usize] + offset
+
+            let outer_vi = face.verts[vi] as usize;
+            let mut pos = solid.positions[outer_vi] + offset;
+
+            // Only clip if vertex was actually moved
+            if offset.length_squared() > 0.0 {
+                // Find faces connected by smooth edges at this vertex
+                let mut clip_faces: Vec<usize> = Vec::new();
+                // Previous edge (vi-1 → vi)
+                if !edge_sharp[prev] {
+                    let key = edge_key(face.verts[prev], face.verts[vi]);
+                    if let Some(info) = edge_graph.get(&key) {
+                        for &fi in &info.faces {
+                            if fi != _fi { clip_faces.push(fi); }
+                        }
+                    }
+                }
+                // Next edge (vi → vi+1)
+                if !edge_sharp[vi] {
+                    let key = edge_key(face.verts[vi], face.verts[(vi + 1) % n]);
+                    if let Some(info) = edge_graph.get(&key) {
+                        for &fi in &info.faces {
+                            if fi != _fi { clip_faces.push(fi); }
+                        }
+                    }
+                }
+
+                // Clip against those faces' planes
+                for adj_fi in clip_faces {
+                    let adj = &solid.faces[adj_fi];
+                    let plane_point = solid.positions[outer_vi];
+                    let dist = (pos - plane_point).dot(adj.normal);
+                    if dist < -1e-5 {
+                        pos -= dist * adj.normal;
+                    }
+                }
+            }
+
+            pos
         }).collect();
 
         // --- Emit inner face ---

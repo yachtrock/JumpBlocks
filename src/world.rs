@@ -127,11 +127,6 @@ fn setup_world(
             }
         }
 
-        let chunk_material = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.6, 0.5, 0.4),
-            ..default()
-        });
-
         // Wedge ramp alongside the stairs (z=7..9, 3 wide)
         // Facing East: tall wall at -X, slope descends toward +X
         // One wedge per step forms a continuous diagonal slope
