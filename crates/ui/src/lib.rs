@@ -84,6 +84,8 @@ fn forward_input_to_ui(
     windows: Query<&Window>,
     mut cursor_moved: MessageReader<CursorMoved>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut mouse_wheel: MessageReader<MouseWheel>,
 ) {
     let tx = &channels.input_tx;
@@ -108,25 +110,45 @@ fn forward_input_to_ui(
     // Mouse buttons
     for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
         if mouse_buttons.just_pressed(button) {
-            let _ = tx.send(UiInput::MouseButton {
-                button,
-                pressed: true,
-            });
+            let _ = tx.send(UiInput::MouseButton { button, pressed: true });
         }
         if mouse_buttons.just_released(button) {
-            let _ = tx.send(UiInput::MouseButton {
-                button,
-                pressed: false,
-            });
+            let _ = tx.send(UiInput::MouseButton { button, pressed: false });
+        }
+    }
+
+    // Keyboard
+    for code in keyboard.get_just_pressed() {
+        let _ = tx.send(UiInput::Key { code: *code, pressed: true });
+    }
+    for code in keyboard.get_just_released() {
+        let _ = tx.send(UiInput::Key { code: *code, pressed: false });
+    }
+
+    // Gamepad buttons → mapped to KeyCode so UI thread gets unified input
+    for gamepad in gamepads.iter() {
+        const MAPPINGS: &[(GamepadButton, KeyCode)] = &[
+            (GamepadButton::DPadUp, KeyCode::ArrowUp),
+            (GamepadButton::DPadDown, KeyCode::ArrowDown),
+            (GamepadButton::DPadLeft, KeyCode::ArrowLeft),
+            (GamepadButton::DPadRight, KeyCode::ArrowRight),
+            (GamepadButton::South, KeyCode::Enter),
+            (GamepadButton::East, KeyCode::Escape),
+            (GamepadButton::North, KeyCode::Tab),
+        ];
+        for &(gp_button, key_code) in MAPPINGS {
+            if gamepad.just_pressed(gp_button) {
+                let _ = tx.send(UiInput::Key { code: key_code, pressed: true });
+            }
+            if gamepad.just_released(gp_button) {
+                let _ = tx.send(UiInput::Key { code: key_code, pressed: false });
+            }
         }
     }
 
     // Scroll
     for event in mouse_wheel.read() {
-        let _ = tx.send(UiInput::Scroll {
-            dx: event.x,
-            dy: event.y,
-        });
+        let _ = tx.send(UiInput::Scroll { dx: event.x, dy: event.y });
     }
 }
 

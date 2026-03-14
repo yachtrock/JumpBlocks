@@ -132,6 +132,7 @@ impl GlyphCache {
     ) -> Vec<LayoutGlyph> {
         let metrics = Metrics::new(font_size, font_size * 1.2);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, Some(10000.0), Some(font_size * 2.0));
         buffer.set_text(&mut self.font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
         buffer.shape_until_scroll(&mut self.font_system, false);
 

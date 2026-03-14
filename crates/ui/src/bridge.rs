@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -61,6 +63,9 @@ pub struct UiInputState {
     pub mouse_just_pressed: [bool; 3],
     pub mouse_just_released: [bool; 3],
     pub scroll_delta: Vec2,
+    pub keys_pressed: HashSet<KeyCode>,
+    pub keys_just_pressed: HashSet<KeyCode>,
+    pub keys_just_released: HashSet<KeyCode>,
 }
 
 impl UiInputState {
@@ -73,6 +78,18 @@ impl UiInputState {
         self.mouse_just_pressed = [false; 3];
         self.mouse_just_released = [false; 3];
         self.scroll_delta = Vec2::ZERO;
+        self.keys_just_pressed.clear();
+        self.keys_just_released.clear();
+    }
+
+    /// Check if a key was just pressed this frame.
+    pub fn key_just_pressed(&self, code: KeyCode) -> bool {
+        self.keys_just_pressed.contains(&code)
+    }
+
+    /// Check if a key is currently held.
+    pub fn key_pressed(&self, code: KeyCode) -> bool {
+        self.keys_pressed.contains(&code)
     }
 
     /// Apply a single input event.
@@ -100,7 +117,18 @@ impl UiInputState {
             UiInput::Scroll { dx, dy } => {
                 self.scroll_delta += Vec2::new(dx, dy);
             }
-            UiInput::Key { .. } | UiInput::CharTyped(_) | UiInput::Shutdown => {}
+            UiInput::Key { code, pressed } => {
+                if pressed {
+                    if self.keys_pressed.insert(code) {
+                        self.keys_just_pressed.insert(code);
+                    }
+                } else {
+                    if self.keys_pressed.remove(&code) {
+                        self.keys_just_released.insert(code);
+                    }
+                }
+            }
+            UiInput::CharTyped(_) | UiInput::Shutdown => {}
         }
     }
 }
