@@ -15,27 +15,21 @@ impl Plugin for WorldPlugin {
 
 fn setup_world(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
 ) {
+    let has_rendering = meshes.is_some() && materials.is_some();
+
     // Ground plane
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(50.0)))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.3, 0.6, 0.3),
-            ..default()
-        })),
+    let mut ground = commands.spawn((
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
         CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
     ));
-
-    // Some platforms to jump on
-    let platform_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.5, 0.5, 0.6),
-        ..default()
-    });
-    let platform_mesh = meshes.add(Cuboid::new(4.0, 0.5, 4.0));
+    if has_rendering {
+        // Visuals will be added below after we create handles
+    }
+    let ground_entity = ground.id();
 
     let platforms = [
         Vec3::new(5.0, 1.0, 0.0),
@@ -45,73 +39,104 @@ fn setup_world(
         Vec3::new(7.0, 7.0, -8.0),
     ];
 
-    for pos in platforms {
+    let platform_entities: Vec<(Entity, Vec3)> = platforms
+        .iter()
+        .map(|&pos| {
+            let e = commands
+                .spawn((
+                    Transform::from_translation(pos),
+                    RigidBody::Static,
+                    Collider::cuboid(4.0, 0.5, 4.0),
+                    CollisionLayers::new(
+                        [GameLayer::Default, GameLayer::CameraBlocking],
+                        LayerMask::ALL,
+                    ),
+                ))
+                .id();
+            (e, pos)
+        })
+        .collect();
+
+    if let (Some(mut meshes), Some(mut materials)) = (meshes, materials) {
+        // Add visual components only when rendering is available
+        commands.entity(ground_entity).insert((
+            Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(50.0)))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.3, 0.6, 0.3),
+                ..default()
+            })),
+        ));
+
+        let platform_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.5, 0.5, 0.6),
+            ..default()
+        });
+        let platform_mesh = meshes.add(Cuboid::new(4.0, 0.5, 4.0));
+
+        for (entity, _pos) in &platform_entities {
+            commands.entity(*entity).insert((
+                Mesh3d(platform_mesh.clone()),
+                MeshMaterial3d(platform_material.clone()),
+            ));
+        }
+
+        // Directional light (sun)
         commands.spawn((
-            Mesh3d(platform_mesh.clone()),
-            MeshMaterial3d(platform_material.clone()),
-            Transform::from_translation(pos),
-            RigidBody::Static,
-            Collider::cuboid(4.0, 0.5, 4.0),
+            DirectionalLight {
+                illuminance: 10_000.0,
+                shadows_enabled: true,
+                ..default()
+            },
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.4, 0.0)),
+        ));
+
+        // Ambient light
+        commands.insert_resource(GlobalAmbientLight {
+            color: Color::srgb(0.9, 0.9, 1.0),
+            brightness: 300.0,
+            ..default()
+        });
+
+        // Demo voxel chunk — a staircase the player can climb
+        let mut chunk_data = ChunkData::new();
+
+        // Ground layer: a 10x10 platform, single voxel tall (0.5 world units)
+        for x in 0..10 {
+            for z in 0..10 {
+                chunk_data.set_filled(x, 0, z, true);
+            }
+        }
+
+        // Staircase: each step is 1 voxel tall (0.5 world units), 3 wide — smooth cube
+        let smooth_voxel = Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1);
+        for step in 0..8 {
+            let y_base = 1 + step;
+            for x in 0..3 {
+                for z in 0..3 {
+                    chunk_data.set(x + step, y_base, z + 3, smooth_voxel);
+                }
+            }
+        }
+
+        // A small tower at the top — smooth cube
+        for y in 9..18 {
+            for x in 8..11 {
+                for z in 3..6 {
+                    chunk_data.set(x, y, z, smooth_voxel);
+                }
+            }
+        }
+
+        let chunk_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.6, 0.5, 0.4),
+            ..default()
+        });
+
+        commands.spawn((
+            Chunk::new(chunk_data),
+            MeshMaterial3d(chunk_material),
+            Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
             CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
         ));
     }
-
-    // Directional light (sun)
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10_000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.4, 0.0)),
-    ));
-
-    // Ambient light
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.9, 0.9, 1.0),
-        brightness: 300.0,
-        ..default()
-    });
-
-    // Demo voxel chunk — a staircase the player can climb
-    let mut chunk_data = ChunkData::new();
-
-    // Ground layer: a 10x10 platform, single voxel tall (0.5 world units)
-    for x in 0..10 {
-        for z in 0..10 {
-            chunk_data.set_filled(x, 0, z, true);
-        }
-    }
-
-    // Staircase: each step is 1 voxel tall (0.5 world units), 3 wide — smooth cube
-    let smooth_voxel = Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1);
-    for step in 0..8 {
-        let y_base = 1 + step;
-        for x in 0..3 {
-            for z in 0..3 {
-                chunk_data.set(x + step, y_base, z + 3, smooth_voxel);
-            }
-        }
-    }
-
-    // A small tower at the top — smooth cube
-    for y in 9..18 {
-        for x in 8..11 {
-            for z in 3..6 {
-                chunk_data.set(x, y, z, smooth_voxel);
-            }
-        }
-    }
-
-    let chunk_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.6, 0.5, 0.4),
-        ..default()
-    });
-
-    commands.spawn((
-        Chunk::new(chunk_data),
-        MeshMaterial3d(chunk_material),
-        Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
-        CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
-    ));
 }

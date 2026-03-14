@@ -17,6 +17,15 @@ impl Plugin for PlayerPlugin {
     }
 }
 
+/// Headless player plugin: spawns a player with physics but no visuals.
+pub struct HeadlessPlayerPlugin;
+
+impl Plugin for HeadlessPlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_headless_player);
+    }
+}
+
 #[derive(Component)]
 pub struct Player;
 
@@ -131,6 +140,50 @@ fn spawn_player(
                     ));
                 });
         });
+}
+
+fn spawn_headless_player(
+    mut commands: Commands,
+    mut configs: ResMut<Assets<ControlSchemeConfig>>,
+) {
+    let player_radius = 0.35;
+    let player_height = 1.0;
+
+    let config_handle = configs.add(ControlSchemeConfig {
+        basis: TnuaBuiltinWalkConfig {
+            float_height: 1.0,
+            speed: 10.0,
+            acceleration: 20.0,
+            air_acceleration: 15.0,
+            coyote_time: 0.12,
+            ..default()
+        },
+        jump: TnuaBuiltinJumpConfig {
+            height: 3.0,
+            ..default()
+        },
+    });
+
+    commands.spawn((
+        Player,
+        LocalPlayer,
+        PlayerState::default(),
+        PlayerSettings { run_multiplier: 1.8 },
+        LeanSettings {
+            max_angle: 15.0,
+            turn_max_angle: 10.0,
+            lerp_speed: 8.0,
+        },
+        LeanState::default(),
+        Transform::from_xyz(0.0, 2.0, 0.0),
+        RigidBody::Dynamic,
+        Collider::capsule(player_radius, player_height),
+        LockedAxes::ROTATION_LOCKED,
+        TnuaController::<ControlScheme>::default(),
+        TnuaConfig::<ControlScheme>(config_handle),
+        TnuaAvian3dSensorShape(Collider::cylinder(player_radius - 0.01, 0.0)),
+    ));
+    info!("Spawned headless player");
 }
 
 fn player_input(

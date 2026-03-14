@@ -33,6 +33,10 @@ struct Cli {
     /// Port for the server to listen on (default: 5000).
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
+
+    /// Run without a window (headless mode for testing).
+    #[arg(long)]
+    headless: bool,
 }
 
 fn main() {
@@ -54,7 +58,7 @@ fn main() {
         NetworkRole::ListenServer
     };
 
-    let is_headless = role == NetworkRole::DedicatedServer;
+    let is_headless = role == NetworkRole::DedicatedServer || cli.headless;
 
     let mut app = App::new();
 
@@ -62,9 +66,20 @@ fn main() {
     app.insert_resource(role.clone());
 
     if is_headless {
-        // Headless server: minimal plugins, no rendering
-        app.add_plugins(MinimalPlugins);
-        app.add_plugins(PhysicsPlugins::default());
+        // Headless: full plugins but no window, exit via ScheduleRunnerPlugin
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    ..default()
+                })
+                .build()
+                .disable::<bevy::gilrs::GilrsPlugin>(),
+        );
+        app.add_plugins(
+            PhysicsPlugins::default()
+                .set(PhysicsInterpolationPlugin::interpolate_all()),
+        );
         app.add_plugins(TnuaControllerPlugin::<ControlScheme>::new(PhysicsSchedule));
         app.add_plugins(TnuaAvian3dPlugin::new(PhysicsSchedule));
     } else {
@@ -100,7 +115,7 @@ fn main() {
     app.add_plugins(NetworkPlugin);
 
     if !is_headless {
-        // Client-side plugins
+        // Client-side plugins (rendering available)
         app.add_plugins((
             jumpblocks_voxel::VoxelPlugin,
             player::PlayerPlugin,
@@ -110,6 +125,9 @@ fn main() {
             edge_detection::EdgeDetectionPlugin,
             native_gamepad::NativeGamepadPlugin,
         ));
+    } else if role != NetworkRole::DedicatedServer {
+        // Headless client: spawn a player without visuals for network testing
+        app.add_plugins(player::HeadlessPlayerPlugin);
     }
 
     app.run();
