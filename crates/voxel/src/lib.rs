@@ -1,5 +1,6 @@
 pub mod chunk;
 pub mod meshing;
+pub mod shape;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -7,12 +8,14 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
 use chunk::*;
 use meshing::*;
+use shape::*;
 
 pub struct VoxelPlugin;
 
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (start_chunk_meshing, handle_chunk_mesh_results));
+        app.init_resource::<ShapeTable>()
+            .add_systems(Update, (start_chunk_meshing, handle_chunk_mesh_results));
     }
 }
 
@@ -24,6 +27,7 @@ struct ChunkMeshTask(Task<ChunkMeshResult>);
 fn start_chunk_meshing(
     mut commands: Commands,
     mut query: Query<(Entity, &mut Chunk), Without<ChunkMeshTask>>,
+    shape_table: Res<ShapeTable>,
 ) {
     let pool = AsyncComputeTaskPool::get();
 
@@ -34,8 +38,9 @@ fn start_chunk_meshing(
 
         chunk.state = ChunkState::Meshing;
         let data = chunk.data.clone();
+        let shapes = shape_table.clone();
 
-        let task = pool.spawn(async move { generate_chunk_mesh(&data) });
+        let task = pool.spawn(async move { generate_chunk_mesh(&data, &shapes) });
 
         commands.entity(entity).insert(ChunkMeshTask(task));
     }
@@ -53,13 +58,13 @@ fn handle_chunk_mesh_results(
         };
 
         // Skip if mesh is empty (no filled voxels)
-        if result.mesh_data.positions.is_empty() {
+        if result.full_res.positions.is_empty() {
             commands.entity(entity).remove::<ChunkMeshTask>();
             chunk.state = ChunkState::Ready;
             continue;
         }
 
-        let mesh = build_mesh(&result.mesh_data);
+        let mesh = build_full_res_mesh(&result.full_res);
         let mesh_handle = meshes.add(mesh);
 
         let collider = Collider::trimesh(
