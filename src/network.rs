@@ -211,6 +211,7 @@ fn sync_local_player_to_network(
         (With<LocalPlayer>, Changed<Transform>),
     >,
     has_networked: Query<(), With<NetworkedPosition>>,
+    role: Res<NetworkRole>,
 ) {
     for (entity, transform, state) in local_players.iter() {
         if has_networked.get(entity).is_ok() {
@@ -220,12 +221,21 @@ fn sync_local_player_to_network(
                 NetworkedState(*state),
             ));
         } else {
+            // Choose the right replication mode based on our role:
+            // - Server (listen/dedicated): replicate to all connected clients
+            // - Client: replicate to the server
+            let replicate = match *role {
+                NetworkRole::ListenServer | NetworkRole::DedicatedServer => {
+                    Replicate::to_clients(NetworkTarget::All)
+                }
+                NetworkRole::Client { .. } => Replicate::to_server(),
+            };
             // First time: add all networked components + Replicate
             commands.entity(entity).insert((
                 NetworkedPosition(transform.translation),
                 NetworkedRotation(Quat::IDENTITY),
                 NetworkedState(*state),
-                Replicate::default(),
+                replicate,
             ));
         }
     }
