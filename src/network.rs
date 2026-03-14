@@ -8,6 +8,16 @@ use crate::player_state::PlayerState;
 
 /// Default port for the game server.
 pub const DEFAULT_PORT: u16 = 5000;
+/// Maximum number of ports to try when auto-selecting.
+const MAX_PORT_ATTEMPTS: u16 = 100;
+
+/// Resource that carries the desired server port and whether it was explicitly set.
+#[derive(Resource, Clone, Debug)]
+pub struct ServerPort {
+    pub port: u16,
+    /// If true, the user passed `--port` explicitly; don't auto-increment.
+    pub explicit: bool,
+}
 /// Protocol ID shared between client and server.
 pub const PROTOCOL_ID: u64 = 0x4A554D50424C4B; // "JUMPBLK" in hex
 /// Private key for netcode (zeroed for dev; replace for production).
@@ -147,9 +157,46 @@ impl Plugin for NetworkPlugin {
     }
 }
 
+/// Find an available port, starting at `start` and incrementing up to `MAX_PORT_ATTEMPTS`.
+/// Returns the first port that can be bound on UDP 0.0.0.0.
+fn find_available_port(start: u16) -> Option<u16> {
+    for offset in 0..MAX_PORT_ATTEMPTS {
+        let port = start.checked_add(offset)?;
+        let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
+        if std::net::UdpSocket::bind(addr).is_ok() {
+            return Some(port);
+        }
+    }
+    None
+}
+
 /// Spawns the server entity with netcode + UDP.
-fn spawn_server(commands: &mut Commands) -> Entity {
-    let server_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), DEFAULT_PORT);
+/// `port_cfg` controls which port to bind and whether to auto-increment on conflict.
+fn spawn_server(commands: &mut Commands, port_cfg: &ServerPort) -> (Entity, u16) {
+    let port = if port_cfg.explicit {
+        // User asked for a specific port — use it directly (let lightyear report the error).
+        port_cfg.port
+    } else {
+        // Try to find a free port starting from the requested one.
+        find_available_port(port_cfg.port).unwrap_or_else(|| {
+            warn!(
+                "Could not find a free port in range {}..{}, falling back to {}",
+                port_cfg.port,
+                port_cfg.port.saturating_add(MAX_PORT_ATTEMPTS),
+                port_cfg.port
+            );
+            port_cfg.port
+        })
+    };
+
+    if port != port_cfg.port {
+        info!(
+            "Port {} was taken, using port {} instead",
+            port_cfg.port, port
+        );
+    }
+
+    let server_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
 
     let netcode = server::NetcodeServer::new(
         server::NetcodeConfig::default()
@@ -171,12 +218,12 @@ fn spawn_server(commands: &mut Commands) -> Entity {
         entity: server_entity,
     });
 
-    server_entity
+    (server_entity, port)
 }
 
 /// Sets up a listen server: server with UDP + a host client connected locally.
-fn setup_listen_server(mut commands: Commands) {
-    let server_entity = spawn_server(&mut commands);
+fn setup_listen_server(mut commands: Commands, port_cfg: Res<ServerPort>) {
+    let (server_entity, actual_port) = spawn_server(&mut commands, &port_cfg);
 
     // Spawn a host client that connects to the local server.
     // The `Client` marker is required so lightyear's HostPlugin observer
@@ -196,15 +243,15 @@ fn setup_listen_server(mut commands: Commands) {
         entity: client_entity,
     });
 
-    print_local_ip(DEFAULT_PORT);
+    print_local_ip(actual_port);
 }
 
 /// Sets up a dedicated server (headless, no local client).
-fn setup_dedicated_server(mut commands: Commands) {
-    spawn_server(&mut commands);
+fn setup_dedicated_server(mut commands: Commands, port_cfg: Res<ServerPort>) {
+    let (_server_entity, actual_port) = spawn_server(&mut commands, &port_cfg);
 
-    info!("Dedicated server started on port {}", DEFAULT_PORT);
-    print_local_ip(DEFAULT_PORT);
+    info!("Dedicated server started on port {}", actual_port);
+    print_local_ip(actual_port);
 }
 
 /// Sets up a client connecting to a remote server.

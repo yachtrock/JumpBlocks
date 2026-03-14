@@ -13,13 +13,13 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dPlugin;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use jumpblocks_ui::{Canvas, UiInputState, UiPlugin};
 use jumpblocks_ui::thread::UiDrawFn;
 use std::net::SocketAddr;
 
-use network::{NetworkPlugin, NetworkRole, DEFAULT_PORT};
+use network::{NetworkPlugin, NetworkRole, ServerPort, DEFAULT_PORT};
 use player::ControlScheme;
 
 // ---------------------------------------------------------------------------
@@ -365,7 +365,9 @@ struct Cli {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).expect("Failed to parse CLI arguments");
+    let port_explicit = matches.value_source("port") == Some(clap::parser::ValueSource::CommandLine);
 
     let role = if cli.start_server {
         NetworkRole::DedicatedServer
@@ -401,8 +403,12 @@ fn main() {
 
     let mut app = App::new();
 
-    // Insert network role before plugins
+    // Insert network role and server port config before plugins
     app.insert_resource(role.clone());
+    app.insert_resource(ServerPort {
+        port: cli.port,
+        explicit: port_explicit,
+    });
 
     if is_headless {
         // Headless: full plugins but no window, exit via ScheduleRunnerPlugin
