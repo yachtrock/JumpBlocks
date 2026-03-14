@@ -1,3 +1,115 @@
+//! # jumpblocks-ui — Off-Thread Immediate-Mode UI
+//!
+//! A custom UI system that renders entirely off the main (ECS) thread using
+//! GPU-batched textured quads. Designed for fast, code-driven iteration on
+//! game UI without involving the ECS in layout or drawing.
+//!
+//! ## Philosophy
+//!
+//! - **No ECS in UI.** The UI crate knows nothing about your game's components
+//!   or resources. The game sends plain Rust data to the UI thread via channels,
+//!   and the UI thread sends events back. This keeps the UI decoupled and
+//!   testable.
+//!
+//! - **Off-thread rendering.** A dedicated OS thread runs the draw loop at its
+//!   own cadence (~120 fps). The Bevy render world extracts finished frames
+//!   from a channel and draws them as a full-screen overlay. The game thread
+//!   never blocks on UI work.
+//!
+//! - **Immediate mode with persistent state.** Each frame, your [`UiDrawFn`]
+//!   implementation receives `&mut self`, the current [`UiInputState`], and a
+//!   [`Canvas`]. You draw rects, text, and clipped regions imperatively. Because
+//!   the trait takes `&mut self`, you can keep animation timers, scroll offsets,
+//!   selection indices, and other UI-only state directly on your struct — no ECS
+//!   needed.
+//!
+//! - **GPU batching.** Every primitive (solid rect, glyph quad) becomes a
+//!   textured quad. Solid rects sample a 1×1 white pixel in the atlas. Glyphs
+//!   are rasterized with `cosmic-text` and packed into the atlas with `etagere`.
+//!   The draw list is sorted into batches and rendered in a single draw call per
+//!   batch with alpha blending.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! Game thread (ECS)              UI thread                Render world
+//! ─────────────────              ─────────                ────────────
+//! forward_input_to_ui ──input──► UiInputState
+//!   (keyboard, mouse,            draw_fn.draw()
+//!    gamepad→KeyCode)            Canvas → Vec<DrawCmd>
+//!                                GlyphCache rasterizes
+//!                                  ──UiFrame──►          extract_ui_frame
+//!                                                        prepare_ui_buffers
+//!                                                        UiOverlayNode::run
+//!                                  ◄──UiEvent──
+//! drain_ui_events ◄──────────────
+//! ```
+//!
+//! ### Data flow
+//!
+//! 1. **Input forwarding** (`PreUpdate`): Bevy keyboard, mouse, and gamepad
+//!    events are translated into [`UiInput`](bridge::UiInput) messages and sent
+//!    to the UI thread. Gamepad buttons are mapped to `KeyCode` equivalents so
+//!    the UI thread receives a single unified input stream.
+//!
+//! 2. **UI thread loop**: Drains input, calls your `draw()`, collects draw
+//!    commands and atlas uploads into a [`UiFrame`](bridge::UiFrame), and sends
+//!    it to the render world via channel.
+//!
+//! 3. **Extract** (`ExtractSchedule`): Drains the frame channel, keeping the
+//!    latest frame but accumulating *all* atlas uploads (the UI thread outpaces
+//!    the render world, so dropped frames' glyph uploads must not be lost).
+//!
+//! 4. **Prepare**: Builds GPU vertex/index buffers, uploads atlas dirty rects,
+//!    and specializes the render pipeline for the current swapchain format.
+//!
+//! 5. **Render**: A `ViewNode` draws the batched quads as a full-screen overlay
+//!    with alpha blending on top of the 3D scene.
+//!
+//! ### Game ↔ UI communication
+//!
+//! The UI crate provides the *transport* (channels, input state, canvas, draw
+//! commands) but not the *protocol*. Your game defines its own data types and
+//! creates its own crossbeam channels:
+//!
+//! ```rust,ignore
+//! // Game-side types (plain Rust, no ECS)
+//! struct MyUiData { health: f32, inventory_open: bool, items: Vec<Item> }
+//! enum MyUiEvent { ItemSelected(usize), MenuClosed }
+//!
+//! // Your UiDrawFn holds receivers/senders for these
+//! struct MyGameUi {
+//!     data_rx: Receiver<MyUiData>,
+//!     event_tx: Sender<MyUiEvent>,
+//!     data: MyUiData,
+//!     // ... UI-thread-only mutable state
+//! }
+//!
+//! impl UiDrawFn for MyGameUi {
+//!     fn draw(&mut self, input: &UiInputState, canvas: &mut Canvas) {
+//!         while let Ok(d) = self.data_rx.try_recv() { self.data = d; }
+//!         canvas.rect(0.0, 0.0, 200.0, 24.0, [0.1, 0.1, 0.1, 0.8]);
+//!         canvas.text(8.0, 4.0, "Hello", 16.0, [1.0; 4]);
+//!     }
+//! }
+//! ```
+//!
+//! On the game side, wrap the senders/receivers in Bevy resources and use
+//! systems to push data and drain events. Use a `UiInputBlock`-style resource
+//! with run conditions to suppress player input while menus are open.
+//!
+//! ## Modules
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`atlas`] | CPU-side RGBA atlas with `etagere` rect packing |
+//! | [`bridge`] | Channel types, `UiInputState`, `UiFrame`, `UiEvent` |
+//! | [`canvas`] | Immediate-mode drawing API (`rect`, `text`, `push_clip`, `hit_test`) |
+//! | [`draw_cmd`] | `DrawCmd` → `UiVertex` batch builder |
+//! | [`glyph`] | `cosmic-text` glyph rasterization + atlas insertion |
+//! | [`render`] | Bevy render-world extract/prepare/node pipeline |
+//! | [`thread`] | `UiDrawFn` trait + UI thread spawn/loop |
+
 pub mod atlas;
 pub mod bridge;
 pub mod canvas;
