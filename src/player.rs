@@ -5,6 +5,7 @@ use bevy_tnua::builtins::{TnuaBuiltinJumpConfig, TnuaBuiltinWalkConfig};
 use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
 use crate::network::LocalPlayer;
 use crate::player_state::PlayerState;
+use crate::UiInputBlock;
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dSensorShape;
 
@@ -13,7 +14,11 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_player)
-            .add_systems(Update, (player_input, player_lean));
+            .add_systems(
+                Update,
+                (player_input, player_lean)
+                    .run_if(|block: Res<UiInputBlock>| !block.0),
+            );
     }
 }
 

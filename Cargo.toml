@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/voxel"]
+members = ["crates/voxel", "crates/ui"]
 
 [package]
 name = "jumpblocks"
@@ -9,10 +9,12 @@ edition = "2024"
 [dependencies]
 jumpblocks_voxel = { path = "crates/voxel" }
 bevy = "0.18.1"
+jumpblocks-ui = { path = "crates/ui" }
 avian3d = "0.5"
 bevy-tnua = "0.30"
 bevy-tnua-avian3d = "0.10"
 bevy_egui = "0.39"
+crossbeam-channel = "0.5.15"
 lightyear = { version = "0.26", features = ["udp", "netcode"] }
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
