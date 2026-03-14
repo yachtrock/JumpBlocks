@@ -13,6 +13,9 @@ pub struct Atlas {
     pub pending_uploads: Vec<AtlasUpload>,
     /// True if the atlas was resized and needs a full re-upload.
     pub needs_full_upload: bool,
+    /// Position of the 2×2 white pixel block, as allocated by the packer.
+    white_pixel_x: u32,
+    white_pixel_y: u32,
 }
 
 /// A region allocated in the atlas.
@@ -45,21 +48,8 @@ impl Atlas {
         let height = INITIAL_ATLAS_SIZE;
         let mut pixels = vec![0u8; (width * height * 4) as usize];
 
-        // Reserve top-left 2x2 as white pixels for solid-color rects.
-        for y in 0..2 {
-            for x in 0..2 {
-                let offset = ((y * width + x) * 4) as usize;
-                pixels[offset] = 255;
-                pixels[offset + 1] = 255;
-                pixels[offset + 2] = 255;
-                pixels[offset + 3] = 255;
-            }
-        }
-
         let packer = BucketedAtlasAllocator::new(size2(width as i32, height as i32));
 
-        // Allocate the white pixel region so the packer doesn't reuse it.
-        // We do a small 2x2 allocation.
         let mut atlas = Self {
             pixels,
             width,
@@ -67,19 +57,38 @@ impl Atlas {
             packer,
             pending_uploads: Vec::new(),
             needs_full_upload: true,
+            white_pixel_x: 0,
+            white_pixel_y: 0,
         };
 
-        // Reserve the white pixel area
-        let _ = atlas.packer.allocate(size2(2, 2));
+        // Allocate a 2×2 block through the packer and write white pixels there.
+        // Using the packer's returned position (not hardcoded 0,0) ensures the
+        // white pixel region is actually protected from future glyph allocations.
+        let alloc = atlas.packer.allocate(size2(2, 2))
+            .expect("failed to allocate white pixel in fresh atlas");
+        let wp_x = alloc.rectangle.min.x as u32;
+        let wp_y = alloc.rectangle.min.y as u32;
+        atlas.white_pixel_x = wp_x;
+        atlas.white_pixel_y = wp_y;
+
+        for y in 0..2u32 {
+            for x in 0..2u32 {
+                let offset = (((wp_y + y) * width + wp_x + x) * 4) as usize;
+                atlas.pixels[offset] = 255;
+                atlas.pixels[offset + 1] = 255;
+                atlas.pixels[offset + 2] = 255;
+                atlas.pixels[offset + 3] = 255;
+            }
+        }
 
         atlas
     }
 
-    /// UV coordinates for the 1x1 white pixel (center of the 2x2 block).
+    /// UV coordinates for the 1×1 white pixel (center of the 2×2 block).
     pub fn white_pixel_uvs(&self) -> [f32; 4] {
-        let half_texel_x = 0.5 / self.width as f32;
-        let half_texel_y = 0.5 / self.height as f32;
-        [half_texel_x, half_texel_y, half_texel_x, half_texel_y]
+        let u = (self.white_pixel_x as f32 + 0.5) / self.width as f32;
+        let v = (self.white_pixel_y as f32 + 0.5) / self.height as f32;
+        [u, v, u, v]
     }
 
     /// Allocate a region and copy pixel data into it.

@@ -114,6 +114,7 @@ pub mod atlas;
 pub mod bridge;
 pub mod canvas;
 pub mod draw_cmd;
+pub mod ffd;
 pub mod glyph;
 pub mod render;
 pub mod thread;

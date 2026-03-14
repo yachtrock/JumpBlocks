@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use crate::draw_cmd::DrawCmd;
+use crate::draw_cmd::DrawOp;
 
 /// Dirty rect to upload to the atlas GPU texture.
 #[derive(Clone, Debug)]
@@ -18,7 +18,7 @@ pub struct AtlasUpload {
 /// One frame's worth of UI draw output.
 #[derive(Debug)]
 pub struct UiFrame {
-    pub commands: Vec<DrawCmd>,
+    pub commands: Vec<DrawOp>,
     pub atlas_uploads: Vec<AtlasUpload>,
     pub atlas_size: (u32, u32),
     pub dpi_scale: f32,
