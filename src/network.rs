@@ -88,21 +88,29 @@ impl Plugin for NetworkPlugin {
                 app.add_plugins(ProtocolPlugin);
                 app.add_systems(Startup, setup_listen_server);
                 app.add_systems(Update, handle_new_client_connections);
-                app.add_systems(Update, sync_local_player_to_network);
+                app.add_systems(
+                    Update,
+                    sync_local_player_to_network.run_if(any_with_component::<Connected>),
+                );
                 app.add_systems(Update, sync_network_to_remote_players);
+                app.add_systems(Update, server_replicate_received_entities);
             }
             NetworkRole::DedicatedServer => {
                 app.add_plugins(server::ServerPlugins { tick_duration });
                 app.add_plugins(ProtocolPlugin);
                 app.add_systems(Startup, setup_dedicated_server);
                 app.add_systems(Update, handle_new_client_connections);
+                app.add_systems(Update, server_replicate_received_entities);
             }
             NetworkRole::Client { server_addr } => {
                 app.insert_resource(ClientServerAddr(*server_addr));
                 app.add_plugins(client::ClientPlugins { tick_duration });
                 app.add_plugins(ProtocolPlugin);
                 app.add_systems(Startup, setup_client);
-                app.add_systems(Update, sync_local_player_to_network);
+                app.add_systems(
+                    Update,
+                    sync_local_player_to_network.run_if(any_with_component::<Connected>),
+                );
                 app.add_systems(Update, sync_network_to_remote_players);
             }
         }
@@ -238,6 +246,27 @@ fn sync_local_player_to_network(
                 replicate,
             ));
         }
+    }
+}
+
+/// On the server, when we receive a replicated entity from a client, re-replicate it
+/// to all other clients so everyone can see each other.
+fn server_replicate_received_entities(
+    mut commands: Commands,
+    new_entities: Query<
+        Entity,
+        (
+            Added<Replicated>,
+            With<NetworkedPosition>,
+            Without<Replicate>,
+        ),
+    >,
+) {
+    for entity in new_entities.iter() {
+        info!("Server re-replicating entity {:?} to all clients", entity);
+        commands
+            .entity(entity)
+            .insert(Replicate::to_clients(NetworkTarget::All));
     }
 }
 
