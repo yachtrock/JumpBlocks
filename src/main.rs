@@ -73,6 +73,19 @@ struct InventoryState {
 // GameUi — the UiDrawFn implementation with mutable state
 // ---------------------------------------------------------------------------
 
+/// Inventory panel animation phase.
+#[derive(Clone, Copy, PartialEq)]
+enum InvPhase {
+    /// Not visible.
+    Hidden,
+    /// Scaling up from 0.6 → 1.0.
+    Opening,
+    /// Fully open and interactive.
+    Open,
+    /// Scaling down from current → 0.6, then disappears.
+    Closing,
+}
+
 struct GameUi {
     data_rx: Receiver<GameUiData>,
     event_tx: Sender<GameUiEvent>,
@@ -82,7 +95,9 @@ struct GameUi {
     cursor_pulse: f32,
     // FFD jiggle sim for the inventory panel
     inv_ffd: Option<FfdSim>,
-    was_inventory_open: bool,
+    inv_phase: InvPhase,
+    /// Current scale factor for the inventory panel (0.6–1.0).
+    inv_scale: f32,
 }
 
 impl UiDrawFn for GameUi {
@@ -93,18 +108,61 @@ impl UiDrawFn for GameUi {
         }
 
         let win = canvas.window_size();
+        let dt = 1.0 / 120.0;
 
         // --- Always draw HUD ---
         draw_hud(canvas, &self.data, win);
 
-        // --- Inventory overlay ---
-        if self.data.inventory_open {
-            self.cursor_pulse += 0.08;
-            let items = &self.data.items;
-            let cols = 4usize;
-            let rows = (items.len() + cols - 1) / cols;
+        // --- Phase transitions ---
+        // Game wants inventory open but we're hidden → start opening
+        if self.data.inventory_open && self.inv_phase == InvPhase::Hidden {
+            self.inv_phase = InvPhase::Opening;
+            self.inv_scale = 0.6;
+        }
+        // Game wants inventory closed but we're open → start closing
+        if !self.data.inventory_open && self.inv_phase == InvPhase::Open {
+            self.inv_phase = InvPhase::Closing;
+            // Pop inward on close
+            if let Some(ffd) = &mut self.inv_ffd {
+                ffd.pop(-12.0);
+            }
+        }
 
-            // Navigation
+        // --- Animate scale ---
+        const OPEN_SPEED: f32 = 3.5;  // scale units per second
+        const CLOSE_SPEED: f32 = 5.0; // faster close
+
+        match self.inv_phase {
+            InvPhase::Opening => {
+                self.inv_scale += OPEN_SPEED * dt;
+                if self.inv_scale >= 1.0 {
+                    self.inv_scale = 1.0;
+                    self.inv_phase = InvPhase::Open;
+                }
+            }
+            InvPhase::Closing => {
+                self.inv_scale -= CLOSE_SPEED * dt;
+                if self.inv_scale <= 0.6 {
+                    self.inv_scale = 0.6;
+                    self.inv_phase = InvPhase::Hidden;
+                    self.inv_ffd = None;
+                }
+            }
+            _ => {}
+        }
+
+        // --- Draw inventory if visible ---
+        if self.inv_phase == InvPhase::Hidden {
+            return;
+        }
+
+        self.cursor_pulse += 0.08;
+        let items = &self.data.items;
+        let cols = 4usize;
+        let rows = (items.len() + cols - 1) / cols;
+
+        // Only handle input when fully open
+        if self.inv_phase == InvPhase::Open {
             if input.key_just_pressed(KeyCode::ArrowRight) {
                 self.selected_slot = (self.selected_slot + 1).min(items.len().saturating_sub(1));
             }
@@ -128,120 +186,157 @@ impl UiDrawFn for GameUi {
             if input.key_just_pressed(KeyCode::Escape) {
                 let _ = self.event_tx.send(GameUiEvent::InventoryClosed);
             }
-
-            // Layout
-            let panel_w = 480.0f32;
-            let panel_h = 60.0 + rows as f32 * 80.0 + 80.0; // title + grid + detail
-            let panel_x = (win.x - panel_w) * 0.5;
-            let panel_y = (win.y - panel_h) * 0.5;
-
-            // --- FFD: create/resize sim to match panel, pop on open ---
-            let just_opened = !self.was_inventory_open;
-            let ffd = self.inv_ffd.get_or_insert_with(|| FfdSim::new(panel_x, panel_y, panel_w, panel_h));
-            if just_opened {
-                ffd.resize(panel_x, panel_y, panel_w, panel_h);
-                ffd.pop(20.0);
-                ffd.jiggle(8.0, 42);
-            }
-            // Add a jiggle on item selection changes
-            if input.key_just_pressed(KeyCode::ArrowRight)
-                || input.key_just_pressed(KeyCode::ArrowLeft)
-                || input.key_just_pressed(KeyCode::ArrowDown)
-                || input.key_just_pressed(KeyCode::ArrowUp)
-            {
-                ffd.jiggle(5.0, self.selected_slot as u32 + 100);
-            }
-            // Step the sim (~120fps, so dt ≈ 1/120)
-            let dt = 1.0 / 120.0;
-            ffd.step(dt);
-
-            // Dim background (outside FFD — we don't want this warped)
-            canvas.rect(0.0, 0.0, win.x, win.y, [0.0, 0.0, 0.0, 0.5]);
-
-            // --- Begin FFD-warped drawing for the panel ---
-            canvas.begin_ffd(ffd);
-
-            // Panel background
-            canvas.rect(panel_x, panel_y, panel_w, panel_h, [0.12, 0.12, 0.18, 0.95]);
-            // Panel border
-            canvas.rect(panel_x, panel_y, panel_w, 2.0, [0.4, 0.4, 0.6, 1.0]);
-            canvas.rect(panel_x, panel_y + panel_h - 2.0, panel_w, 2.0, [0.4, 0.4, 0.6, 1.0]);
-            canvas.rect(panel_x, panel_y, 2.0, panel_h, [0.4, 0.4, 0.6, 1.0]);
-            canvas.rect(panel_x + panel_w - 2.0, panel_y, 2.0, panel_h, [0.4, 0.4, 0.6, 1.0]);
-
-            // Title
-            canvas.text(
-                panel_x + 16.0, panel_y + 16.0,
-                "INVENTORY", 22.0,
-                [0.9, 0.85, 0.6, 1.0],
-            );
-            canvas.text(
-                panel_x + panel_w - 160.0, panel_y + 20.0,
-                "[ESC] Close", 13.0,
-                [0.6, 0.6, 0.6, 1.0],
-            );
-
-            // Item grid
-            let grid_x = panel_x + 16.0;
-            let grid_y = panel_y + 52.0;
-            let cell_w = (panel_w - 32.0 - (cols as f32 - 1.0) * 8.0) / cols as f32;
-            let cell_h = 72.0;
-
-            for (i, item) in items.iter().enumerate() {
-                let col = i % cols;
-                let row = i / cols;
-                let cx = grid_x + col as f32 * (cell_w + 8.0);
-                let cy = grid_y + row as f32 * (cell_h + 8.0);
-
-                // Cell background
-                let is_selected = i == self.selected_slot;
-                let bg = if is_selected {
-                    let pulse = (self.cursor_pulse.sin() * 0.15 + 0.35).clamp(0.2, 0.5);
-                    [0.3, 0.3, pulse + 0.3, 0.9]
-                } else {
-                    [0.18, 0.18, 0.24, 0.8]
-                };
-                canvas.rect(cx, cy, cell_w, cell_h, bg);
-
-                // Selection border
-                if is_selected {
-                    let b = (self.cursor_pulse.sin() * 0.3 + 0.7).clamp(0.4, 1.0);
-                    canvas.rect(cx, cy, cell_w, 2.0, [0.5, 0.5, b, 1.0]);
-                    canvas.rect(cx, cy + cell_h - 2.0, cell_w, 2.0, [0.5, 0.5, b, 1.0]);
-                    canvas.rect(cx, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0]);
-                    canvas.rect(cx + cell_w - 2.0, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0]);
-                }
-
-                // Item icon (colored rect)
-                canvas.rect(cx + 8.0, cy + 8.0, 32.0, 32.0, item.color);
-
-                // Item name
-                canvas.text(cx + 8.0, cy + 46.0, &item.name, 12.0, [0.9, 0.9, 0.9, 1.0]);
-            }
-
-            // Detail panel for selected item
-            if let Some(item) = items.get(self.selected_slot) {
-                let detail_y = grid_y + rows as f32 * (cell_h + 8.0) + 8.0;
-                canvas.rect(grid_x, detail_y, panel_w - 32.0, 1.0, [0.4, 0.4, 0.5, 0.6]);
-                canvas.text(
-                    grid_x, detail_y + 10.0,
-                    &item.name, 16.0,
-                    [1.0, 1.0, 1.0, 1.0],
-                );
-                canvas.text(
-                    grid_x, detail_y + 32.0,
-                    &item.description, 13.0,
-                    [0.7, 0.7, 0.7, 1.0],
-                );
-            }
-
-            // --- End FFD-warped drawing ---
-            canvas.end_ffd();
-        } else {
-            // Inventory closed — drop the FFD sim so it resets on next open
-            self.inv_ffd = None;
         }
-        self.was_inventory_open = self.data.inventory_open;
+
+        // Full-size layout (before scale)
+        let full_w = 480.0f32;
+        let full_h = 60.0 + rows as f32 * 80.0 + 80.0;
+        let center_x = win.x * 0.5;
+        let center_y = win.y * 0.5;
+
+        // Scaled layout
+        let panel_w = full_w * self.inv_scale;
+        let panel_h = full_h * self.inv_scale;
+        let panel_x = center_x - panel_w * 0.5;
+        let panel_y = center_y - panel_h * 0.5;
+
+        // Scale factor for positioning child elements
+        let s = self.inv_scale;
+
+        // --- FFD sim ---
+        let ffd = self.inv_ffd.get_or_insert_with(|| {
+            let mut sim = FfdSim::new(panel_x, panel_y, panel_w, panel_h);
+            sim.pop(20.0);
+            sim.jiggle(8.0, 42);
+            sim
+        });
+
+        // Keep FFD in sync with current scaled rect
+        let [rx, ry, rw, rh] = ffd.rest_rect();
+        if (rx - panel_x).abs() > 0.5 || (ry - panel_y).abs() > 0.5
+            || (rw - panel_w).abs() > 0.5 || (rh - panel_h).abs() > 0.5
+        {
+            ffd.resize(panel_x, panel_y, panel_w, panel_h);
+        }
+
+        // Localized directional impulse on dpad navigation
+        if self.inv_phase == InvPhase::Open {
+            let grid_x = panel_x + 16.0 * s;
+            let grid_y = panel_y + 52.0 * s;
+            let cell_w = (panel_w - 32.0 * s - (cols as f32 - 1.0) * 8.0 * s) / cols as f32;
+            let cell_h = 72.0 * s;
+
+            // Center of the selected item cell
+            let sel_col = self.selected_slot % cols;
+            let sel_row = self.selected_slot / cols;
+            let sel_cx = grid_x + sel_col as f32 * (cell_w + 8.0 * s) + cell_w * 0.5;
+            let sel_cy = grid_y + sel_row as f32 * (cell_h + 8.0 * s) + cell_h * 0.5;
+            let impulse_strength = 10.0;
+            let impulse_radius = panel_w * 0.4;
+
+            if input.key_just_pressed(KeyCode::ArrowRight) {
+                ffd.impulse_at(sel_cx, sel_cy, impulse_strength, 0.0, impulse_radius);
+            }
+            if input.key_just_pressed(KeyCode::ArrowLeft) {
+                ffd.impulse_at(sel_cx, sel_cy, -impulse_strength, 0.0, impulse_radius);
+            }
+            if input.key_just_pressed(KeyCode::ArrowDown) {
+                ffd.impulse_at(sel_cx, sel_cy, 0.0, impulse_strength, impulse_radius);
+            }
+            if input.key_just_pressed(KeyCode::ArrowUp) {
+                ffd.impulse_at(sel_cx, sel_cy, 0.0, -impulse_strength, impulse_radius);
+            }
+        }
+
+        ffd.step(dt);
+
+        // Dim background (outside FFD)
+        let dim_alpha = match self.inv_phase {
+            InvPhase::Opening => (self.inv_scale - 0.6) / 0.4 * 0.5,
+            InvPhase::Closing => (self.inv_scale - 0.6) / 0.4 * 0.5,
+            _ => 0.5,
+        };
+        canvas.rect(0.0, 0.0, win.x, win.y, [0.0, 0.0, 0.0, dim_alpha]);
+
+        // --- Begin FFD-warped drawing ---
+        canvas.begin_ffd(ffd);
+
+        // Panel background
+        canvas.rect(panel_x, panel_y, panel_w, panel_h, [0.12, 0.12, 0.18, 0.95]);
+        // Panel border
+        canvas.rect(panel_x, panel_y, panel_w, 2.0, [0.4, 0.4, 0.6, 1.0]);
+        canvas.rect(panel_x, panel_y + panel_h - 2.0, panel_w, 2.0, [0.4, 0.4, 0.6, 1.0]);
+        canvas.rect(panel_x, panel_y, 2.0, panel_h, [0.4, 0.4, 0.6, 1.0]);
+        canvas.rect(panel_x + panel_w - 2.0, panel_y, 2.0, panel_h, [0.4, 0.4, 0.6, 1.0]);
+
+        // Title
+        canvas.text(
+            panel_x + 16.0 * s, panel_y + 16.0 * s,
+            "INVENTORY", 22.0 * s,
+            [0.9, 0.85, 0.6, 1.0],
+        );
+        canvas.text(
+            panel_x + panel_w - 160.0 * s, panel_y + 20.0 * s,
+            "[ESC] Close", 13.0 * s,
+            [0.6, 0.6, 0.6, 1.0],
+        );
+
+        // Item grid
+        let grid_x = panel_x + 16.0 * s;
+        let grid_y = panel_y + 52.0 * s;
+        let cell_w = (panel_w - 32.0 * s - (cols as f32 - 1.0) * 8.0 * s) / cols as f32;
+        let cell_h = 72.0 * s;
+
+        for (i, item) in items.iter().enumerate() {
+            let col = i % cols;
+            let row = i / cols;
+            let cx = grid_x + col as f32 * (cell_w + 8.0 * s);
+            let cy = grid_y + row as f32 * (cell_h + 8.0 * s);
+
+            // Cell background
+            let is_selected = i == self.selected_slot;
+            let bg = if is_selected {
+                let pulse = (self.cursor_pulse.sin() * 0.15 + 0.35).clamp(0.2, 0.5);
+                [0.3, 0.3, pulse + 0.3, 0.9]
+            } else {
+                [0.18, 0.18, 0.24, 0.8]
+            };
+            canvas.rect(cx, cy, cell_w, cell_h, bg);
+
+            // Selection border
+            if is_selected {
+                let b = (self.cursor_pulse.sin() * 0.3 + 0.7).clamp(0.4, 1.0);
+                canvas.rect(cx, cy, cell_w, 2.0, [0.5, 0.5, b, 1.0]);
+                canvas.rect(cx, cy + cell_h - 2.0, cell_w, 2.0, [0.5, 0.5, b, 1.0]);
+                canvas.rect(cx, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0]);
+                canvas.rect(cx + cell_w - 2.0, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0]);
+            }
+
+            // Item icon (colored rect)
+            canvas.rect(cx + 8.0 * s, cy + 8.0 * s, 32.0 * s, 32.0 * s, item.color);
+
+            // Item name
+            canvas.text(cx + 8.0 * s, cy + 46.0 * s, &item.name, 12.0 * s, [0.9, 0.9, 0.9, 1.0]);
+        }
+
+        // Detail panel for selected item
+        if let Some(item) = items.get(self.selected_slot) {
+            let detail_y = grid_y + rows as f32 * (cell_h + 8.0 * s) + 8.0 * s;
+            canvas.rect(grid_x, detail_y, panel_w - 32.0 * s, 1.0, [0.4, 0.4, 0.5, 0.6]);
+            canvas.text(
+                grid_x, detail_y + 10.0 * s,
+                &item.name, 16.0 * s,
+                [1.0, 1.0, 1.0, 1.0],
+            );
+            canvas.text(
+                grid_x, detail_y + 32.0 * s,
+                &item.description, 13.0 * s,
+                [0.7, 0.7, 0.7, 1.0],
+            );
+        }
+
+        // --- End FFD-warped drawing ---
+        canvas.end_ffd();
     }
 }
 
@@ -430,7 +525,8 @@ fn main() {
         selected_slot: 0,
         cursor_pulse: 0.0,
         inv_ffd: None,
-        was_inventory_open: false,
+        inv_phase: InvPhase::Hidden,
+        inv_scale: 0.6,
     };
 
     let items = make_dummy_items();

@@ -219,6 +219,27 @@ impl FfdSim {
         }
     }
 
+    /// Apply a localized impulse at a screen-space position.
+    ///
+    /// Each control point receives the impulse scaled by a Gaussian falloff
+    /// based on its distance from `(px, py)`. `radius` controls how far the
+    /// influence spreads (in pixels). Points within ~1 radius get strong
+    /// impulse; beyond ~2 radii it's negligible.
+    pub fn impulse_at(&mut self, px: f32, py: f32, vx: f32, vy: f32, radius: f32) {
+        let inv_r2 = 1.0 / (radius * radius);
+        for i in 0..NUM_POINTS {
+            let dx = self.rest[i][0] - px;
+            let dy = self.rest[i][1] - py;
+            let d2 = dx * dx + dy * dy;
+            let weight = (-d2 * inv_r2).exp();
+            if weight < 0.01 {
+                continue;
+            }
+            self.old_pos[i][0] -= vx * weight;
+            self.old_pos[i][1] -= vy * weight;
+        }
+    }
+
     /// Apply a "jiggle" — random-ish impulse that creates lively bouncy motion.
     /// `strength` is the magnitude in pixels/frame of the impulse.
     /// Uses a simple deterministic pattern rather than true randomness.
