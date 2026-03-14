@@ -16,6 +16,7 @@ use bevy_tnua_avian3d::TnuaAvian3dPlugin;
 use clap::Parser;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use jumpblocks_ui::{Canvas, UiInputState, UiPlugin};
+use jumpblocks_ui::ffd::FfdSim;
 use jumpblocks_ui::thread::UiDrawFn;
 use std::net::SocketAddr;
 
@@ -79,6 +80,9 @@ struct GameUi {
     // UI-thread-only state
     selected_slot: usize,
     cursor_pulse: f32,
+    // FFD jiggle sim for the inventory panel
+    inv_ffd: Option<FfdSim>,
+    was_inventory_open: bool,
 }
 
 impl UiDrawFn for GameUi {
@@ -131,8 +135,31 @@ impl UiDrawFn for GameUi {
             let panel_x = (win.x - panel_w) * 0.5;
             let panel_y = (win.y - panel_h) * 0.5;
 
-            // Dim background
+            // --- FFD: create/resize sim to match panel, pop on open ---
+            let just_opened = !self.was_inventory_open;
+            let ffd = self.inv_ffd.get_or_insert_with(|| FfdSim::new(panel_x, panel_y, panel_w, panel_h));
+            if just_opened {
+                ffd.resize(panel_x, panel_y, panel_w, panel_h);
+                ffd.pop(6.0);
+                ffd.jiggle(2.0, 42);
+            }
+            // Add a small jiggle on item selection changes
+            if input.key_just_pressed(KeyCode::ArrowRight)
+                || input.key_just_pressed(KeyCode::ArrowLeft)
+                || input.key_just_pressed(KeyCode::ArrowDown)
+                || input.key_just_pressed(KeyCode::ArrowUp)
+            {
+                ffd.jiggle(1.5, self.selected_slot as u32 + 100);
+            }
+            // Step the sim (~120fps, so dt ≈ 1/120)
+            let dt = 1.0 / 120.0;
+            ffd.step(dt);
+
+            // Dim background (outside FFD — we don't want this warped)
             canvas.rect(0.0, 0.0, win.x, win.y, [0.0, 0.0, 0.0, 0.5]);
+
+            // --- Begin FFD-warped drawing for the panel ---
+            canvas.begin_ffd(ffd);
 
             // Panel background
             canvas.rect(panel_x, panel_y, panel_w, panel_h, [0.12, 0.12, 0.18, 0.95]);
@@ -207,7 +234,14 @@ impl UiDrawFn for GameUi {
                     [0.7, 0.7, 0.7, 1.0],
                 );
             }
+
+            // --- End FFD-warped drawing ---
+            canvas.end_ffd();
+        } else {
+            // Inventory closed — drop the FFD sim so it resets on next open
+            self.inv_ffd = None;
         }
+        self.was_inventory_open = self.data.inventory_open;
     }
 }
 
@@ -395,6 +429,8 @@ fn main() {
         data: GameUiData::default(),
         selected_slot: 0,
         cursor_pulse: 0.0,
+        inv_ffd: None,
+        was_inventory_open: false,
     };
 
     let items = make_dummy_items();
