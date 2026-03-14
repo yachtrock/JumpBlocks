@@ -61,7 +61,9 @@ fn spawn_player(
 
     let config_handle = configs.add(ControlSchemeConfig {
         basis: TnuaBuiltinWalkConfig {
-            float_height: 1.0,
+            float_height: 1.5,
+            spring_strength: 1600.0,
+            cling_distance: 0.5,
             speed: 10.0,
             acceleration: 20.0,
             air_acceleration: 15.0,

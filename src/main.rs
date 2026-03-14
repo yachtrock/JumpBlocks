@@ -32,6 +32,7 @@ fn main() {
             TnuaAvian3dPlugin::new(PhysicsSchedule),
         ))
         .add_plugins((
+            jumpblocks_voxel::VoxelPlugin,
             world::WorldPlugin,
             player::PlayerPlugin,
             camera::CameraPlugin,

@@ -1,5 +1,6 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use jumpblocks_voxel::chunk::{Chunk, ChunkData};
 
 use crate::layers::GameLayer;
 
@@ -70,4 +71,45 @@ fn setup_world(
         brightness: 300.0,
         ..default()
     });
+
+    // Demo voxel chunk — a staircase the player can climb
+    let mut chunk_data = ChunkData::new();
+
+    // Ground layer: a 10x10 platform, single voxel tall (0.5 world units)
+    for x in 0..10 {
+        for z in 0..10 {
+            chunk_data.set_filled(x, 0, z, true);
+        }
+    }
+
+    // Staircase: each step is 1 voxel tall (0.5 world units), 3 wide
+    for step in 0..8 {
+        let y_base = 1 + step;
+        for x in 0..3 {
+            for z in 0..3 {
+                chunk_data.set_filled(x + step, y_base, z + 3, true);
+            }
+        }
+    }
+
+    // A small tower at the top
+    for y in 9..18 {
+        for x in 8..11 {
+            for z in 3..6 {
+                chunk_data.set_filled(x, y, z, true);
+            }
+        }
+    }
+
+    let chunk_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.6, 0.5, 0.4),
+        ..default()
+    });
+
+    commands.spawn((
+        Chunk::new(chunk_data),
+        MeshMaterial3d(chunk_material),
+        Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
+        CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
+    ));
 }
