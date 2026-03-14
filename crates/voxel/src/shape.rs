@@ -109,7 +109,7 @@ impl FaceSide {
                     FaceSide::West => 3,
                     _ => unreachable!(),
                 };
-                match (base + steps) % 4 {
+                match (base + 4 - steps) % 4 {
                     0 => FaceSide::North,
                     1 => FaceSide::East,
                     2 => FaceSide::South,
@@ -422,7 +422,7 @@ fn wedge_shape() -> VoxelShape {
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] }, // bottom
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right
-                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },    // top (ridge)
+                // Ridge (top) omitted — internal edge shared with slope face
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left
             ],
             chamfer_mode: ChamferMode::Hard,
@@ -435,9 +435,9 @@ fn wedge_shape() -> VoxelShape {
             normal: Vec3::new(0.0, 1.0, 1.0).normalize(),
             side: FaceSide::None, // diagonal — no single neighbor can occlude
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Top] },    // top/ridge (left→right)
+                // Ridge (top) omitted — internal edge shared with back face
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right diagonal (top→bottom)
-                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::North] },  // bottom/front (right→left)
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::North, FaceSide::Bottom] },  // bottom/front (right→left)
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left diagonal (bottom→top)
             ],
             chamfer_mode: ChamferMode::Smooth,
@@ -450,7 +450,7 @@ fn wedge_shape() -> VoxelShape {
             side: FaceSide::West,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (bottom→top)
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![] },   // hypotenuse (slope junction)
+                // Hypotenuse omitted — internal edge shared with slope face
                 VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (front→back)
             ],
             chamfer_mode: ChamferMode::Hard,
@@ -463,7 +463,7 @@ fn wedge_shape() -> VoxelShape {
             side: FaceSide::East,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (back→front)
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![] },   // hypotenuse (slope junction)
+                // Hypotenuse omitted — internal edge shared with slope face
                 VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (top→bottom)
             ],
             chamfer_mode: ChamferMode::Hard,

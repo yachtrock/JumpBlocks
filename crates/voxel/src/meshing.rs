@@ -351,7 +351,9 @@ fn emit_chamfered_face(
     let ivy = vy as i32;
     let ivz = vz as i32;
 
-    // Determine which edges need chamfering (have no filled neighbor on any side).
+    // Determine which edges need chamfering.
+    // An edge is NOT chamfered if ANY of its neighbor_sides has a filled voxel.
+    // (Any filled neighbor means shared geometry at the boundary.)
     // Empty neighbor_sides means always chamfer (internal/diagonal edges).
     let edge_chamfered: Vec<bool> = face
         .edges
