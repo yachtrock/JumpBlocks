@@ -412,6 +412,9 @@ fn chamfered_mesh_no_extra_holes() {
     let woc_result = generate_chunk_mesh(&woc_data, &shapes);
     let (woc_boundary, _, _) = count_edge_sharing(&woc_result.full_res);
     eprintln!("wedge_on_cube boundary edges: {}", woc_boundary);
+    if woc_boundary > 0 {
+        dump_boundary_edges(&woc_result.full_res, "wedge_on_cube");
+    }
     assert!(woc_boundary == 0,
         "wedge_on_cube should have 0 boundary edges, got {}", woc_boundary);
 }
@@ -458,6 +461,50 @@ fn single_cube_edge_sharing() {
     // Non-manifold edges are always bad
     assert!(non_manifold == 0,
         "single cube should have no non-manifold edges, got {}", non_manifold);
+}
+
+/// Dump positions of boundary edges (holes) for debugging.
+fn dump_boundary_edges(mesh: &ChunkMeshData, label: &str) {
+    type PosKey = (i32, i32, i32);
+    type EdgeKey = (PosKey, PosKey);
+
+    fn sorted_edge(a: PosKey, b: PosKey) -> EdgeKey {
+        if a <= b { (a, b) } else { (b, a) }
+    }
+
+    fn key_to_pos(k: PosKey) -> [f32; 3] {
+        [k.0 as f32 / 10000.0, k.1 as f32 / 10000.0, k.2 as f32 / 10000.0]
+    }
+
+    let mut edge_count: HashMap<EdgeKey, Vec<usize>> = HashMap::new();
+    for i in (0..mesh.indices.len()).step_by(3) {
+        let tri_idx = i / 3;
+        let tri = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
+        for j in 0..3 {
+            let pa = quantize_pos(&mesh.positions[tri[j] as usize]);
+            let pb = quantize_pos(&mesh.positions[tri[(j + 1) % 3] as usize]);
+            let key = sorted_edge(pa, pb);
+            edge_count.entry(key).or_default().push(tri_idx);
+        }
+    }
+
+    let mut boundary_count = 0;
+    for (key, tris) in &edge_count {
+        if tris.len() != 1 { continue; }
+        boundary_count += 1;
+        if boundary_count <= 20 {
+            let p0 = key_to_pos(key.0);
+            let p1 = key_to_pos(key.1);
+            let tri_idx = tris[0];
+            let ti = tri_idx * 3;
+            let n = mesh.normals[mesh.indices[ti] as usize];
+            eprintln!("  {}: BOUNDARY edge ({:.3},{:.3},{:.3})→({:.3},{:.3},{:.3}) tri[{}] normal=({:.3},{:.3},{:.3})",
+                label, p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], tri_idx, n[0], n[1], n[2]);
+        }
+    }
+    if boundary_count > 6 {
+        eprintln!("  {} ... and {} more (total {})", label, boundary_count - 6, boundary_count);
+    }
 }
 
 /// Dump details about non-manifold edges for debugging.

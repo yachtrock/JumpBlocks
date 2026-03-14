@@ -512,13 +512,24 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
                     let sc = &all_strip_clips[ci];
                     // Only use strips owned by the neighbor (not our own voxel)
                     if sc.owning_voxels.contains(&face.voxel) { continue; }
-                    // Only clip against strips from diagonal edges (non-axis-aligned).
-                    // Axis-aligned edges produce strips that stay within voxel bounds.
-                    let ev0_pos = solid.positions[sc.edge_verts[0] as usize];
-                    let ev1_pos = solid.positions[sc.edge_verts[1] as usize];
-                    let diff = (ev1_pos - ev0_pos).abs();
-                    let axis_count = (diff.x > 1e-4) as u8 + (diff.y > 1e-4) as u8 + (diff.z > 1e-4) as u8;
-                    if axis_count < 2 { continue; }
+                    // Only clip against strips whose geometry extends past their
+                    // owning voxels' bounds (diagonal chamfer strips at corners).
+                    let mut owner_min = Vec3::splat(f32::MAX);
+                    let mut owner_max = Vec3::splat(f32::MIN);
+                    for &(ovx, ovy, ovz) in &sc.owning_voxels {
+                        let lo = Vec3::new(ovx as f32 * VOXEL_WIDTH, ovy as f32 * VOXEL_HEIGHT, ovz as f32 * VOXEL_WIDTH);
+                        let hi = lo + Vec3::new(VOXEL_WIDTH, VOXEL_HEIGHT, VOXEL_WIDTH);
+                        owner_min = owner_min.min(lo);
+                        owner_max = owner_max.max(hi);
+                    }
+                    let margin = CHAMFER_WIDTH * 0.5;
+                    let extends = sc.aabb_min.x < owner_min.x - margin
+                        || sc.aabb_max.x > owner_max.x + margin
+                        || sc.aabb_min.y < owner_min.y - margin
+                        || sc.aabb_max.y > owner_max.y + margin
+                        || sc.aabb_min.z < owner_min.z - margin
+                        || sc.aabb_max.z > owner_max.z + margin;
+                    if !extends { continue; }
                     // Only clip if this face's AABB overlaps the strip's AABB
                     let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
                     let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();
@@ -683,8 +694,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             };
 
             // Clip strip against faces of neighboring voxels that the strip
-            // Strips are allowed to extend past voxel boundaries.
-            // Inner faces of neighbor voxels will be clipped to accommodate.
+            // Strips extend past voxel bounds; neighbor faces are clipped to accommodate.
 
             if strip_poly.len() >= 3 {
                 let base = positions.len() as u32;
@@ -740,7 +750,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
                 vec![a0, a1, outer1, outer0]
             };
 
-            // Boundary strips extend freely; neighbor faces are clipped to accommodate.
+            // Boundary strips extend freely.
 
             if strip_poly.len() >= 3 {
                 let strip_normal = expected_out.to_array();
