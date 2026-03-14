@@ -100,6 +100,9 @@ pub struct ScriptEngine {
     shared: Arc<Mutex<Shared>>,
     /// Persistent script state (Rhai Map). Survives hot reloads.
     state: Dynamic,
+    /// Scope populated with module-level constants from `eval_ast`.
+    /// Cloned for each `call_fn` so constants are visible inside functions.
+    base_scope: Scope<'static>,
     script_path: PathBuf,
     last_modified: Option<SystemTime>,
     frame_count: u64,
@@ -114,11 +117,19 @@ impl ScriptEngine {
         let ast = load_script(&engine, &script_path);
         let last_modified = file_mtime(&script_path);
 
+        // Run top-level code (const declarations) to populate scope
+        let mut base_scope = Scope::new();
+        if let Some(ast) = &ast {
+            if let Err(e) = engine.eval_ast_with_scope::<Dynamic>(&mut base_scope, ast) {
+                eprintln!("[rhai] Error evaluating top-level code: {e}");
+            }
+        }
+
         // Try calling init_state() from the script, fall back to defaults
         let state = ast
             .as_ref()
             .and_then(|ast| {
-                let mut scope = Scope::new();
+                let mut scope = base_scope.clone();
                 engine
                     .call_fn::<Dynamic>(&mut scope, ast, "init_state", ())
                     .ok()
@@ -130,6 +141,7 @@ impl ScriptEngine {
             ast,
             shared,
             state,
+            base_scope,
             script_path,
             last_modified,
             frame_count: 0,
@@ -167,7 +179,7 @@ impl ScriptEngine {
 
         // 3. Execute script's draw(state) function
         if let Some(ast) = &self.ast {
-            let mut scope = Scope::new();
+            let mut scope = self.base_scope.clone();
             match self
                 .engine
                 .call_fn::<Dynamic>(&mut scope, ast, "draw", (self.state.clone(),))
@@ -250,6 +262,15 @@ impl ScriptEngine {
                         "[rhai] Hot-reloaded: {} (state preserved)",
                         self.script_path.display()
                     );
+                    // Re-evaluate top-level code to refresh constants
+                    let mut scope = Scope::new();
+                    if let Err(e) =
+                        self.engine
+                            .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
+                    {
+                        eprintln!("[rhai] Error evaluating top-level code: {e}");
+                    }
+                    self.base_scope = scope;
                     self.ast = Some(ast);
                 }
                 None => {
@@ -266,6 +287,9 @@ impl ScriptEngine {
 
 fn build_engine(shared: Arc<Mutex<Shared>>) -> Engine {
     let mut engine = Engine::new();
+
+    // Raise default limits — UI scripts have deep expression nesting
+    engine.set_max_expr_depths(128, 64);
 
     // --- Math helpers ---
     engine.register_fn("min", |a: INT, b: INT| -> INT { a.min(b) });
