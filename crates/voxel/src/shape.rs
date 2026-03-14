@@ -49,6 +49,16 @@ impl Facing {
         Vec3::new(rx + 0.5, p.y, rz + 0.5)
     }
 
+    /// Return the inverse facing (undoes this rotation).
+    pub fn inverse(&self) -> Facing {
+        match self {
+            Facing::North => Facing::North,
+            Facing::East => Facing::West,
+            Facing::South => Facing::South,
+            Facing::West => Facing::East,
+        }
+    }
+
     /// Rotate a normal vector by this facing.
     pub fn rotate_normal(&self, n: Vec3) -> Vec3 {
         match self {
@@ -129,9 +139,10 @@ pub struct VoxelEdge {
     pub v0: usize,
     /// Index of the end vertex in the parent face's vertices.
     pub v1: usize,
-    /// Which neighboring face side this edge borders (for chamfer decisions).
-    /// If the neighbor on this side is solid, the edge won't be chamfered.
-    pub neighbor_side: FaceSide,
+    /// Which neighbor sides this edge borders (for chamfer decisions).
+    /// The edge is NOT chamfered if ANY of these neighbors occludes toward us.
+    /// An empty vec means always chamfer (internal/diagonal edges).
+    pub neighbor_sides: Vec<FaceSide>,
 }
 
 /// A face of a voxel shape.
@@ -151,11 +162,50 @@ pub struct VoxelFace {
     pub chamfer_mode: ChamferMode,
 }
 
+/// Which sides a shape fully occludes in its local frame.
+/// Indexed as [Top, Bottom, North, South, East, West].
+#[derive(Debug, Clone, Copy)]
+pub struct OcclusionMask(pub [bool; 6]);
+
+impl OcclusionMask {
+    /// All sides occluded (full cube).
+    pub const FULL: Self = Self([true; 6]);
+    /// No sides occluded.
+    pub const NONE: Self = Self([false; 6]);
+
+    fn side_index(side: FaceSide) -> Option<usize> {
+        match side {
+            FaceSide::Top => Some(0),
+            FaceSide::Bottom => Some(1),
+            FaceSide::North => Some(2),
+            FaceSide::South => Some(3),
+            FaceSide::East => Some(4),
+            FaceSide::West => Some(5),
+            FaceSide::None => None,
+        }
+    }
+
+    /// Check if a world-space side is occluded, accounting for the voxel's facing.
+    /// `world_side` is the side to check in world space.
+    /// `facing` is the voxel's facing direction.
+    pub fn occludes_world_side(&self, world_side: FaceSide, facing: Facing) -> bool {
+        // Un-rotate world side to local side
+        let local_side = world_side.rotated_by(facing.inverse());
+        if let Some(idx) = Self::side_index(local_side) {
+            self.0[idx]
+        } else {
+            false
+        }
+    }
+}
+
 /// A voxel shape definition — a collection of faces.
 #[derive(Debug, Clone)]
 pub struct VoxelShape {
     pub name: String,
     pub faces: Vec<VoxelFace>,
+    /// Which sides this shape fully occludes (in local/unrotated frame).
+    pub occlusion: OcclusionMask,
 }
 
 /// Resource holding all registered voxel shapes. Index 0 is always the cube.
@@ -171,6 +221,7 @@ impl Default for ShapeTable {
         };
         table.shapes.push(cube_shape());         // shape 0: hard-edge cube
         table.shapes.push(smooth_cube_shape());   // shape 1: smooth-edge cube
+        table.shapes.push(wedge_shape());         // shape 2: wedge/ramp
         table
     }
 }
@@ -178,6 +229,7 @@ impl Default for ShapeTable {
 /// Well-known shape indices.
 pub const SHAPE_CUBE: u16 = 0;
 pub const SHAPE_SMOOTH_CUBE: u16 = 1;
+pub const SHAPE_WEDGE: u16 = 2;
 
 impl ShapeTable {
     pub fn get(&self, index: u16) -> Option<&VoxelShape> {
@@ -221,10 +273,10 @@ fn cube_shape() -> VoxelShape {
             normal: Vec3::Y,
             side: FaceSide::Top,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_side: FaceSide::South },  // back edge
-                VoxelEdge { v0: 1, v1: 2, neighbor_side: FaceSide::East },   // right edge
-                VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::North },  // front edge
-                VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::West },   // left edge
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::South] },  // back edge
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right edge
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::North] },  // front edge
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left edge
             ],
             chamfer_mode: ChamferMode::Hard,
         },
@@ -235,10 +287,10 @@ fn cube_shape() -> VoxelShape {
             normal: Vec3::NEG_Y,
             side: FaceSide::Bottom,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_side: FaceSide::North },
-                VoxelEdge { v0: 1, v1: 2, neighbor_side: FaceSide::East },
-                VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::South },
-                VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::West },
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::North] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             chamfer_mode: ChamferMode::Hard,
         },
@@ -249,10 +301,10 @@ fn cube_shape() -> VoxelShape {
             normal: Vec3::Z,
             side: FaceSide::North,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_side: FaceSide::Bottom },
-                VoxelEdge { v0: 1, v1: 2, neighbor_side: FaceSide::West },
-                VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
-                VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::East },
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::West] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::East] },
             ],
             chamfer_mode: ChamferMode::Hard,
         },
@@ -263,10 +315,10 @@ fn cube_shape() -> VoxelShape {
             normal: Vec3::NEG_Z,
             side: FaceSide::South,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_side: FaceSide::Bottom },
-                VoxelEdge { v0: 1, v1: 2, neighbor_side: FaceSide::East },
-                VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
-                VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::West },
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             chamfer_mode: ChamferMode::Hard,
         },
@@ -277,10 +329,10 @@ fn cube_shape() -> VoxelShape {
             normal: Vec3::X,
             side: FaceSide::East,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_side: FaceSide::Bottom },
-                VoxelEdge { v0: 1, v1: 2, neighbor_side: FaceSide::North },
-                VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
-                VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::South },
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::North] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::South] },
             ],
             chamfer_mode: ChamferMode::Hard,
         },
@@ -291,10 +343,10 @@ fn cube_shape() -> VoxelShape {
             normal: Vec3::NEG_X,
             side: FaceSide::West,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_side: FaceSide::Bottom },
-                VoxelEdge { v0: 1, v1: 2, neighbor_side: FaceSide::South },
-                VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
-                VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::North },
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::North] },
             ],
             chamfer_mode: ChamferMode::Hard,
         },
@@ -303,6 +355,7 @@ fn cube_shape() -> VoxelShape {
     VoxelShape {
         name: "cube".to_string(),
         faces,
+        occlusion: OcclusionMask::FULL,
     }
 }
 
@@ -314,4 +367,114 @@ fn smooth_cube_shape() -> VoxelShape {
         face.chamfer_mode = ChamferMode::Smooth;
     }
     shape
+}
+
+/// Shape 2: wedge/ramp.
+///
+/// Default facing (North): slope descends from back (south, -Z) to front (north, +Z).
+/// The tall wall is at the back (south side).
+///
+/// ```text
+///     4-----5       Back wall (south)
+///    /     /         Slope descends toward +Z
+///   /     /
+///  2-----3          Front is at ground level (y=0)
+/// ```
+///
+/// Vertices:
+///   0: (0,0,0)  left  bottom back
+///   1: (1,0,0)  right bottom back
+///   2: (0,0,1)  left  bottom front
+///   3: (1,0,1)  right bottom front
+///   4: (0,1,0)  left  top    back
+///   5: (1,1,0)  right top    back
+fn wedge_shape() -> VoxelShape {
+    let v = [
+        Vec3::new(0.0, 0.0, 0.0), // 0: left  bottom back
+        Vec3::new(1.0, 0.0, 0.0), // 1: right bottom back
+        Vec3::new(0.0, 0.0, 1.0), // 2: left  bottom front
+        Vec3::new(1.0, 0.0, 1.0), // 3: right bottom front
+        Vec3::new(0.0, 1.0, 0.0), // 4: left  top    back
+        Vec3::new(1.0, 1.0, 0.0), // 5: right top    back
+    ];
+
+    let faces = vec![
+        // Bottom (-Y): quad [2, 3, 1, 0]
+        VoxelFace {
+            vertices: vec![v[2], v[3], v[1], v[0]],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            normal: Vec3::NEG_Y,
+            side: FaceSide::Bottom,
+            edges: vec![
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::North] },  // front
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::South] },  // back
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left
+            ],
+            chamfer_mode: ChamferMode::Hard,
+        },
+        // Back/South wall (-Z): quad [0, 1, 5, 4]
+        VoxelFace {
+            vertices: vec![v[0], v[1], v[5], v[4]],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            normal: Vec3::NEG_Z,
+            side: FaceSide::South,
+            edges: vec![
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] }, // bottom
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },    // top (ridge)
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left
+            ],
+            chamfer_mode: ChamferMode::Hard,
+        },
+        // Slope face: quad [4, 5, 3, 2] — from back-top to front-bottom
+        // Normal is computed from world-space vertices at mesh time.
+        VoxelFace {
+            vertices: vec![v[4], v[5], v[3], v[2]],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            normal: Vec3::new(0.0, 1.0, 1.0).normalize(),
+            side: FaceSide::None, // diagonal — no single neighbor can occlude
+            edges: vec![
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Top] },    // top/ridge (left→right)
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right diagonal (top→bottom)
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::North] },  // bottom/front (right→left)
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left diagonal (bottom→top)
+            ],
+            chamfer_mode: ChamferMode::Smooth,
+        },
+        // Left/West triangle (-X): [0, 4, 2]
+        VoxelFace {
+            vertices: vec![v[0], v[4], v[2]],
+            triangles: vec![[0, 1, 2]],
+            normal: Vec3::NEG_X,
+            side: FaceSide::West,
+            edges: vec![
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (bottom→top)
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![] },   // hypotenuse (slope junction)
+                VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (front→back)
+            ],
+            chamfer_mode: ChamferMode::Hard,
+        },
+        // Right/East triangle (+X): [1, 3, 5]
+        VoxelFace {
+            vertices: vec![v[1], v[3], v[5]],
+            triangles: vec![[0, 1, 2]],
+            normal: Vec3::X,
+            side: FaceSide::East,
+            edges: vec![
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (back→front)
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![] },   // hypotenuse (slope junction)
+                VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (top→bottom)
+            ],
+            chamfer_mode: ChamferMode::Hard,
+        },
+    ];
+
+    VoxelShape {
+        name: "wedge".to_string(),
+        faces,
+        // Wedge only fully occludes Bottom and South (the full back wall).
+        // Top=false, Bottom=true, North=false, South=true, East=false, West=false
+        occlusion: OcclusionMask([false, true, false, true, false, false]),
+    }
 }

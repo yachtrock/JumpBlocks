@@ -1,7 +1,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{Chunk, ChunkData, Voxel};
-use jumpblocks_voxel::shape::{Facing, SHAPE_SMOOTH_CUBE};
+use jumpblocks_voxel::shape::{Facing, SHAPE_SMOOTH_CUBE, SHAPE_WEDGE};
 
 use crate::layers::GameLayer;
 
@@ -126,6 +126,38 @@ fn setup_world(
                 }
             }
         }
+
+        let chunk_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.6, 0.5, 0.4),
+            ..default()
+        });
+
+        // Wedge ramp alongside the stairs (z=7..9, 3 wide)
+        // Facing East: tall wall at -X, slope descends toward +X
+        // One wedge per step forms a continuous diagonal slope
+        let wedge_e = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
+        for step in 0..8 {
+            let y_base = 1 + step;
+            for z_off in 0..3 {
+                chunk_data.set(step, y_base, 7 + z_off, wedge_e);
+            }
+            // Fill underneath with smooth cubes
+            for y in 1..y_base {
+                for z_off in 0..3 {
+                    chunk_data.set(step, y, 7 + z_off, smooth_voxel);
+                }
+            }
+        }
+
+        // A row of wedges facing each direction for testing rotation
+        let wedge_n = Voxel::new(SHAPE_WEDGE, Facing::North, 1);
+        let wedge_e2 = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
+        let wedge_s = Voxel::new(SHAPE_WEDGE, Facing::South, 1);
+        let wedge_w = Voxel::new(SHAPE_WEDGE, Facing::West, 1);
+        chunk_data.set(0, 2, 10, wedge_n);
+        chunk_data.set(2, 2, 10, wedge_e2);
+        chunk_data.set(4, 2, 10, wedge_s);
+        chunk_data.set(6, 2, 10, wedge_w);
 
         let chunk_material = materials.add(StandardMaterial {
             base_color: Color::srgb(0.6, 0.5, 0.4),
