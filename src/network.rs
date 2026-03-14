@@ -91,10 +91,14 @@ impl Plugin for NetworkPlugin {
                 // We must add ReplicationSender + MessageManager so replication works.
                 app.add_observer(add_replication_sender_on_link);
                 app.add_systems(Update, handle_new_client_connections);
-                app.add_systems(Update, add_replication_sender_on_client_connected);
+                // ReplicationSender MUST exist before Replicate::to_server() is inserted,
+                // because lightyear's on_insert hook queries for it and has no fallback
+                // for SingleClient mode. Chain with ApplyDeferred to flush commands.
                 app.add_systems(
                     Update,
                     (
+                        add_replication_sender_on_client_connected,
+                        ApplyDeferred,
                         init_local_player_networking,
                         sync_local_player_to_network,
                     )
@@ -119,10 +123,14 @@ impl Plugin for NetworkPlugin {
                 app.add_plugins(client::ClientPlugins { tick_duration });
                 app.add_plugins(ProtocolPlugin);
                 app.add_systems(Startup, setup_client);
-                app.add_systems(Update, add_replication_sender_on_client_connected);
+                // ReplicationSender MUST exist before Replicate::to_server() is inserted,
+                // because lightyear's on_insert hook queries for it and has no fallback
+                // for SingleClient mode. Chain with ApplyDeferred to flush commands.
                 app.add_systems(
                     Update,
                     (
+                        add_replication_sender_on_client_connected,
+                        ApplyDeferred,
                         init_local_player_networking,
                         sync_local_player_to_network,
                     )
@@ -354,10 +362,11 @@ fn server_replicate_received_entities(
 
 /// Periodic diagnostic system to log replication state.
 fn debug_replication_state(
-    local_players: Query<(Entity, Option<&NetworkedPosition>, Option<&Replicate>), With<LocalPlayer>>,
+    local_players: Query<(Entity, Option<&NetworkedPosition>, Option<&Replicate>, Has<Replicating>, Has<HasAuthority>), With<LocalPlayer>>,
     replicated: Query<(Entity, Option<&NetworkedPosition>), With<Replicated>>,
     remote_players: Query<Entity, With<RemotePlayer>>,
     connected: Query<Entity, With<Connected>>,
+    senders: Query<(Entity, Has<ReplicationSender>, Has<MessageManager>), With<Connected>>,
     mut last_log: Local<Option<f64>>,
     time: Res<Time>,
 ) {
@@ -378,12 +387,21 @@ fn debug_replication_state(
         connected_count, local_count, replicated_count, remote_count,
     );
 
-    for (entity, net_pos, replicate) in local_players.iter() {
+    for (entity, has_sender, has_msg_mgr) in senders.iter() {
         info!(
-            "[NET DIAG]   LocalPlayer {:?}: has_net_pos={}, has_replicate={}, pos={:?}",
+            "[NET DIAG]   Sender {:?}: has_replication_sender={}, has_message_manager={}",
+            entity, has_sender, has_msg_mgr,
+        );
+    }
+
+    for (entity, net_pos, replicate, replicating, has_authority) in local_players.iter() {
+        info!(
+            "[NET DIAG]   LocalPlayer {:?}: has_net_pos={}, has_replicate={}, replicating={}, has_authority={}, pos={:?}",
             entity,
             net_pos.is_some(),
             replicate.is_some(),
+            replicating,
+            has_authority,
             net_pos.map(|p| p.0),
         );
     }

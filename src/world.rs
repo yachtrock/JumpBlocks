@@ -21,7 +21,7 @@ fn setup_world(
     let has_rendering = meshes.is_some() && materials.is_some();
 
     // Ground plane
-    let mut ground = commands.spawn((
+    let ground = commands.spawn((
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
         CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
