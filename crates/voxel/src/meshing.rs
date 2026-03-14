@@ -420,36 +420,65 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
     }).collect();
 
     // ---------------------------------------------------------------
-    // Pass 2: collect chamfer strip clip planes
+    // Pass 2b: collect chamfer strip planes per owning voxel
     // ---------------------------------------------------------------
-    let mut clip_planes: Vec<ChamferClipPlane> = Vec::new();
-    // vertex → indices into clip_planes
-    let mut vert_clip_planes: Vec<Vec<usize>> = vec![Vec::new(); solid.positions.len()];
+    // For each interior sharp edge, compute the strip plane and associate
+    // it with the owning voxels. These planes will be used to clip inner
+    // faces of NEIGHBOR voxels.
+    struct StripClip {
+        point: Vec3,
+        normal: Vec3,
+        owning_voxels: [(usize, usize, usize); 2],
+        edge_verts: [u32; 2],
+        /// AABB of the strip polygon for spatial filtering
+        aabb_min: Vec3,
+        aabb_max: Vec3,
+    }
+    let mut voxel_strip_clips: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
+    let mut all_strip_clips: Vec<StripClip> = Vec::new();
 
     for (&(ev0, ev1), info) in &edge_graph {
         if !is_sharp(info, &solid) { continue; }
-        if info.faces.len() < 2 { continue; } // boundary edges don't clip neighbors
+        if info.faces.len() < 2 { continue; }
 
         let fi_a = info.faces[0];
         let fi_b = info.faces[1];
+        let face_a = &solid.faces[fi_a];
+        let face_b = &solid.faces[fi_b];
 
-        let a0 = find_face_inner_at_vert(&solid.faces[fi_a], &all_inner[fi_a], ev0).unwrap();
-        let a1 = find_face_inner_at_vert(&solid.faces[fi_a], &all_inner[fi_a], ev1).unwrap();
-        let b0 = find_face_inner_at_vert(&solid.faces[fi_b], &all_inner[fi_b], ev0).unwrap();
+        let a0 = find_face_inner_at_vert(face_a, &all_inner[fi_a], ev0).unwrap();
+        let a1 = find_face_inner_at_vert(face_a, &all_inner[fi_a], ev1).unwrap();
+        let b0 = find_face_inner_at_vert(face_b, &all_inner[fi_b], ev0).unwrap();
+        let b1 = find_face_inner_at_vert(face_b, &all_inner[fi_b], ev1).unwrap();
 
         let strip_normal = (a1 - a0).cross(b0 - a0);
         if strip_normal.length_squared() < 1e-10 { continue; }
         let strip_normal = strip_normal.normalize();
+        let expected_out = (face_a.normal + face_b.normal).normalize_or_zero();
+        let strip_normal = if strip_normal.dot(expected_out) < 0.0 { -strip_normal } else { strip_normal };
 
-        let cp_idx = clip_planes.len();
-        clip_planes.push(ChamferClipPlane {
-            point: a0,
-            normal: strip_normal,
-            faces: [fi_a, fi_b],
-            verts: [ev0, ev1],
+        // Compute AABB of the strip quad, expanded by a small margin
+        let margin = CHAMFER_WIDTH * 0.5;
+        let strip_min = a0.min(a1).min(b0).min(b1) - Vec3::splat(margin);
+        let strip_max = a0.max(a1).max(b0).max(b1) + Vec3::splat(margin);
+
+        let clip_idx = all_strip_clips.len();
+        let owning = [face_a.voxel, face_b.voxel];
+        all_strip_clips.push(StripClip {
+            point: a0, normal: strip_normal, owning_voxels: owning,
+            edge_verts: [ev0, ev1], aabb_min: strip_min, aabb_max: strip_max,
         });
-        vert_clip_planes[ev0 as usize].push(cp_idx);
-        vert_clip_planes[ev1 as usize].push(cp_idx);
+
+        // Associate with owning voxels
+        for &v in &owning {
+            voxel_strip_clips.entry(v).or_default().push(clip_idx);
+        }
+    }
+
+    // Build voxel → faces map
+    let mut voxel_faces_map: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
+    for (fi, face) in solid.faces.iter().enumerate() {
+        voxel_faces_map.entry(face.voxel).or_default().push(fi);
     }
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -459,36 +488,154 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
     let mut indices: Vec<u32> = Vec::new();
 
     // ---------------------------------------------------------------
-    // Pass 3: emit inner faces
+    // Pass 3: emit inner faces, clipped against chamfer strips from neighbors
     // ---------------------------------------------------------------
-    // TODO: clip faces against chamfer strip planes to prevent z-fighting
-    // at corners. Previous attempts were too aggressive (infinite planes
-    // cut through unrelated faces). Need bounded clip regions.
     for (fi, face) in solid.faces.iter().enumerate() {
-        let n = face.verts.len();
         let normal_arr = face.normal.to_array();
         let inner = &all_inner[fi];
 
-        let inner_base = positions.len() as u32;
-        for i in 0..n {
-            positions.push(inner[i].to_array());
-            normals.push(normal_arr);
-            uvs.push([0.0, 0.0]);
-            chamfer_offsets.push([0.0; 3]);
+        // Collect strip clip planes from NEIGHBOR voxels that might cross this face.
+        // For each axis-aligned neighbor of this face's voxel, gather their strip planes.
+        let (vx, vy, vz) = face.voxel;
+        let mut clip_planes: Vec<(Vec3, Vec3)> = Vec::new(); // (point, normal)
+        for &(dx, dy, dz) in &[(-1i32,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)] {
+            let nx = vx as i32 + dx;
+            let ny = vy as i32 + dy;
+            let nz = vz as i32 + dz;
+            if nx < 0 || ny < 0 || nz < 0 { continue; }
+            let nkey = (nx as usize, ny as usize, nz as usize);
+            if nkey == face.voxel { continue; }
+            if let Some(clip_indices) = voxel_strip_clips.get(&nkey) {
+                for &ci in clip_indices {
+                    let sc = &all_strip_clips[ci];
+                    // Only use strips owned by the neighbor (not our own voxel)
+                    if sc.owning_voxels.contains(&face.voxel) { continue; }
+                    // Only clip against DIAGONAL strips (non-axis-aligned edges).
+                    // Axis-aligned strips (cube edges) stay within voxel bounds.
+                    let ev0_pos = solid.positions[sc.edge_verts[0] as usize];
+                    let ev1_pos = solid.positions[sc.edge_verts[1] as usize];
+                    let diff = (ev1_pos - ev0_pos).abs();
+                    let axis_count = (diff.x > 1e-4) as u8 + (diff.y > 1e-4) as u8 + (diff.z > 1e-4) as u8;
+                    if axis_count < 2 { continue; } // axis-aligned edge, skip
+                    // Only clip if this face's AABB overlaps the strip's AABB
+                    let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
+                    let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();
+                    let overlaps = face_min.x <= sc.aabb_max.x && face_max.x >= sc.aabb_min.x
+                        && face_min.y <= sc.aabb_max.y && face_max.y >= sc.aabb_min.y
+                        && face_min.z <= sc.aabb_max.z && face_max.z >= sc.aabb_min.z;
+                    if !overlaps { continue; }
+                    // Keep the side AWAY from the chamfer interior
+                    clip_planes.push((sc.point, -sc.normal));
+                }
+            }
         }
-        for i in 1..n - 1 {
-            indices.push(inner_base + i as u32 + 1);
-            indices.push(inner_base + i as u32);
-            indices.push(inner_base);
+
+        if clip_planes.is_empty() {
+            // No clipping needed
+            let n = inner.len();
+            let inner_base = positions.len() as u32;
+            for i in 0..n {
+                positions.push(inner[i].to_array());
+                normals.push(normal_arr);
+                uvs.push([0.0, 0.0]);
+                chamfer_offsets.push([0.0; 3]);
+            }
+            for i in 1..n - 1 {
+                indices.push(inner_base + i as u32 + 1);
+                indices.push(inner_base + i as u32);
+                indices.push(inner_base);
+            }
+        } else {
+            // Clip face polygon against neighbor chamfer strip planes.
+            // The strip normal points outward from the chamfer surface.
+            // Keep the side where the strip normal points (exterior).
+            let mut polygon: Vec<Vec3> = inner.clone();
+
+            for &(plane_point, plane_normal) in &clip_planes {
+                // Only clip if the face actually straddles this plane
+                // (some vertices inside, some outside). If all on keep side, skip.
+                let mut has_inside = false;
+                let mut has_outside = false;
+                for p in &polygon {
+                    let d = (*p - plane_point).dot(plane_normal);
+                    if d < -1e-5 { has_outside = true; }
+                    else { has_inside = true; }
+                }
+                if !has_outside { continue; } // all on keep side, no clip needed
+                if !has_inside {
+                    // All on clip side — entire face removed. This shouldn't happen
+                    // for faces that share a vertex with the strip edge.
+                    warn!("Face {} entirely on clip side of strip plane (voxel={:?})", fi, face.voxel);
+                    polygon.clear();
+                    break;
+                }
+                polygon = clip_polygon_by_plane(&polygon, plane_point, plane_normal);
+                if polygon.len() < 3 { break; }
+            }
+
+            if polygon.len() >= 3 {
+                // Remove near-duplicate vertices that create degenerate triangles
+                let mut clean_poly: Vec<Vec3> = Vec::new();
+                for &p in &polygon {
+                    if clean_poly.last().map_or(true, |prev: &Vec3| (*prev - p).length_squared() > 1e-8) {
+                        clean_poly.push(p);
+                    }
+                }
+                if clean_poly.len() >= 3 && (clean_poly[0] - *clean_poly.last().unwrap()).length_squared() < 1e-8 {
+                    clean_poly.pop();
+                }
+
+                if clean_poly.len() >= 3 {
+                    let inner_base = positions.len() as u32;
+                    for p in &clean_poly {
+                        positions.push(p.to_array());
+                        normals.push(normal_arr);
+                        uvs.push([0.0, 0.0]);
+                        chamfer_offsets.push([0.0; 3]);
+                    }
+                    for i in 1..clean_poly.len() - 1 {
+                        indices.push(inner_base + i as u32 + 1);
+                        indices.push(inner_base + i as u32);
+                        indices.push(inner_base);
+                    }
+                }
+            }
         }
     }
 
     // ---------------------------------------------------------------
     // Pass 3: emit chamfer strips per-edge (not per-face)
     // ---------------------------------------------------------------
-    // Helper: find a face's inner vertex index for a given shared vertex
     fn find_face_inner_at_vert(face: &SolidFace, inner: &[Vec3], vert: u32) -> Option<Vec3> {
         face.verts.iter().position(|&v| v == vert).map(|i| inner[i])
+    }
+
+    /// Collect face indices from axis-aligned neighbor voxels (excluding owning voxels).
+    fn collect_neighbor_clip_faces(
+        chamfer_voxels: &[(usize, usize, usize)],
+        voxel_faces_map: &HashMap<(usize, usize, usize), Vec<usize>>,
+    ) -> Vec<usize> {
+        let mut result = Vec::new();
+        for &(vx, vy, vz) in chamfer_voxels {
+            for &(dx, dy, dz) in &[
+                (-1i32,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)
+            ] {
+                let nx = vx as i32 + dx;
+                let ny = vy as i32 + dy;
+                let nz = vz as i32 + dz;
+                if nx < 0 || ny < 0 || nz < 0 { continue; }
+                let nkey = (nx as usize, ny as usize, nz as usize);
+                if chamfer_voxels.contains(&nkey) { continue; }
+                if let Some(faces) = voxel_faces_map.get(&nkey) {
+                    for &fi in faces {
+                        if !result.contains(&fi) {
+                            result.push(fi);
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     for (&(ev0, ev1), info) in &edge_graph {
@@ -520,47 +667,52 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             let b0 = find_face_inner_at_vert(face_b, inner_b, ev0).unwrap();
             let b1 = find_face_inner_at_vert(face_b, inner_b, ev1).unwrap();
 
-            // Check winding: the strip should face outward (along average of face normals)
             let na = face_a.normal;
             let nb = face_b.normal;
             let expected_out = (na + nb).normalize_or_zero();
+
+            // Build strip polygon (quad)
             let tri_normal = (a1 - a0).cross(b0 - a0);
             let flipped = tri_normal.dot(expected_out) > 0.0;
-
-            let (p0, p1, p2, p3) = if flipped {
-                (b0, b1, a1, a0)
+            let mut strip_poly = if flipped {
+                vec![b0, b1, a1, a0]
             } else {
-                (a0, a1, b1, b0)
+                vec![a0, a1, b1, b0]
             };
-            // After potential flip, n_first/n_second track which face normal
-            // goes with p0,p1 vs p2,p3
-            let (n_first, n_second) = if flipped { (nb, na) } else { (na, nb) };
 
-            let base = positions.len() as u32;
-            positions.extend_from_slice(&[
-                p0.to_array(), p1.to_array(),
-                p2.to_array(), p3.to_array(),
-            ]);
+            // Clip strip against faces of neighboring voxels that the strip
+            // Strips are allowed to extend past voxel boundaries.
+            // Inner faces of neighbor voxels will be clipped to accommodate.
 
-            match chamfer_mode {
-                ChamferMode::Hard => {
-                    let cn = expected_out.to_array();
-                    normals.extend_from_slice(&[cn, cn, cn, cn]);
+            if strip_poly.len() >= 3 {
+                let base = positions.len() as u32;
+                let (n_first, n_second) = if flipped { (nb, na) } else { (na, nb) };
+
+                for (pi, p) in strip_poly.iter().enumerate() {
+                    positions.push(p.to_array());
+                    let n = match chamfer_mode {
+                        ChamferMode::Hard => expected_out.to_array(),
+                        ChamferMode::Smooth => {
+                            // First half of polygon gets face A normal,
+                            // second half gets face B normal
+                            if pi < strip_poly.len() / 2 {
+                                n_first.to_array()
+                            } else {
+                                n_second.to_array()
+                            }
+                        }
+                    };
+                    normals.push(n);
+                    uvs.push([0.0, 0.0]);
+                    chamfer_offsets.push([0.0; 3]);
                 }
-                ChamferMode::Smooth => {
-                    let nf = n_first.to_array();
-                    let ns = n_second.to_array();
-                    normals.extend_from_slice(&[nf, nf, ns, ns]);
+                // Fan triangulation
+                for i in 1..strip_poly.len() - 1 {
+                    indices.push(base + i as u32 + 1);
+                    indices.push(base + i as u32);
+                    indices.push(base);
                 }
             }
-
-            uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-            chamfer_offsets.extend_from_slice(&[[0.0; 3]; 4]);
-
-            indices.extend_from_slice(&[
-                base + 2, base + 1, base,
-                base + 3, base + 2, base,
-            ]);
         } else {
             // Boundary edge: strip from inner to outer (original position)
             let fi_a = info.faces[0];
@@ -576,45 +728,33 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             let edge_dir = (solid.positions[ev1 as usize] - solid.positions[ev0 as usize]).normalize_or_zero();
             let outward = edge_dir.cross(na).normalize_or_zero();
 
-            // Check winding
             let tri_normal = (a1 - a0).cross(outer0 - a0);
             let expected_out = (na + outward).normalize_or_zero();
             let flipped = tri_normal.dot(expected_out) > 0.0;
 
-            let (p0, p1, p2, p3) = if flipped {
-                (outer0, outer1, a1, a0)
+            let mut strip_poly = if flipped {
+                vec![outer0, outer1, a1, a0]
             } else {
-                (a0, a1, outer1, outer0)
+                vec![a0, a1, outer1, outer0]
             };
 
-            let base = positions.len() as u32;
-            positions.extend_from_slice(&[
-                p0.to_array(), p1.to_array(),
-                p2.to_array(), p3.to_array(),
-            ]);
+            // Boundary strips extend freely; neighbor faces are clipped to accommodate.
 
-            match chamfer_mode {
-                ChamferMode::Hard => {
-                    let cn = expected_out.to_array();
-                    normals.extend_from_slice(&[cn, cn, cn, cn]);
+            if strip_poly.len() >= 3 {
+                let strip_normal = expected_out.to_array();
+                let base = positions.len() as u32;
+                for p in &strip_poly {
+                    positions.push(p.to_array());
+                    normals.push(strip_normal);
+                    uvs.push([0.0, 0.0]);
+                    chamfer_offsets.push([0.0; 3]);
                 }
-                ChamferMode::Smooth => {
-                    let (n_inner, n_outer) = if flipped {
-                        (outward.to_array(), na.to_array())
-                    } else {
-                        (na.to_array(), outward.to_array())
-                    };
-                    normals.extend_from_slice(&[n_inner, n_inner, n_outer, n_outer]);
+                for i in 1..strip_poly.len() - 1 {
+                    indices.push(base + i as u32 + 1);
+                    indices.push(base + i as u32);
+                    indices.push(base);
                 }
             }
-
-            uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-            chamfer_offsets.extend_from_slice(&[[0.0; 3]; 4]);
-
-            indices.extend_from_slice(&[
-                base + 2, base + 1, base,
-                base + 3, base + 2, base,
-            ]);
         }
     }
 
@@ -710,15 +850,25 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             chamfer_offsets.push([0.0; 3]);
         }
 
-        // Collect chamfer strip face normals at this vertex for coplanarity check
-        let mut strip_normals: Vec<Vec3> = Vec::new();
+        // Collect ALL adjacent face normals (inner faces + chamfer strips) for overlap check
+        let mut adjacent_normals: Vec<Vec3> = Vec::new();
+        // Add normals from inner faces at this vertex
+        for &fi in adj_faces {
+            let n = solid.faces[fi].normal;
+            if !adjacent_normals.iter().any(|an| an.dot(n).abs() > 0.99) {
+                adjacent_normals.push(n);
+            }
+        }
+        // Add normals from chamfer strips at this vertex
         for &ek in &sharp_edge_keys {
             if let Some(info) = sharp_set.get(&ek) {
                 if info.faces.len() >= 2 {
-                    // The strip's plane normal is the average of the two face normals
                     let na = solid.faces[info.faces[0]].normal;
                     let nb = solid.faces[info.faces[1]].normal;
-                    strip_normals.push((na + nb).normalize_or_zero());
+                    let sn = (na + nb).normalize_or_zero();
+                    if !adjacent_normals.iter().any(|an| an.dot(sn).abs() > 0.95) {
+                        adjacent_normals.push(sn);
+                    }
                 }
             }
         }
@@ -728,18 +878,18 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         let flip = tri_normal.dot(axis) < 0.0;
 
         for i in 1..ring.len() - 1 {
-            // Check if this fan triangle is coplanar with any chamfer strip
-            // (same plane = the strip already covers this area)
+            // Skip fan triangles coplanar with any existing geometry
+            // (inner face or chamfer strip already covers this area)
             let fan_normal = {
                 let va = ring[0].0;
                 let vb = ring[i].0;
                 let vc = ring[i + 1].0;
                 (vb - va).cross(vc - va).normalize_or_zero()
             };
-            let coplanar_with_strip = strip_normals.iter().any(|sn| {
-                fan_normal.dot(*sn).abs() > 0.95
+            let coplanar = adjacent_normals.iter().any(|an| {
+                fan_normal.dot(*an).abs() > 0.95
             });
-            if coplanar_with_strip { continue; }
+            if coplanar { continue; }
 
             let a = ring_start;
             let b = ring_start + i as u32;

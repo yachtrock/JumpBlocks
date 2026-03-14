@@ -369,6 +369,19 @@ fn collider_mesh_valid() {
 }
 
 #[test]
+fn chamfered_mesh_has_at_least_as_many_tris_as_lod() {
+    let shapes = make_shapes();
+    let data = demo_chunk();
+    let result = generate_chunk_mesh(&data, &shapes);
+
+    let full_tris = result.full_res.indices.len() / 3;
+    let lod_tris = result.lod.indices.len() / 3;
+    eprintln!("full_res={} tris, lod={} tris", full_tris, lod_tris);
+    assert!(full_tris >= lod_tris,
+        "chamfered mesh should have >= LOD triangles: full={}, lod={}", full_tris, lod_tris);
+}
+
+#[test]
 fn empty_chunk_produces_empty_mesh() {
     let shapes = make_shapes();
     let data = ChunkData::new();
@@ -608,6 +621,14 @@ fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
                 || point_in_tri_2d(pa[0], pb) || point_in_tri_2d(pa[1], pb) || point_in_tri_2d(pa[2], pb)
                 {
                     intersecting += 1;
+                    if intersecting <= 3 {
+                        eprintln!("INTERSECT #{}: tri[{}] vs tri[{}], shared_verts={}, dot={:.3}",
+                            intersecting, ti, tj, shared_verts, na.dot(nb));
+                        eprintln!("  tri[{}]: ({:.3},{:.3},{:.3}) ({:.3},{:.3},{:.3}) ({:.3},{:.3},{:.3})",
+                            ti, a0.x, a0.y, a0.z, a1.x, a1.y, a1.z, a2.x, a2.y, a2.z);
+                        eprintln!("  tri[{}]: ({:.3},{:.3},{:.3}) ({:.3},{:.3},{:.3}) ({:.3},{:.3},{:.3})",
+                            tj, b0.x, b0.y, b0.z, b1.x, b1.y, b1.z, b2.x, b2.y, b2.z);
+                    }
                 }
             }
         }
