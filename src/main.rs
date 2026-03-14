@@ -249,11 +249,7 @@ impl UiDrawFn for GameUi {
         let ffd = self.inv_ffd.as_ref().unwrap();
 
         // Dim background (not FFD-warped)
-        let dim_alpha = match self.inv_phase {
-            InvPhase::Opening | InvPhase::Closing => (self.inv_scale - 0.6) / 0.4 * 0.5,
-            _ => 0.5,
-        };
-        canvas.rect(0.0, 0.0, win.x, win.y, [0.0, 0.0, 0.0, dim_alpha]);
+        canvas.rect(0.0, 0.0, win.x, win.y, [0.0, 0.0, 0.0, 0.5]);
 
         // --- All panel drawing goes through rect_ffd / text_ffd ---
         // Panel background
