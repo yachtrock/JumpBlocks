@@ -430,9 +430,10 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         normal: Vec3,
         owning_voxels: [(usize, usize, usize); 2],
         edge_verts: [u32; 2],
-        /// AABB of the strip polygon for spatial filtering
         aabb_min: Vec3,
         aabb_max: Vec3,
+        /// Dot product of the two face normals forming this chamfer
+        face_normal_dot: f32,
     }
     let mut voxel_strip_clips: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
     let mut all_strip_clips: Vec<StripClip> = Vec::new();
@@ -467,6 +468,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         all_strip_clips.push(StripClip {
             point: a0, normal: strip_normal, owning_voxels: owning,
             edge_verts: [ev0, ev1], aabb_min: strip_min, aabb_max: strip_max,
+            face_normal_dot: face_a.normal.dot(face_b.normal),
         });
 
         // Associate with owning voxels
@@ -510,13 +512,13 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
                     let sc = &all_strip_clips[ci];
                     // Only use strips owned by the neighbor (not our own voxel)
                     if sc.owning_voxels.contains(&face.voxel) { continue; }
-                    // Only clip against DIAGONAL strips (non-axis-aligned edges).
-                    // Axis-aligned strips (cube edges) stay within voxel bounds.
+                    // Only clip against strips from diagonal edges (non-axis-aligned).
+                    // Axis-aligned edges produce strips that stay within voxel bounds.
                     let ev0_pos = solid.positions[sc.edge_verts[0] as usize];
                     let ev1_pos = solid.positions[sc.edge_verts[1] as usize];
                     let diff = (ev1_pos - ev0_pos).abs();
                     let axis_count = (diff.x > 1e-4) as u8 + (diff.y > 1e-4) as u8 + (diff.z > 1e-4) as u8;
-                    if axis_count < 2 { continue; } // axis-aligned edge, skip
+                    if axis_count < 2 { continue; }
                     // Only clip if this face's AABB overlaps the strip's AABB
                     let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
                     let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();

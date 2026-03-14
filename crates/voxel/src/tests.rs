@@ -382,6 +382,41 @@ fn chamfered_mesh_has_at_least_as_many_tris_as_lod() {
 }
 
 #[test]
+fn chamfered_mesh_no_extra_holes() {
+    // The full_res mesh boundary edge count should be reasonable.
+    // Compare against a single floating cube (known good, fully closed = 0 boundary).
+    // For the demo chunk, boundary edges come from the chunk perimeter — clipping
+    // should not significantly increase them.
+    let shapes = make_shapes();
+
+    // Single floating cube: should have 0 boundary edges (fully closed)
+    let cube_data = single_voxel_chunk(Voxel::filled());
+    let cube_result = generate_chunk_mesh(&cube_data, &shapes);
+    let (cube_boundary, _, _) = count_edge_sharing(&cube_result.full_res);
+    eprintln!("single cube boundary edges: {}", cube_boundary);
+    assert!(cube_boundary == 0,
+        "single floating cube should have 0 boundary edges, got {}", cube_boundary);
+
+    // Single floating wedge: should also be closed
+    let wedge_data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+    let wedge_result = generate_chunk_mesh(&wedge_data, &shapes);
+    let (wedge_boundary, _, _) = count_edge_sharing(&wedge_result.full_res);
+    eprintln!("single wedge boundary edges: {}", wedge_boundary);
+    assert!(wedge_boundary == 0,
+        "single floating wedge should have 0 boundary edges, got {}", wedge_boundary);
+
+    // Wedge on cube: should be closed
+    let mut woc_data = ChunkData::new();
+    woc_data.set(8, 15, 8, Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1));
+    woc_data.set(8, 16, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+    let woc_result = generate_chunk_mesh(&woc_data, &shapes);
+    let (woc_boundary, _, _) = count_edge_sharing(&woc_result.full_res);
+    eprintln!("wedge_on_cube boundary edges: {}", woc_boundary);
+    assert!(woc_boundary == 0,
+        "wedge_on_cube should have 0 boundary edges, got {}", woc_boundary);
+}
+
+#[test]
 fn empty_chunk_produces_empty_mesh() {
     let shapes = make_shapes();
     let data = ChunkData::new();
