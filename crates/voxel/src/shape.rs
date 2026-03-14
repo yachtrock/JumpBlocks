@@ -221,7 +221,8 @@ impl Default for ShapeTable {
         };
         table.shapes.push(cube_shape());         // shape 0: hard-edge cube
         table.shapes.push(smooth_cube_shape());   // shape 1: smooth-edge cube
-        table.shapes.push(wedge_shape());         // shape 2: wedge/ramp
+        table.shapes.push(wedge_shape());         // shape 2: wedge/ramp (hard chamfer)
+        table.shapes.push(smooth_wedge_shape());  // shape 3: wedge/ramp (smooth fillet)
         table
     }
 }
@@ -230,6 +231,7 @@ impl Default for ShapeTable {
 pub const SHAPE_CUBE: u16 = 0;
 pub const SHAPE_SMOOTH_CUBE: u16 = 1;
 pub const SHAPE_WEDGE: u16 = 2;
+pub const SHAPE_SMOOTH_WEDGE: u16 = 3;
 
 impl ShapeTable {
     pub fn get(&self, index: u16) -> Option<&VoxelShape> {
@@ -450,7 +452,7 @@ fn wedge_shape() -> VoxelShape {
             side: FaceSide::West,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (bottom→top)
-                // Hypotenuse omitted — internal edge shared with slope face
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::West] },   // hypotenuse — chamfer when side is exposed
                 VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (front→back)
             ],
             chamfer_mode: ChamferMode::Hard,
@@ -463,7 +465,7 @@ fn wedge_shape() -> VoxelShape {
             side: FaceSide::East,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (back→front)
-                // Hypotenuse omitted — internal edge shared with slope face
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // hypotenuse — chamfer when side is exposed
                 VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (top→bottom)
             ],
             chamfer_mode: ChamferMode::Hard,
@@ -477,4 +479,14 @@ fn wedge_shape() -> VoxelShape {
         // Top=false, Bottom=true, North=false, South=true, East=false, West=false
         occlusion: OcclusionMask([false, true, false, true, false, false]),
     }
+}
+
+/// Shape 3: smooth wedge — same geometry as wedge but with smooth/fillet chamfer normals.
+fn smooth_wedge_shape() -> VoxelShape {
+    let mut shape = wedge_shape();
+    shape.name = "smooth_wedge".to_string();
+    for face in &mut shape.faces {
+        face.chamfer_mode = ChamferMode::Smooth;
+    }
+    shape
 }

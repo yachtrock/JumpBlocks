@@ -1,7 +1,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{Chunk, ChunkData, Voxel};
-use jumpblocks_voxel::shape::{Facing, SHAPE_SMOOTH_CUBE, SHAPE_WEDGE};
+use jumpblocks_voxel::shape::{Facing, SHAPE_SMOOTH_CUBE, SHAPE_SMOOTH_WEDGE, SHAPE_WEDGE};
 
 use crate::layers::GameLayer;
 
@@ -135,7 +135,7 @@ fn setup_world(
         // Wedge ramp alongside the stairs (z=7..9, 3 wide)
         // Facing East: tall wall at -X, slope descends toward +X
         // One wedge per step forms a continuous diagonal slope
-        let wedge_e = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
+        let wedge_e = Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1);
         for step in 0..8 {
             let y_base = 1 + step;
             for z_off in 0..3 {

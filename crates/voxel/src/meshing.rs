@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use bevy::mesh::{Indices, PrimitiveTopology};
 
@@ -5,7 +7,6 @@ use crate::chunk::*;
 use crate::shape::*;
 
 /// Custom vertex attribute for chamfer offset (direction to push vertex for chamfering).
-/// The vertex shader applies: position + chamfer_offset * chamfer_amount
 pub const ATTRIBUTE_CHAMFER_OFFSET: bevy::mesh::MeshVertexAttribute =
     bevy::mesh::MeshVertexAttribute::new("ChamferOffset", 930_481_752, bevy::render::render_resource::VertexFormat::Float32x3);
 
@@ -28,7 +29,10 @@ pub struct ChunkMeshResult {
     pub collider_data: ChunkColliderData,
 }
 
-/// Transform a normalized-space point to world-local space within a voxel.
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 #[inline]
 fn to_world(v: Vec3, wx: f32, wy: f32, wz: f32) -> Vec3 {
     Vec3::new(
@@ -38,26 +42,18 @@ fn to_world(v: Vec3, wx: f32, wy: f32, wz: f32) -> Vec3 {
     )
 }
 
-/// Compute the face normal from world-space vertices using the first triangle.
-/// The triangle winding in shape definitions is interior-facing, so we negate.
 fn compute_world_normal(world_verts: &[Vec3], triangles: &[[usize; 3]]) -> Vec3 {
     let tri = &triangles[0];
     let a = world_verts[tri[0]];
     let b = world_verts[tri[1]];
     let c = world_verts[tri[2]];
-    // Negate because shape triangles are defined with inward winding
-    // (they get reversed during index emission for correct rendering)
     -(b - a).cross(c - a).normalize_or_zero()
 }
 
-/// Check if the neighbor at (nx, ny, nz) fully occludes the given world-side
-/// (the side facing back toward the voxel we're rendering).
 fn neighbor_occludes(
     data: &ChunkData,
     shapes: &ShapeTable,
-    nx: i32,
-    ny: i32,
-    nz: i32,
+    nx: i32, ny: i32, nz: i32,
     side_facing_us: FaceSide,
 ) -> bool {
     let neighbor = data.get_signed(nx, ny, nz);
@@ -67,74 +63,9 @@ fn neighbor_occludes(
     let Some(neighbor_shape) = shapes.get(neighbor.shape_index()) else {
         return false;
     };
-    neighbor_shape
-        .occlusion
-        .occludes_world_side(side_facing_us, neighbor.facing())
+    neighbor_shape.occlusion.occludes_world_side(side_facing_us, neighbor.facing())
 }
 
-/// Check if a world-space vertex is shared with a neighbor voxel's geometry.
-/// Looks at all face vertices of the neighbor shape to find a match.
-fn vertex_shared_with_neighbor(
-    vertex_world: Vec3,
-    data: &ChunkData,
-    shapes: &ShapeTable,
-    nx: i32,
-    ny: i32,
-    nz: i32,
-) -> bool {
-    let neighbor = data.get_signed(nx, ny, nz);
-    if neighbor.is_empty() {
-        return false;
-    }
-    let Some(shape) = shapes.get(neighbor.shape_index()) else {
-        return false;
-    };
-    let nfacing = neighbor.facing();
-    let nwx = nx as f32 * VOXEL_WIDTH;
-    let nwy = ny as f32 * VOXEL_HEIGHT;
-    let nwz = nz as f32 * VOXEL_WIDTH;
-
-    for face in &shape.faces {
-        for v in &face.vertices {
-            let world_v = to_world(nfacing.rotate_point(*v), nwx, nwy, nwz);
-            if (world_v - vertex_world).length_squared() < 0.0001 {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Check if a vertex is snapped to any neighbor along the edge's neighbor sides.
-fn vertex_snapped_for_edge(
-    vertex_world: Vec3,
-    edge: &VoxelEdge,
-    facing: Facing,
-    data: &ChunkData,
-    shapes: &ShapeTable,
-    vx: i32,
-    vy: i32,
-    vz: i32,
-) -> bool {
-    for side in &edge.neighbor_sides {
-        let rotated_side = side.rotated_by(facing);
-        if let Some((dx, dy, dz)) = rotated_side.neighbor_offset() {
-            if vertex_shared_with_neighbor(
-                vertex_world,
-                data,
-                shapes,
-                vx + dx,
-                vy + dy,
-                vz + dz,
-            ) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// The side of a neighbor that faces back toward us.
 fn opposite_side(side: FaceSide) -> FaceSide {
     match side {
         FaceSide::Top => FaceSide::Bottom,
@@ -147,22 +78,33 @@ fn opposite_side(side: FaceSide) -> FaceSide {
     }
 }
 
-/// Generate both full-res (chamfered) and LOD (simple) meshes plus collider data.
+/// Should this face be culled (hidden by neighbor)?
+fn face_is_occluded(
+    data: &ChunkData,
+    shapes: &ShapeTable,
+    x: usize, y: usize, z: usize,
+    rotated_side: FaceSide,
+) -> bool {
+    if let Some((dx, dy, dz)) = rotated_side.neighbor_offset() {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        let nz = z as i32 + dz;
+        neighbor_occludes(data, shapes, nx, ny, nz, opposite_side(rotated_side))
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshResult {
-    let full_res = generate_full_res_mesh(data, shapes);
+    let full_res = generate_chamfered_mesh(data, shapes);
     let lod = generate_lod_mesh(data, shapes);
 
-    // Collider uses the LOD mesh (no chamfer, simpler geometry)
-    let collider_vertices: Vec<Vec3> = lod
-        .positions
-        .iter()
-        .map(|p| Vec3::new(p[0], p[1], p[2]))
-        .collect();
-    let collider_indices: Vec<[u32; 3]> = lod
-        .indices
-        .chunks(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
+    let collider_vertices: Vec<Vec3> = lod.positions.iter().map(|p| Vec3::new(p[0], p[1], p[2])).collect();
+    let collider_indices: Vec<[u32; 3]> = lod.indices.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
 
     ChunkMeshResult {
         full_res,
@@ -174,7 +116,10 @@ pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshRe
     }
 }
 
-/// LOD mesh: simple per-face geometry from shape definitions, no chamfering.
+// ---------------------------------------------------------------------------
+// LOD mesh (unchanged — simple, no chamfer)
+// ---------------------------------------------------------------------------
+
 fn generate_lod_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -185,53 +130,29 @@ fn generate_lod_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
         for z in 0..CHUNK_Z {
             for x in 0..CHUNK_X {
                 let voxel = data.get(x, y, z);
-                if voxel.is_empty() {
-                    continue;
-                }
-
-                let Some(shape) = shapes.get(voxel.shape_index()) else {
-                    continue;
-                };
+                if voxel.is_empty() { continue; }
+                let Some(shape) = shapes.get(voxel.shape_index()) else { continue; };
                 let facing = voxel.facing();
-
                 let wx = x as f32 * VOXEL_WIDTH;
                 let wy = y as f32 * VOXEL_HEIGHT;
                 let wz = z as f32 * VOXEL_WIDTH;
 
                 for face in &shape.faces {
                     let rotated_side = face.side.rotated_by(facing);
-
-                    if let Some((dx, dy, dz)) = rotated_side.neighbor_offset() {
-                        let nx = x as i32 + dx;
-                        let ny = y as i32 + dy;
-                        let nz = z as i32 + dz;
-                        if neighbor_occludes(data, shapes, nx, ny, nz, opposite_side(rotated_side)) {
-                            continue;
-                        }
-                    }
+                    if face_is_occluded(data, shapes, x, y, z, rotated_side) { continue; }
 
                     let base_index = positions.len() as u32;
-
-                    // Transform vertices to world space
-                    let world_verts: Vec<Vec3> = face
-                        .vertices
-                        .iter()
+                    let world_verts: Vec<Vec3> = face.vertices.iter()
                         .map(|v| to_world(facing.rotate_point(*v), wx, wy, wz))
                         .collect();
-
-                    // Compute normal from world-space geometry
                     let world_normal = compute_world_normal(&world_verts, &face.triangles);
 
                     for wv in &world_verts {
                         positions.push(wv.to_array());
                         normals.push(world_normal.to_array());
                     }
-
                     let uv_map = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-                    for i in 0..face.vertices.len() {
-                        uvs.push(uv_map[i % 4]);
-                    }
-
+                    for i in 0..face.vertices.len() { uvs.push(uv_map[i % 4]); }
                     for tri in &face.triangles {
                         indices.push(base_index + tri[2] as u32);
                         indices.push(base_index + tri[1] as u32);
@@ -242,263 +163,299 @@ fn generate_lod_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
         }
     }
 
-    let n_positions = positions.len();
-    ChunkMeshData {
-        positions,
-        normals,
-        uvs,
-        chamfer_offsets: vec![[0.0; 3]; n_positions],
-        indices,
+    let n = positions.len();
+    ChunkMeshData { positions, normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], indices }
+}
+
+// ---------------------------------------------------------------------------
+// Solid mesh with shared vertices (input for chamfer post-process)
+// ---------------------------------------------------------------------------
+
+/// Quantize a world-space position for vertex deduplication.
+fn quantize(p: Vec3) -> (i32, i32, i32) {
+    const SCALE: f32 = 10000.0;
+    (
+        (p.x * SCALE).round() as i32,
+        (p.y * SCALE).round() as i32,
+        (p.z * SCALE).round() as i32,
+    )
+}
+
+struct SolidFace {
+    /// Indices into SolidMesh.positions (3 or 4 verts).
+    verts: Vec<u32>,
+    normal: Vec3,
+    chamfer_mode: ChamferMode,
+}
+
+struct SolidMesh {
+    positions: Vec<Vec3>,
+    faces: Vec<SolidFace>,
+    vert_map: HashMap<(i32, i32, i32), u32>,
+}
+
+impl SolidMesh {
+    fn new() -> Self {
+        Self { positions: Vec::new(), faces: Vec::new(), vert_map: HashMap::new() }
+    }
+
+    fn add_vert(&mut self, pos: Vec3) -> u32 {
+        let key = quantize(pos);
+        *self.vert_map.entry(key).or_insert_with(|| {
+            let idx = self.positions.len() as u32;
+            self.positions.push(pos);
+            idx
+        })
     }
 }
 
-/// Full-res mesh: faces with chamfer border geometry on exposed edges.
-fn generate_full_res_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    let mut chamfer_offsets = Vec::new();
-    let mut indices = Vec::new();
+fn build_solid_mesh(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
+    let mut mesh = SolidMesh::new();
 
     for y in 0..CHUNK_Y {
         for z in 0..CHUNK_Z {
             for x in 0..CHUNK_X {
                 let voxel = data.get(x, y, z);
-                if voxel.is_empty() {
-                    continue;
-                }
-
-                let Some(shape) = shapes.get(voxel.shape_index()) else {
-                    continue;
-                };
+                if voxel.is_empty() { continue; }
+                let Some(shape) = shapes.get(voxel.shape_index()) else { continue; };
                 let facing = voxel.facing();
-
                 let wx = x as f32 * VOXEL_WIDTH;
                 let wy = y as f32 * VOXEL_HEIGHT;
                 let wz = z as f32 * VOXEL_WIDTH;
 
                 for face in &shape.faces {
                     let rotated_side = face.side.rotated_by(facing);
+                    if face_is_occluded(data, shapes, x, y, z, rotated_side) { continue; }
 
-                    if let Some((dx, dy, dz)) = rotated_side.neighbor_offset() {
-                        let nx = x as i32 + dx;
-                        let ny = y as i32 + dy;
-                        let nz = z as i32 + dz;
-                        if neighbor_occludes(data, shapes, nx, ny, nz, opposite_side(rotated_side)) {
-                            continue;
-                        }
-                    }
+                    let world_verts: Vec<Vec3> = face.vertices.iter()
+                        .map(|v| to_world(facing.rotate_point(*v), wx, wy, wz))
+                        .collect();
+                    let normal = compute_world_normal(&world_verts, &face.triangles);
+                    let vert_indices: Vec<u32> = world_verts.iter()
+                        .map(|v| mesh.add_vert(*v))
+                        .collect();
 
-                    emit_chamfered_face(
-                        face,
-                        facing,
-                        data,
-                        shapes,
-                        x, y, z,
-                        wx, wy, wz,
-                        &mut positions,
-                        &mut normals,
-                        &mut uvs,
-                        &mut chamfer_offsets,
-                        &mut indices,
-                    );
+                    mesh.faces.push(SolidFace {
+                        verts: vert_indices,
+                        normal,
+                        chamfer_mode: face.chamfer_mode,
+                    });
                 }
             }
         }
     }
 
-    ChunkMeshData {
-        positions,
-        normals,
-        uvs,
-        chamfer_offsets,
-        indices,
+    // Remove back-to-back faces: pairs of faces that share the exact same
+    // vertex set (e.g., adjacent wedge triangles facing opposite directions).
+    // These are internal surfaces hidden by the slope above.
+    let mut face_groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
+    for (fi, face) in mesh.faces.iter().enumerate() {
+        let mut key = face.verts.clone();
+        key.sort();
+        face_groups.entry(key).or_default().push(fi);
     }
-}
-
-/// Emit geometry for a single face with chamfer borders.
-fn emit_chamfered_face(
-    face: &VoxelFace,
-    facing: Facing,
-    data: &ChunkData,
-    shapes: &ShapeTable,
-    vx: usize,
-    vy: usize,
-    vz: usize,
-    wx: f32,
-    wy: f32,
-    wz: f32,
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    chamfer_offsets: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
-) {
-    let n_verts = face.vertices.len();
-
-    // Compute world-space outer vertices (unchamfered positions)
-    let outer_world: Vec<Vec3> = face
-        .vertices
-        .iter()
-        .map(|v| to_world(facing.rotate_point(*v), wx, wy, wz))
-        .collect();
-
-    // Compute face normal from world-space geometry
-    let world_normal = compute_world_normal(&outer_world, &face.triangles);
-    let normal_arr = world_normal.to_array();
-
-    let ivx = vx as i32;
-    let ivy = vy as i32;
-    let ivz = vz as i32;
-
-    // Determine which edges need chamfering.
-    // An edge is NOT chamfered if ANY of its neighbor_sides has a filled voxel.
-    // (Any filled neighbor means shared geometry at the boundary.)
-    // Empty neighbor_sides means always chamfer (internal/diagonal edges).
-    let edge_chamfered: Vec<bool> = face
-        .edges
-        .iter()
-        .map(|edge| {
-            if edge.neighbor_sides.is_empty() {
-                return true;
-            }
-            for side in &edge.neighbor_sides {
-                let rotated_side = side.rotated_by(facing);
-                if let Some((dx, dy, dz)) = rotated_side.neighbor_offset() {
-                    if data.is_neighbor_filled(ivx + dx, ivy + dy, ivz + dz) {
-                        return false;
-                    }
-                }
-            }
-            true
+    let remove: Vec<bool> = (0..mesh.faces.len())
+        .map(|fi| {
+            let mut key = mesh.faces[fi].verts.clone();
+            key.sort();
+            face_groups.get(&key).map_or(false, |g| g.len() >= 2)
         })
         .collect();
-
-    // Compute per-edge inward perpendicular directions (on the face plane).
-    let edge_inwards: Vec<Vec3> = face
-        .edges
-        .iter()
-        .map(|edge| {
-            let edge_dir = (outer_world[edge.v1] - outer_world[edge.v0]).normalize_or_zero();
-            edge_dir.cross(world_normal).normalize_or_zero()
-        })
-        .collect();
-
-    // Per-edge, per-vertex snap detection: check if the neighbor's geometry
-    // shares this vertex. [v0_snapped, v1_snapped] per edge.
-    let edge_snap: Vec<[bool; 2]> = face
-        .edges
-        .iter()
+    mesh.faces = mesh.faces
+        .into_iter()
         .enumerate()
-        .map(|(ei, edge)| {
-            if !edge_chamfered[ei] {
-                return [false, false]; // not chamfered, doesn't matter
-            }
-            [
-                vertex_snapped_for_edge(outer_world[edge.v0], edge, facing, data, shapes, ivx, ivy, ivz),
-                vertex_snapped_for_edge(outer_world[edge.v1], edge, facing, data, shapes, ivx, ivy, ivz),
-            ]
-        })
+        .filter(|(fi, _)| !remove[*fi])
+        .map(|(_, f)| f)
         .collect();
 
-    // Compute inner vertices with per-vertex chamfer width.
-    // A vertex snapped for a particular edge gets 0 inset from that edge.
-    let inner_world: Vec<Vec3> = (0..n_verts)
-        .map(|vi| {
-            let mut offset = Vec3::ZERO;
-
-            for (ei, edge) in face.edges.iter().enumerate() {
-                if !edge_chamfered[ei] {
-                    continue;
-                }
-                if edge.v0 == vi {
-                    let width = if edge_snap[ei][0] { 0.0 } else { CHAMFER_WIDTH };
-                    offset += edge_inwards[ei] * width;
-                } else if edge.v1 == vi {
-                    let width = if edge_snap[ei][1] { 0.0 } else { CHAMFER_WIDTH };
-                    offset += edge_inwards[ei] * width;
-                }
-            }
-
-            // Clamp the inner vertex to the voxel's world-space bounds
-            // so chamfer geometry never pokes past voxel boundaries.
-            let inner = outer_world[vi] + offset;
-            let min_bound = Vec3::new(wx, wy, wz);
-            let max_bound = Vec3::new(wx + VOXEL_WIDTH, wy + VOXEL_HEIGHT, wz + VOXEL_WIDTH);
-            inner.clamp(min_bound, max_bound)
-        })
-        .collect();
-
-    // Chamfer offset = inner - outer (the displacement the vertex shader will apply)
-    let offsets: Vec<[f32; 3]> = (0..n_verts)
-        .map(|i| (inner_world[i] - outer_world[i]).to_array())
-        .collect();
-
-    // --- Emit the inner face ---
-    let inner_base = positions.len() as u32;
-    for i in 0..n_verts {
-        positions.push(inner_world[i].to_array());
-        normals.push(normal_arr);
-        uvs.push([0.0, 0.0]); // TODO: proper UVs
-        chamfer_offsets.push([0.0; 3]); // Inner verts are already at chamfered position
-    }
-    for tri in &face.triangles {
-        indices.push(inner_base + tri[2] as u32);
-        indices.push(inner_base + tri[1] as u32);
-        indices.push(inner_base + tri[0] as u32);
-    }
-
-    // --- Emit chamfer strips for each chamfered edge ---
-    for (ei, edge) in face.edges.iter().enumerate() {
-        if !edge_chamfered[ei] {
-            continue;
-        }
-
-        let ov0 = outer_world[edge.v0].to_array();
-        let ov1 = outer_world[edge.v1].to_array();
-        let iv0 = inner_world[edge.v0].to_array();
-        let iv1 = inner_world[edge.v1].to_array();
-
-        // Compute edge outward direction for normals
-        let edge_outward = -edge_inwards[ei];
-
-        let base = positions.len() as u32;
-
-        // 4 vertices: outer0, outer1, inner1, inner0
-        positions.extend_from_slice(&[ov0, ov1, iv1, iv0]);
-
-        match face.chamfer_mode {
-            ChamferMode::Hard => {
-                // Flat chamfer normal (average of face + outward)
-                let cn = (world_normal + edge_outward).normalize_or_zero().to_array();
-                normals.extend_from_slice(&[cn, cn, cn, cn]);
-            }
-            ChamferMode::Smooth => {
-                // Outer verts get averaged normal (matches adjacent face's chamfer strip),
-                // inner verts get face normal — GPU interpolates for a rounded look.
-                let outer_n = (world_normal + edge_outward).normalize_or_zero().to_array();
-                let inner_n = normal_arr;
-                normals.extend_from_slice(&[outer_n, outer_n, inner_n, inner_n]);
-            }
-        }
-        uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-
-        // Outer verts have chamfer offset (shader pushes them inward at close range)
-        chamfer_offsets.push(offsets[edge.v0]);
-        chamfer_offsets.push(offsets[edge.v1]);
-        // Inner verts have zero offset (already inset)
-        chamfer_offsets.push([0.0; 3]);
-        chamfer_offsets.push([0.0; 3]);
-
-        // Two triangles
-        indices.extend_from_slice(&[
-            base + 2, base + 1, base,
-            base + 3, base + 2, base,
-        ]);
-    }
+    mesh
 }
 
-/// Build a Bevy `Mesh` from generated mesh data (full-res version with chamfer attribute).
+// ---------------------------------------------------------------------------
+// Edge graph
+// ---------------------------------------------------------------------------
+
+fn edge_key(a: u32, b: u32) -> (u32, u32) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+struct EdgeInfo {
+    /// Which faces share this edge (indices into SolidMesh.faces).
+    faces: Vec<usize>,
+}
+
+/// Dot-product threshold: edges with adjacent normals below this are "sharp".
+const SHARP_DOT_THRESHOLD: f32 = 0.985;
+
+fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
+    let mut edges: HashMap<(u32, u32), EdgeInfo> = HashMap::new();
+    for (fi, face) in mesh.faces.iter().enumerate() {
+        let n = face.verts.len();
+        for i in 0..n {
+            let key = edge_key(face.verts[i], face.verts[(i + 1) % n]);
+            edges.entry(key).or_insert_with(|| EdgeInfo { faces: Vec::new() }).faces.push(fi);
+        }
+    }
+    edges
+}
+
+fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
+    if edge.faces.len() < 2 {
+        return true; // boundary edge — always sharp
+    }
+    let n0 = mesh.faces[edge.faces[0]].normal;
+    let n1 = mesh.faces[edge.faces[1]].normal;
+    n0.dot(n1) < SHARP_DOT_THRESHOLD
+}
+
+// ---------------------------------------------------------------------------
+// Chamfered mesh generation (edge-graph post-process)
+// ---------------------------------------------------------------------------
+
+fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
+    let solid = build_solid_mesh(data, shapes);
+    let edge_graph = build_edge_graph(&solid);
+
+    // Classify edges
+    let sharp_set: HashMap<(u32, u32), &EdgeInfo> = edge_graph.iter()
+        .filter(|(_, info)| is_sharp(info, &solid))
+        .map(|(&key, info)| (key, info))
+        .collect();
+
+    // For each face, for each edge of that face, compute the inward direction
+    // and whether the edge is sharp.
+    // Then compute per-face inner vertices (inset at sharp edges).
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut chamfer_offsets: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    // Per-face: compute inner vertices, emit inner face + chamfer strips
+    for (fi, face) in solid.faces.iter().enumerate() {
+        let n = face.verts.len();
+        let normal = face.normal;
+        let normal_arr = normal.to_array();
+
+        // For each edge of this face, check if sharp + compute inward direction
+        let mut edge_sharp: Vec<bool> = Vec::with_capacity(n);
+        let mut edge_inward: Vec<Vec3> = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let v0 = face.verts[i];
+            let v1 = face.verts[(i + 1) % n];
+            let key = edge_key(v0, v1);
+            let sharp = sharp_set.contains_key(&key);
+            edge_sharp.push(sharp);
+
+            let p0 = solid.positions[v0 as usize];
+            let p1 = solid.positions[v1 as usize];
+            let edge_dir = (p1 - p0).normalize_or_zero();
+            edge_inward.push(edge_dir.cross(normal).normalize_or_zero());
+        }
+
+        // Compute inner position for each vertex of this face
+        let inner: Vec<Vec3> = (0..n).map(|vi| {
+            let mut offset = Vec3::ZERO;
+            // Previous edge (vi is the end vertex of edge vi-1)
+            let prev = (vi + n - 1) % n;
+            if edge_sharp[prev] {
+                offset += edge_inward[prev] * CHAMFER_WIDTH;
+            }
+            // Current edge (vi is the start vertex of edge vi)
+            if edge_sharp[vi] {
+                offset += edge_inward[vi] * CHAMFER_WIDTH;
+            }
+            solid.positions[face.verts[vi] as usize] + offset
+        }).collect();
+
+        // --- Emit inner face ---
+        let inner_base = positions.len() as u32;
+        for i in 0..n {
+            positions.push(inner[i].to_array());
+            normals.push(normal_arr);
+            uvs.push([0.0, 0.0]);
+            chamfer_offsets.push([0.0; 3]);
+        }
+        // Triangulate (fan from vertex 0 — works for convex 3 or 4 verts)
+        for i in 1..n - 1 {
+            indices.push(inner_base + i as u32 + 1);
+            indices.push(inner_base + i as u32);
+            indices.push(inner_base);
+        }
+
+        // --- Emit chamfer strips for sharp edges ---
+        for i in 0..n {
+            if !edge_sharp[i] { continue; }
+
+            let vi = i;
+            let vj = (i + 1) % n;
+            let outer_i = solid.positions[face.verts[vi] as usize];
+            let outer_j = solid.positions[face.verts[vj] as usize];
+            let inner_i = inner[vi];
+            let inner_j = inner[vj];
+
+            // Chamfer strip: outer_i, outer_j, inner_j, inner_i
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&[
+                outer_i.to_array(), outer_j.to_array(),
+                inner_j.to_array(), inner_i.to_array(),
+            ]);
+
+            let edge_outward = -edge_inward[i];
+
+            // Determine chamfer mode for this edge
+            let key = edge_key(face.verts[vi], face.verts[vj]);
+            let chamfer_mode = if let Some(info) = sharp_set.get(&key) {
+                // Use smooth only if both faces are smooth
+                if info.faces.len() >= 2 {
+                    let m0 = solid.faces[info.faces[0]].chamfer_mode;
+                    let m1 = solid.faces[info.faces[1]].chamfer_mode;
+                    if m0 == ChamferMode::Smooth && m1 == ChamferMode::Smooth {
+                        ChamferMode::Smooth
+                    } else {
+                        ChamferMode::Hard
+                    }
+                } else {
+                    face.chamfer_mode
+                }
+            } else {
+                face.chamfer_mode
+            };
+
+            match chamfer_mode {
+                ChamferMode::Hard => {
+                    let cn = (normal + edge_outward).normalize_or_zero().to_array();
+                    normals.extend_from_slice(&[cn, cn, cn, cn]);
+                }
+                ChamferMode::Smooth => {
+                    let outer_n = (normal + edge_outward).normalize_or_zero().to_array();
+                    normals.extend_from_slice(&[outer_n, outer_n, normal_arr, normal_arr]);
+                }
+            }
+
+            uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+
+            // Chamfer offset: outer verts can be pushed inward by shader
+            let off_i = (inner_i - outer_i).to_array();
+            let off_j = (inner_j - outer_j).to_array();
+            chamfer_offsets.extend_from_slice(&[off_i, off_j, [0.0; 3], [0.0; 3]]);
+
+            indices.extend_from_slice(&[
+                base + 2, base + 1, base,
+                base + 3, base + 2, base,
+            ]);
+        }
+    }
+
+    ChunkMeshData { positions, normals, uvs, chamfer_offsets, indices }
+}
+
+// ---------------------------------------------------------------------------
+// Mesh builders
+// ---------------------------------------------------------------------------
+
 pub fn build_full_res_mesh(data: &ChunkMeshData) -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -512,7 +469,6 @@ pub fn build_full_res_mesh(data: &ChunkMeshData) -> Mesh {
     mesh
 }
 
-/// Build a Bevy `Mesh` from LOD mesh data (no chamfer attribute).
 pub fn build_lod_mesh(data: &ChunkMeshData) -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
