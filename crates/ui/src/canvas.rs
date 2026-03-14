@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::Sender;
 
 use crate::bridge::{UiEvent, UiInputState};
-use crate::draw_cmd::DrawCmd;
+use crate::draw_cmd::{DrawCmd, DrawMesh, DrawOp};
+use crate::ffd::{self, FfdSim};
 use crate::glyph::GlyphCache;
 
 /// Result of a hit test for mouse interaction.
@@ -15,13 +16,20 @@ pub struct HitResult {
 
 /// Immediate-mode drawing context. Created fresh each frame on the UI thread.
 pub struct Canvas<'a> {
-    commands: Vec<DrawCmd>,
+    commands: Vec<DrawOp>,
     clip_stack: Vec<[f32; 4]>,
     glyph_cache: &'a Arc<Mutex<GlyphCache>>,
     event_tx: &'a Sender<UiEvent>,
     input: &'a UiInputState,
     next_id: u32,
+    /// Active FFD for deforming subsequent draws. Set via `begin_ffd`/`end_ffd`.
+    active_ffd: Option<*const FfdSim>,
 }
+
+// SAFETY: The FFD pointer is only valid during the draw call scope.
+// Canvas is not Send/Sync and the pointer is only used within a single
+// frame's draw() call where the FfdSim reference is guaranteed alive.
+unsafe impl Send for Canvas<'_> {}
 
 impl<'a> Canvas<'a> {
     pub(crate) fn new(
@@ -36,19 +44,51 @@ impl<'a> Canvas<'a> {
             event_tx,
             input,
             next_id: 0,
+            active_ffd: None,
         }
+    }
+
+    /// Begin drawing with FFD deformation. All subsequent `rect()` and `text()`
+    /// calls will be tessellated and warped through the given FFD simulation
+    /// until `end_ffd()` is called.
+    ///
+    /// The `FfdSim` must outlive this call (it's borrowed for the duration of
+    /// the FFD scope).
+    pub fn begin_ffd(&mut self, ffd: &FfdSim) {
+        self.active_ffd = Some(ffd as *const FfdSim);
+    }
+
+    /// Stop FFD deformation. Subsequent draws are normal axis-aligned quads.
+    pub fn end_ffd(&mut self) {
+        self.active_ffd = None;
     }
 
     /// Draw a solid-color rectangle.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-        let uvs = self.glyph_cache.lock().unwrap().atlas.white_pixel_uvs();
-        self.commands.push(DrawCmd {
-            rect: [x, y, w, h],
-            uvs,
-            color,
-            atlas_page: 0,
-            clip: self.current_clip(),
-        });
+        let uvs_rect = self.glyph_cache.lock().unwrap().atlas.white_pixel_uvs();
+
+        if let Some(ffd_ptr) = self.active_ffd {
+            // SAFETY: pointer is valid for the duration of the draw scope
+            let ffd = unsafe { &*ffd_ptr };
+            let (positions, tex_coords, indices) =
+                ffd::tessellate_through_ffd(ffd, [x, y, w, h], uvs_rect);
+            self.commands.push(DrawOp::Mesh(DrawMesh {
+                positions,
+                uvs: tex_coords,
+                indices,
+                color,
+                atlas_page: 0,
+                clip: self.current_clip(),
+            }));
+        } else {
+            self.commands.push(DrawOp::Quad(DrawCmd {
+                rect: [x, y, w, h],
+                uvs: uvs_rect,
+                color,
+                atlas_page: 0,
+                clip: self.current_clip(),
+            }));
+        }
     }
 
     /// Draw a text string at the given position.
@@ -60,17 +100,36 @@ impl<'a> Canvas<'a> {
 
         let clip = self.current_clip();
 
-        for g in &glyphs {
-            let region = &g.entry.region;
-            let uvs = region.uvs(atlas_w, atlas_h);
-
-            self.commands.push(DrawCmd {
-                rect: [x + g.x, y + g.y, region.width as f32, region.height as f32],
-                uvs,
-                color,
-                atlas_page: 0,
-                clip,
-            });
+        if let Some(ffd_ptr) = self.active_ffd {
+            // SAFETY: pointer is valid for the duration of the draw scope
+            let ffd = unsafe { &*ffd_ptr };
+            for g in &glyphs {
+                let region = &g.entry.region;
+                let uvs = region.uvs(atlas_w, atlas_h);
+                let glyph_rect = [x + g.x, y + g.y, region.width as f32, region.height as f32];
+                let (positions, tex_coords, indices) =
+                    ffd::tessellate_through_ffd(ffd, glyph_rect, uvs);
+                self.commands.push(DrawOp::Mesh(DrawMesh {
+                    positions,
+                    uvs: tex_coords,
+                    indices,
+                    color,
+                    atlas_page: 0,
+                    clip,
+                }));
+            }
+        } else {
+            for g in &glyphs {
+                let region = &g.entry.region;
+                let uvs = region.uvs(atlas_w, atlas_h);
+                self.commands.push(DrawOp::Quad(DrawCmd {
+                    rect: [x + g.x, y + g.y, region.width as f32, region.height as f32],
+                    uvs,
+                    color,
+                    atlas_page: 0,
+                    clip,
+                }));
+            }
         }
     }
 
@@ -130,7 +189,7 @@ impl<'a> Canvas<'a> {
     }
 
     /// Consume the canvas and return the draw command list.
-    pub(crate) fn finish(self) -> Vec<DrawCmd> {
+    pub(crate) fn finish(self) -> Vec<DrawOp> {
         self.commands
     }
 }

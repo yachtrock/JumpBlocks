@@ -3,7 +3,7 @@ use bevy::render::Extract;
 use crossbeam_channel::Receiver;
 
 use crate::bridge::{AtlasUpload, UiFrame};
-use crate::draw_cmd::DrawCmd;
+use crate::draw_cmd::DrawOp;
 
 /// Render-world resource holding the receiver for UI frames.
 #[derive(Resource)]
@@ -12,7 +12,7 @@ pub struct UiFrameReceiver(pub Receiver<UiFrame>);
 /// Render-world resource holding the extracted frame data for the current frame.
 #[derive(Resource, Default)]
 pub struct ExtractedUiFrame {
-    pub commands: Vec<DrawCmd>,
+    pub commands: Vec<DrawOp>,
     pub atlas_uploads: Vec<AtlasUpload>,
     pub atlas_size: (u32, u32),
     pub dpi_scale: f32,
