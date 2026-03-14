@@ -148,10 +148,13 @@ fn spawn_server(commands: &mut Commands) -> Entity {
 fn setup_listen_server(mut commands: Commands) {
     let server_entity = spawn_server(&mut commands);
 
-    // Spawn a host client that connects to the local server
+    // Spawn a host client that connects to the local server.
+    // The `Client` marker is required so lightyear's HostPlugin observer
+    // can detect this entity and add `HostClient` + `Connected`.
     let client_entity = commands
         .spawn((
             Name::new("HostClient"),
+            client::Client::default(),
             LinkOf {
                 server: server_entity,
             },
@@ -191,6 +194,7 @@ fn setup_client(mut commands: Commands, addr: Res<ClientServerAddr>) {
     let client_entity = commands
         .spawn((
             Name::new("Client"),
+            client::Client::default(),
             netcode_client,
             UdpIo::default(),
             LocalAddr(SocketAddr::new("0.0.0.0".parse().unwrap(), 0)),
