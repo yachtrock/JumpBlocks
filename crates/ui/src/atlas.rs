@@ -75,16 +75,11 @@ impl Atlas {
         atlas
     }
 
-    /// UV coordinates for the white pixel region (spans the 2x2 block).
-    ///
-    /// Returns `[u_min, v_min, u_max, v_max]` covering the interior of the
-    /// 2×2 white block so that tessellated meshes (FFD) can interpolate UVs
-    /// across the region and still sample pure white at every fragment.
+    /// UV coordinates for the 1x1 white pixel (center of the 2x2 block).
     pub fn white_pixel_uvs(&self) -> [f32; 4] {
-        let texel_x = 1.0 / self.width as f32;
-        let texel_y = 1.0 / self.height as f32;
-        // Span from center of texel (0,0) to center of texel (1,1)
-        [0.5 * texel_x, 0.5 * texel_y, 1.5 * texel_x, 1.5 * texel_y]
+        let half_texel_x = 0.5 / self.width as f32;
+        let half_texel_y = 0.5 / self.height as f32;
+        [half_texel_x, half_texel_y, half_texel_x, half_texel_y]
     }
 
     /// Allocate a region and copy pixel data into it.
