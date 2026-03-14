@@ -325,6 +325,48 @@ fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Sutherland-Hodgman polygon clipping
+// ---------------------------------------------------------------------------
+
+/// Clip a convex polygon against a half-plane. Keeps the side where `plane_normal` points.
+fn clip_polygon_by_plane(polygon: &[Vec3], plane_point: Vec3, plane_normal: Vec3) -> Vec<Vec3> {
+    if polygon.len() < 3 { return polygon.to_vec(); }
+    let mut output = Vec::new();
+    let n = polygon.len();
+    for i in 0..n {
+        let s = polygon[i];
+        let e = polygon[(i + 1) % n];
+        let ds = (s - plane_point).dot(plane_normal);
+        let de = (e - plane_point).dot(plane_normal);
+
+        if de >= -1e-6 {
+            // E is inside
+            if ds < -1e-6 {
+                // S is outside → add intersection
+                let t = ds / (ds - de);
+                output.push(s.lerp(e, t));
+            }
+            output.push(e);
+        } else if ds >= -1e-6 {
+            // E is outside, S is inside → add intersection only
+            let t = ds / (ds - de);
+            output.push(s.lerp(e, t));
+        }
+    }
+    output
+}
+
+/// A clip plane from a chamfer strip, used to trim neighboring faces.
+struct ChamferClipPlane {
+    point: Vec3,
+    normal: Vec3,
+    /// The two faces forming this chamfer (don't clip these).
+    faces: [usize; 2],
+    /// The edge vertices (for lookup).
+    verts: [u32; 2],
+}
+
+// ---------------------------------------------------------------------------
 // Chamfered mesh generation (edge-graph post-process)
 // ---------------------------------------------------------------------------
 
@@ -377,6 +419,39 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         }).collect()
     }).collect();
 
+    // ---------------------------------------------------------------
+    // Pass 2: collect chamfer strip clip planes
+    // ---------------------------------------------------------------
+    let mut clip_planes: Vec<ChamferClipPlane> = Vec::new();
+    // vertex → indices into clip_planes
+    let mut vert_clip_planes: Vec<Vec<usize>> = vec![Vec::new(); solid.positions.len()];
+
+    for (&(ev0, ev1), info) in &edge_graph {
+        if !is_sharp(info, &solid) { continue; }
+        if info.faces.len() < 2 { continue; } // boundary edges don't clip neighbors
+
+        let fi_a = info.faces[0];
+        let fi_b = info.faces[1];
+
+        let a0 = find_face_inner_at_vert(&solid.faces[fi_a], &all_inner[fi_a], ev0).unwrap();
+        let a1 = find_face_inner_at_vert(&solid.faces[fi_a], &all_inner[fi_a], ev1).unwrap();
+        let b0 = find_face_inner_at_vert(&solid.faces[fi_b], &all_inner[fi_b], ev0).unwrap();
+
+        let strip_normal = (a1 - a0).cross(b0 - a0);
+        if strip_normal.length_squared() < 1e-10 { continue; }
+        let strip_normal = strip_normal.normalize();
+
+        let cp_idx = clip_planes.len();
+        clip_planes.push(ChamferClipPlane {
+            point: a0,
+            normal: strip_normal,
+            faces: [fi_a, fi_b],
+            verts: [ev0, ev1],
+        });
+        vert_clip_planes[ev0 as usize].push(cp_idx);
+        vert_clip_planes[ev1 as usize].push(cp_idx);
+    }
+
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -384,8 +459,11 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
     let mut indices: Vec<u32> = Vec::new();
 
     // ---------------------------------------------------------------
-    // Pass 2: emit inner faces
+    // Pass 3: emit inner faces
     // ---------------------------------------------------------------
+    // TODO: clip faces against chamfer strip planes to prevent z-fighting
+    // at corners. Previous attempts were too aggressive (infinite planes
+    // cut through unrelated faces). Need bounded clip regions.
     for (fi, face) in solid.faces.iter().enumerate() {
         let n = face.verts.len();
         let normal_arr = face.normal.to_array();

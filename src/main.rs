@@ -14,7 +14,7 @@ use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dPlugin;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use jumpblocks_ui::{Canvas, UiInputState, UiPlugin};
 use jumpblocks_ui::ffd::FfdSim;
@@ -487,11 +487,11 @@ fn main() {
         NetworkRole::DedicatedServer
     } else if let Some(ref addr_str) = cli.connect {
         let server_addr: SocketAddr = addr_str
-            .parse()
+            .parse::<SocketAddr>()
             .unwrap_or_else(|_| {
                 // Try adding default port if only IP was given
                 format!("{}:{}", addr_str, DEFAULT_PORT)
-                    .parse()
+                    .parse::<SocketAddr>()
                     .expect("Invalid server address. Use format: IP:PORT (e.g. 192.168.1.5:5000)")
             });
         NetworkRole::Client { server_addr }
