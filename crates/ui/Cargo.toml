@@ -1,0 +1,19 @@
+[package]
+name = "jumpblocks-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.18.1", default-features = false, features = [
+    "bevy_render",
+    "bevy_window",
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_mesh",
+    "bevy_log",
+    "bevy_shader",
+] }
+crossbeam-channel = "0.5"
+cosmic-text = "0.12"
+etagere = "0.2"
+bytemuck = { version = "1", features = ["derive"] }
