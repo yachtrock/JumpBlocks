@@ -239,30 +239,28 @@ impl UiDrawFn for GameUi {
         let sx = center_x - sw * 0.5;
         let sy = center_y - sh * 0.5;
 
-        // Dim background (outside FFD)
+        // Dim background (not FFD-warped)
         canvas.rect(0.0, 0.0, win.x, win.y, [0.0, 0.0, 0.0, 0.5]);
 
-        // --- Begin FFD-warped drawing ---
-        canvas.begin_ffd(ffd);
-
+        // --- All panel drawing goes through rect_ffd / text_ffd ---
         // Panel background (scaled coords — FFD maps them into the full-size grid)
-        canvas.rect(sx, sy, sw, sh, [0.12, 0.12, 0.18, 0.95]);
+        canvas.rect_ffd(sx, sy, sw, sh, [0.12, 0.12, 0.18, 0.95], ffd);
         // Panel border
-        canvas.rect(sx, sy, sw, 2.0, [0.4, 0.4, 0.6, 1.0]);
-        canvas.rect(sx, sy + sh - 2.0, sw, 2.0, [0.4, 0.4, 0.6, 1.0]);
-        canvas.rect(sx, sy, 2.0, sh, [0.4, 0.4, 0.6, 1.0]);
-        canvas.rect(sx + sw - 2.0, sy, 2.0, sh, [0.4, 0.4, 0.6, 1.0]);
+        canvas.rect_ffd(sx, sy, sw, 2.0, [0.4, 0.4, 0.6, 1.0], ffd);
+        canvas.rect_ffd(sx, sy + sh - 2.0, sw, 2.0, [0.4, 0.4, 0.6, 1.0], ffd);
+        canvas.rect_ffd(sx, sy, 2.0, sh, [0.4, 0.4, 0.6, 1.0], ffd);
+        canvas.rect_ffd(sx + sw - 2.0, sy, 2.0, sh, [0.4, 0.4, 0.6, 1.0], ffd);
 
         // Title
-        canvas.text(
+        canvas.text_ffd(
             sx + 16.0 * s, sy + 16.0 * s,
             "INVENTORY", 22.0 * s,
-            [0.9, 0.85, 0.6, 1.0],
+            [0.9, 0.85, 0.6, 1.0], ffd,
         );
-        canvas.text(
+        canvas.text_ffd(
             sx + sw - 160.0 * s, sy + 20.0 * s,
             "[ESC] Close", 13.0 * s,
-            [0.6, 0.6, 0.6, 1.0],
+            [0.6, 0.6, 0.6, 1.0], ffd,
         );
 
         // Item grid
@@ -284,37 +282,35 @@ impl UiDrawFn for GameUi {
             } else {
                 [0.18, 0.18, 0.24, 0.8]
             };
-            canvas.rect(cx, cy, cell_w, cell_h, bg);
+            canvas.rect_ffd(cx, cy, cell_w, cell_h, bg, ffd);
 
             if is_selected {
                 let b = (self.cursor_pulse.sin() * 0.3 + 0.7).clamp(0.4, 1.0);
-                canvas.rect(cx, cy, cell_w, 2.0, [0.5, 0.5, b, 1.0]);
-                canvas.rect(cx, cy + cell_h - 2.0, cell_w, 2.0, [0.5, 0.5, b, 1.0]);
-                canvas.rect(cx, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0]);
-                canvas.rect(cx + cell_w - 2.0, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0]);
+                canvas.rect_ffd(cx, cy, cell_w, 2.0, [0.5, 0.5, b, 1.0], ffd);
+                canvas.rect_ffd(cx, cy + cell_h - 2.0, cell_w, 2.0, [0.5, 0.5, b, 1.0], ffd);
+                canvas.rect_ffd(cx, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0], ffd);
+                canvas.rect_ffd(cx + cell_w - 2.0, cy, 2.0, cell_h, [0.5, 0.5, b, 1.0], ffd);
             }
 
-            canvas.rect(cx + 8.0 * s, cy + 8.0 * s, 32.0 * s, 32.0 * s, item.color);
-            canvas.text(cx + 8.0 * s, cy + 46.0 * s, &item.name, 12.0 * s, [0.9, 0.9, 0.9, 1.0]);
+            canvas.rect_ffd(cx + 8.0 * s, cy + 8.0 * s, 32.0 * s, 32.0 * s, item.color, ffd);
+            canvas.text_ffd(cx + 8.0 * s, cy + 46.0 * s, &item.name, 12.0 * s, [0.9, 0.9, 0.9, 1.0], ffd);
         }
 
         // Detail panel
         if let Some(item) = items.get(self.selected_slot) {
             let detail_y = grid_y + rows as f32 * (cell_h + 8.0 * s) + 8.0 * s;
-            canvas.rect(grid_x, detail_y, sw - 32.0 * s, 1.0, [0.4, 0.4, 0.5, 0.6]);
-            canvas.text(
+            canvas.rect_ffd(grid_x, detail_y, sw - 32.0 * s, 1.0, [0.4, 0.4, 0.5, 0.6], ffd);
+            canvas.text_ffd(
                 grid_x, detail_y + 10.0 * s,
                 &item.name, 16.0 * s,
-                [1.0, 1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0, 1.0], ffd,
             );
-            canvas.text(
+            canvas.text_ffd(
                 grid_x, detail_y + 32.0 * s,
                 &item.description, 13.0 * s,
-                [0.7, 0.7, 0.7, 1.0],
+                [0.7, 0.7, 0.7, 1.0], ffd,
             );
         }
-
-        canvas.end_ffd();
     }
 }
 
