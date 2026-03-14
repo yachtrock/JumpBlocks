@@ -1,6 +1,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use jumpblocks_voxel::chunk::{Chunk, ChunkData};
+use jumpblocks_voxel::chunk::{Chunk, ChunkData, Voxel};
+use jumpblocks_voxel::shape::{Facing, SHAPE_SMOOTH_CUBE};
 
 use crate::layers::GameLayer;
 
@@ -82,21 +83,22 @@ fn setup_world(
         }
     }
 
-    // Staircase: each step is 1 voxel tall (0.5 world units), 3 wide
+    // Staircase: each step is 1 voxel tall (0.5 world units), 3 wide — smooth cube
+    let smooth_voxel = Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1);
     for step in 0..8 {
         let y_base = 1 + step;
         for x in 0..3 {
             for z in 0..3 {
-                chunk_data.set_filled(x + step, y_base, z + 3, true);
+                chunk_data.set(x + step, y_base, z + 3, smooth_voxel);
             }
         }
     }
 
-    // A small tower at the top
+    // A small tower at the top — smooth cube
     for y in 9..18 {
         for x in 8..11 {
             for z in 3..6 {
-                chunk_data.set_filled(x, y, z, true);
+                chunk_data.set(x, y, z, smooth_voxel);
             }
         }
     }

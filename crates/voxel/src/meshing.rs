@@ -316,7 +316,7 @@ fn emit_chamfered_face(
         let iv0 = inner_world[edge.v0].to_array();
         let iv1 = inner_world[edge.v1].to_array();
 
-        // Chamfer strip normal: average of face normal and the edge's outward direction
+        // Compute edge outward direction
         let edge_outward = {
             let rotated_side = edge.neighbor_side.rotated_by(facing);
             if let Some((dx, dy, dz)) = rotated_side.neighbor_offset() {
@@ -325,14 +325,26 @@ fn emit_chamfered_face(
                 rotated_normal
             }
         };
-        let chamfer_normal = (rotated_normal + edge_outward).normalize_or_zero();
-        let cn = chamfer_normal.to_array();
 
         let base = positions.len() as u32;
 
         // 4 vertices: outer0, outer1, inner1, inner0
         positions.extend_from_slice(&[ov0, ov1, iv1, iv0]);
-        normals.extend_from_slice(&[cn, cn, cn, cn]);
+
+        match face.chamfer_mode {
+            ChamferMode::Hard => {
+                // Flat chamfer normal (average of face + outward)
+                let cn = (rotated_normal + edge_outward).normalize_or_zero().to_array();
+                normals.extend_from_slice(&[cn, cn, cn, cn]);
+            }
+            ChamferMode::Smooth => {
+                // Outer verts get averaged normal (matches adjacent face's chamfer strip),
+                // inner verts get face normal — GPU interpolates for a rounded look.
+                let outer_n = (rotated_normal + edge_outward).normalize_or_zero().to_array();
+                let inner_n = normal_arr;
+                normals.extend_from_slice(&[outer_n, outer_n, inner_n, inner_n]);
+            }
+        }
         uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
 
         // Outer verts have chamfer offset (shader pushes them inward at close range)

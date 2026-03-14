@@ -111,6 +111,17 @@ impl FaceSide {
     }
 }
 
+/// How chamfer strip normals are computed for a face.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChamferMode {
+    /// Hard edge: chamfer strip gets a flat normal (average of face + outward).
+    #[default]
+    Hard,
+    /// Smooth edge: chamfer strip normals interpolate from face normal (inner)
+    /// to the edge outward direction (outer), creating a rounded appearance.
+    Smooth,
+}
+
 /// An edge of a voxel face, defined by two vertex indices into the face's vertex list.
 #[derive(Debug, Clone)]
 pub struct VoxelEdge {
@@ -136,6 +147,8 @@ pub struct VoxelFace {
     pub side: FaceSide,
     /// Edges of this face, used for chamfering.
     pub edges: Vec<VoxelEdge>,
+    /// How chamfer normals blend on this face's edges.
+    pub chamfer_mode: ChamferMode,
 }
 
 /// A voxel shape definition — a collection of faces.
@@ -156,10 +169,15 @@ impl Default for ShapeTable {
         let mut table = Self {
             shapes: Vec::new(),
         };
-        table.shapes.push(cube_shape());
+        table.shapes.push(cube_shape());         // shape 0: hard-edge cube
+        table.shapes.push(smooth_cube_shape());   // shape 1: smooth-edge cube
         table
     }
 }
+
+/// Well-known shape indices.
+pub const SHAPE_CUBE: u16 = 0;
+pub const SHAPE_SMOOTH_CUBE: u16 = 1;
 
 impl ShapeTable {
     pub fn get(&self, index: u16) -> Option<&VoxelShape> {
@@ -208,6 +226,7 @@ fn cube_shape() -> VoxelShape {
                 VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::North },  // front edge
                 VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::West },   // left edge
             ],
+            chamfer_mode: ChamferMode::Hard,
         },
         // Bottom (-Y): vertices 2,3,1,0
         VoxelFace {
@@ -221,6 +240,7 @@ fn cube_shape() -> VoxelShape {
                 VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::South },
                 VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::West },
             ],
+            chamfer_mode: ChamferMode::Hard,
         },
         // North (+Z): vertices 3,2,6,7
         VoxelFace {
@@ -234,6 +254,7 @@ fn cube_shape() -> VoxelShape {
                 VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
                 VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::East },
             ],
+            chamfer_mode: ChamferMode::Hard,
         },
         // South (-Z): vertices 0,1,5,4
         VoxelFace {
@@ -247,6 +268,7 @@ fn cube_shape() -> VoxelShape {
                 VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
                 VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::West },
             ],
+            chamfer_mode: ChamferMode::Hard,
         },
         // East (+X): vertices 1,3,7,5
         VoxelFace {
@@ -260,6 +282,7 @@ fn cube_shape() -> VoxelShape {
                 VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
                 VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::South },
             ],
+            chamfer_mode: ChamferMode::Hard,
         },
         // West (-X): vertices 2,0,4,6
         VoxelFace {
@@ -273,6 +296,7 @@ fn cube_shape() -> VoxelShape {
                 VoxelEdge { v0: 2, v1: 3, neighbor_side: FaceSide::Top },
                 VoxelEdge { v0: 3, v1: 0, neighbor_side: FaceSide::North },
             ],
+            chamfer_mode: ChamferMode::Hard,
         },
     ];
 
@@ -280,4 +304,14 @@ fn cube_shape() -> VoxelShape {
         name: "cube".to_string(),
         faces,
     }
+}
+
+/// Shape 1: smooth-edge cube — same geometry as cube but with smooth chamfer normals.
+fn smooth_cube_shape() -> VoxelShape {
+    let mut shape = cube_shape();
+    shape.name = "smooth_cube".to_string();
+    for face in &mut shape.faces {
+        face.chamfer_mode = ChamferMode::Smooth;
+    }
+    shape
 }
