@@ -199,6 +199,8 @@ struct SolidFace {
     verts: Vec<u32>,
     normal: Vec3,
     chamfer_mode: ChamferMode,
+    /// Source voxel position in chunk coords — used to avoid clipping against own faces.
+    voxel: (usize, usize, usize),
 }
 
 struct SolidMesh {
@@ -252,6 +254,7 @@ fn build_solid_mesh(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
                         verts: vert_indices,
                         normal,
                         chamfer_mode: face.chamfer_mode,
+                        voxel: (x, y, z),
                     });
                 }
             }
@@ -386,41 +389,8 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             }
 
             let outer_vi = face.verts[vi] as usize;
-            let mut pos = solid.positions[outer_vi] + offset;
+            let pos = solid.positions[outer_vi] + offset;
 
-            // Only clip if vertex was actually moved
-            if offset.length_squared() > 0.0 {
-                // Find faces connected by smooth edges at this vertex
-                let mut clip_faces: Vec<usize> = Vec::new();
-                // Previous edge (vi-1 → vi)
-                if !edge_sharp[prev] {
-                    let key = edge_key(face.verts[prev], face.verts[vi]);
-                    if let Some(info) = edge_graph.get(&key) {
-                        for &fi in &info.faces {
-                            if fi != _fi { clip_faces.push(fi); }
-                        }
-                    }
-                }
-                // Next edge (vi → vi+1)
-                if !edge_sharp[vi] {
-                    let key = edge_key(face.verts[vi], face.verts[(vi + 1) % n]);
-                    if let Some(info) = edge_graph.get(&key) {
-                        for &fi in &info.faces {
-                            if fi != _fi { clip_faces.push(fi); }
-                        }
-                    }
-                }
-
-                // Clip against those faces' planes
-                for adj_fi in clip_faces {
-                    let adj = &solid.faces[adj_fi];
-                    let plane_point = solid.positions[outer_vi];
-                    let dist = (pos - plane_point).dot(adj.normal);
-                    if dist < -1e-5 {
-                        pos -= dist * adj.normal;
-                    }
-                }
-            }
 
             pos
         }).collect();
