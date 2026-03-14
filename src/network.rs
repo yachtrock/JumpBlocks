@@ -107,6 +107,7 @@ impl Plugin for NetworkPlugin {
                 );
                 app.add_systems(Update, sync_network_to_remote_players);
                 app.add_systems(Update, server_replicate_received_entities);
+                #[cfg(debug_assertions)]
                 app.add_systems(Update, debug_replication_state);
             }
             NetworkRole::DedicatedServer => {
@@ -116,6 +117,7 @@ impl Plugin for NetworkPlugin {
                 app.add_observer(add_replication_sender_on_link);
                 app.add_systems(Update, handle_new_client_connections);
                 app.add_systems(Update, server_replicate_received_entities);
+                #[cfg(debug_assertions)]
                 app.add_systems(Update, debug_replication_state);
             }
             NetworkRole::Client { server_addr } => {
@@ -138,6 +140,7 @@ impl Plugin for NetworkPlugin {
                         .run_if(any_with_component::<Connected>),
                 );
                 app.add_systems(Update, sync_network_to_remote_players);
+                #[cfg(debug_assertions)]
                 app.add_systems(Update, debug_replication_state);
             }
         }
@@ -363,7 +366,8 @@ fn server_replicate_received_entities(
     }
 }
 
-/// Periodic diagnostic system to log replication state.
+/// Periodic diagnostic system to log replication state (debug builds only).
+#[cfg(debug_assertions)]
 fn debug_replication_state(
     local_players: Query<(Entity, Option<&NetworkedPosition>, Option<&Replicate>, Has<Replicating>, Has<HasAuthority>), With<LocalPlayer>>,
     replicated: Query<(Entity, Option<&NetworkedPosition>), With<Replicated>>,
