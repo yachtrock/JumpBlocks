@@ -24,6 +24,13 @@ pub const NUM_POINTS: usize = GRID_SIZE * GRID_SIZE;
 ///
 /// Control points are stored in row-major order: index `j * 4 + i` where
 /// `i` is the column (horizontal) and `j` is the row (vertical).
+/// The four corner indices in the 4×4 grid.
+const CORNER_INDICES: &[usize] = &[0, GRID_SIZE - 1, NUM_POINTS - GRID_SIZE, NUM_POINTS - 1];
+
+fn is_corner(idx: usize) -> bool {
+    idx == 0 || idx == GRID_SIZE - 1 || idx == NUM_POINTS - GRID_SIZE || idx == NUM_POINTS - 1
+}
+
 pub struct FfdSim {
     /// Current positions in screen-space pixels.
     pub pos: [[f32; 2]; NUM_POINTS],
@@ -34,7 +41,14 @@ pub struct FfdSim {
     /// Distance constraints between adjacent points.
     constraints: Vec<Constraint>,
     /// Global damping factor applied each step (0.0 = no damping, 1.0 = frozen).
+    /// Typical: 0.03–0.08. Higher = motion dies faster.
     pub damping: f32,
+    /// Spring rate pulling points back toward rest (0.0–1.0).
+    /// This is the per-frame-at-60fps ratio. 0.05 = gentle, 0.2 = snappy.
+    pub spring_rate: f32,
+    /// Stiffness of distance constraints (0.0–1.0).
+    /// Lower = softer jelly. 0.3 is a good default.
+    pub constraint_stiffness: f32,
     /// Number of constraint-solving iterations per step.
     pub iterations: u32,
     /// Whether corner points are pinned (don't move from rest).
@@ -67,7 +81,8 @@ impl FfdSim {
 
         let old_pos = pos;
 
-        // Build distance constraints: horizontal, vertical, and diagonal neighbors
+        // Build distance constraints: horizontal and vertical neighbors only.
+        // Omitting diagonals gives a softer, jelly-like deformation.
         let mut constraints = Vec::new();
         for j in 0..GRID_SIZE {
             for i in 0..GRID_SIZE {
@@ -82,16 +97,6 @@ impl FfdSim {
                     let other = (j + 1) * GRID_SIZE + i;
                     constraints.push(Constraint::between(&pos, idx, other));
                 }
-                // Diagonal down-right
-                if i + 1 < GRID_SIZE && j + 1 < GRID_SIZE {
-                    let other = (j + 1) * GRID_SIZE + (i + 1);
-                    constraints.push(Constraint::between(&pos, idx, other));
-                }
-                // Diagonal down-left
-                if i > 0 && j + 1 < GRID_SIZE {
-                    let other = (j + 1) * GRID_SIZE + (i - 1);
-                    constraints.push(Constraint::between(&pos, idx, other));
-                }
             }
         }
 
@@ -100,8 +105,10 @@ impl FfdSim {
             old_pos,
             rest,
             constraints,
-            damping: 0.02,
-            iterations: 4,
+            damping: 0.04,
+            spring_rate: 0.08,
+            constraint_stiffness: 0.3,
+            iterations: 2,
             pin_corners: true,
         }
     }
@@ -128,7 +135,6 @@ impl FfdSim {
 
     /// Step the simulation forward by `dt` seconds.
     pub fn step(&mut self, dt: f32) {
-        let dt2 = dt * dt;
         let damp = 1.0 - self.damping;
 
         // Verlet integration
@@ -139,14 +145,20 @@ impl FfdSim {
             let vy = (cy - oy) * damp;
             self.old_pos[i] = [cx, cy];
             self.pos[i] = [cx + vx, cy + vy];
-            // Spring back toward rest position (structural stiffness)
-            let [rx, ry] = self.rest[i];
-            let spring = 80.0 * dt2;
-            self.pos[i][0] += (rx - self.pos[i][0]) * spring;
-            self.pos[i][1] += (ry - self.pos[i][1]) * spring;
         }
 
-        // Solve distance constraints
+        // Spring back toward rest position.
+        // Use a frame-rate-independent factor: 1 - (1 - spring_rate)^(dt * 60)
+        // so the spring feels the same at any tick rate.
+        let spring_factor = 1.0 - (1.0 - self.spring_rate).powf(dt * 60.0);
+        for i in 0..NUM_POINTS {
+            let [rx, ry] = self.rest[i];
+            self.pos[i][0] += (rx - self.pos[i][0]) * spring_factor;
+            self.pos[i][1] += (ry - self.pos[i][1]) * spring_factor;
+        }
+
+        // Solve distance constraints (only horizontal + vertical, skip diagonals
+        // for a softer, jelly-like feel)
         for _ in 0..self.iterations {
             for c in &self.constraints {
                 let [ax, ay] = self.pos[c.a];
@@ -157,17 +169,24 @@ impl FfdSim {
                 if d < 1e-6 {
                     continue;
                 }
-                let diff = (c.rest_len - d) / d * 0.5;
+                let diff = (c.rest_len - d) / d * 0.5 * self.constraint_stiffness;
                 let ox = dx * diff;
                 let oy = dy * diff;
-                self.pos[c.a] = [ax - ox, ay - oy];
-                self.pos[c.b] = [bx + ox, by + oy];
+                // Don't move pinned corners via constraints
+                let a_pinned = self.pin_corners && is_corner(c.a);
+                let b_pinned = self.pin_corners && is_corner(c.b);
+                if !a_pinned {
+                    self.pos[c.a] = [ax - ox, ay - oy];
+                }
+                if !b_pinned {
+                    self.pos[c.b] = [bx + ox, by + oy];
+                }
             }
         }
 
         // Pin corners
         if self.pin_corners {
-            for &idx in &[0, GRID_SIZE - 1, NUM_POINTS - GRID_SIZE, NUM_POINTS - 1] {
+            for &idx in CORNER_INDICES {
                 self.pos[idx] = self.rest[idx];
                 self.old_pos[idx] = self.rest[idx];
             }
@@ -216,16 +235,29 @@ impl FfdSim {
     }
 
     /// Apply a radial "pop" impulse from the center outward.
-    /// Great for menu open animations.
+    /// Points further from center get proportionally larger impulses,
+    /// creating a satisfying expansion/wobble. Great for menu open animations.
+    /// `strength` is in pixels — the outermost points receive this full amount.
     pub fn pop(&mut self, strength: f32) {
         let cx = (self.rest[0][0] + self.rest[NUM_POINTS - 1][0]) * 0.5;
         let cy = (self.rest[0][1] + self.rest[NUM_POINTS - 1][1]) * 0.5;
+        // Find the max distance from center for normalization
+        let max_d = {
+            let dx = self.rest[0][0] - cx;
+            let dy = self.rest[0][1] - cy;
+            (dx * dx + dy * dy).sqrt().max(1.0)
+        };
         for i in 0..NUM_POINTS {
             let dx = self.pos[i][0] - cx;
             let dy = self.pos[i][1] - cy;
-            let d = (dx * dx + dy * dy).sqrt().max(1.0);
-            self.old_pos[i][0] -= (dx / d) * strength;
-            self.old_pos[i][1] -= (dy / d) * strength;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d < 0.1 {
+                continue;
+            }
+            // Scale by distance: outer points move more
+            let scale = (d / max_d) * strength;
+            self.old_pos[i][0] -= (dx / d) * scale;
+            self.old_pos[i][1] -= (dy / d) * scale;
         }
     }
 

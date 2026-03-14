@@ -140,16 +140,16 @@ impl UiDrawFn for GameUi {
             let ffd = self.inv_ffd.get_or_insert_with(|| FfdSim::new(panel_x, panel_y, panel_w, panel_h));
             if just_opened {
                 ffd.resize(panel_x, panel_y, panel_w, panel_h);
-                ffd.pop(6.0);
-                ffd.jiggle(2.0, 42);
+                ffd.pop(20.0);
+                ffd.jiggle(8.0, 42);
             }
-            // Add a small jiggle on item selection changes
+            // Add a jiggle on item selection changes
             if input.key_just_pressed(KeyCode::ArrowRight)
                 || input.key_just_pressed(KeyCode::ArrowLeft)
                 || input.key_just_pressed(KeyCode::ArrowDown)
                 || input.key_just_pressed(KeyCode::ArrowUp)
             {
-                ffd.jiggle(1.5, self.selected_slot as u32 + 100);
+                ffd.jiggle(5.0, self.selected_slot as u32 + 100);
             }
             // Step the sim (~120fps, so dt ≈ 1/120)
             let dt = 1.0 / 120.0;
