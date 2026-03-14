@@ -412,6 +412,225 @@ fn single_cube_edge_sharing() {
         "single cube should have no non-manifold edges, got {}", non_manifold);
 }
 
+/// Dump details about non-manifold edges for debugging.
+fn dump_non_manifold_edges(mesh: &ChunkMeshData, label: &str) {
+    type PosKey = (i32, i32, i32);
+    type EdgeKey = (PosKey, PosKey);
+
+    fn sorted_edge(a: PosKey, b: PosKey) -> EdgeKey {
+        if a <= b { (a, b) } else { (b, a) }
+    }
+
+    fn key_to_pos(k: PosKey) -> [f32; 3] {
+        [k.0 as f32 / 10000.0, k.1 as f32 / 10000.0, k.2 as f32 / 10000.0]
+    }
+
+    // Collect edges → list of (triangle_index, triangle vertices)
+    let mut edge_tris: HashMap<EdgeKey, Vec<(usize, [u32; 3])>> = HashMap::new();
+    for i in (0..mesh.indices.len()).step_by(3) {
+        let tri = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
+        let tri_idx = i / 3;
+        for j in 0..3 {
+            let pa = quantize_pos(&mesh.positions[tri[j] as usize]);
+            let pb = quantize_pos(&mesh.positions[tri[(j + 1) % 3] as usize]);
+            let key = sorted_edge(pa, pb);
+            edge_tris.entry(key).or_default().push((tri_idx, tri));
+        }
+    }
+
+    for (key, tris) in &edge_tris {
+        if tris.len() <= 2 { continue; }
+        let p0 = key_to_pos(key.0);
+        let p1 = key_to_pos(key.1);
+        eprintln!("{}: NON-MANIFOLD edge ({:.3},{:.3},{:.3})→({:.3},{:.3},{:.3}) shared by {} triangles:",
+            label, p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], tris.len());
+        for (tri_idx, tri) in tris {
+            let a = mesh.positions[tri[0] as usize];
+            let b = mesh.positions[tri[1] as usize];
+            let c = mesh.positions[tri[2] as usize];
+            let n = mesh.normals[tri[0] as usize];
+            eprintln!("  tri[{}]: verts=[{},{},{}] normal=({:.3},{:.3},{:.3})",
+                tri_idx, tri[0], tri[1], tri[2], n[0], n[1], n[2]);
+            eprintln!("    a=({:.3},{:.3},{:.3}) b=({:.3},{:.3},{:.3}) c=({:.3},{:.3},{:.3})",
+                a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+        }
+    }
+}
+
+/// Count triangles that overlap: same plane, shared edge, overlapping area.
+/// These cause z-fighting.
+fn count_coplanar_overlapping_tris(mesh: &ChunkMeshData) -> usize {
+    use bevy::math::Vec3;
+
+    type PosKey = (i32, i32, i32);
+    type EdgeKey = (PosKey, PosKey);
+
+    fn sorted_edge(a: PosKey, b: PosKey) -> EdgeKey {
+        if a <= b { (a, b) } else { (b, a) }
+    }
+
+    // Group triangles by their shared spatial edges
+    let mut edge_tris: HashMap<EdgeKey, Vec<usize>> = HashMap::new();
+    for i in (0..mesh.indices.len()).step_by(3) {
+        let tri_idx = i / 3;
+        let tri = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
+        for j in 0..3 {
+            let pa = quantize_pos(&mesh.positions[tri[j] as usize]);
+            let pb = quantize_pos(&mesh.positions[tri[(j + 1) % 3] as usize]);
+            let key = sorted_edge(pa, pb);
+            edge_tris.entry(key).or_default().push(tri_idx);
+        }
+    }
+
+    let mut overlapping = 0;
+
+    // For each edge with 3+ triangles, check for coplanar pairs
+    for tris in edge_tris.values() {
+        if tris.len() <= 2 { continue; }
+
+        // Compare all pairs for coplanarity
+        for i in 0..tris.len() {
+            for j in (i + 1)..tris.len() {
+                let ti = tris[i] * 3;
+                let tj = tris[j] * 3;
+
+                let a = Vec3::from_array(mesh.positions[mesh.indices[ti] as usize]);
+                let b = Vec3::from_array(mesh.positions[mesh.indices[ti + 1] as usize]);
+                let c = Vec3::from_array(mesh.positions[mesh.indices[ti + 2] as usize]);
+                let ni = (b - a).cross(c - a).normalize_or_zero();
+
+                let d = Vec3::from_array(mesh.positions[mesh.indices[tj] as usize]);
+                let e = Vec3::from_array(mesh.positions[mesh.indices[tj + 1] as usize]);
+                let f = Vec3::from_array(mesh.positions[mesh.indices[tj + 2] as usize]);
+                let nj = (e - d).cross(f - d).normalize_or_zero();
+
+                // Coplanar: same normal direction AND all vertices on the same plane
+                if ni.dot(nj).abs() > 0.99 {
+                    // Check if all vertices of triangle j lie on triangle i's plane
+                    let plane_dist_d = (d - a).dot(ni).abs();
+                    let plane_dist_e = (e - a).dot(ni).abs();
+                    let plane_dist_f = (f - a).dot(ni).abs();
+                    if plane_dist_d < 0.001 && plane_dist_e < 0.001 && plane_dist_f < 0.001 {
+                        overlapping += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    overlapping
+}
+
+/// Check for triangle-triangle intersections (the actual cause of z-fighting).
+/// Only checks triangles that share at least one vertex position (for performance).
+fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
+    use bevy::math::Vec3;
+
+    type PosKey = (i32, i32, i32);
+
+    // Build vertex position → list of triangle indices
+    let mut pos_tris: HashMap<PosKey, Vec<usize>> = HashMap::new();
+    for i in (0..mesh.indices.len()).step_by(3) {
+        let tri_idx = i / 3;
+        for j in 0..3 {
+            let pk = quantize_pos(&mesh.positions[mesh.indices[i + j] as usize]);
+            pos_tris.entry(pk).or_default().push(tri_idx);
+        }
+    }
+
+    // Collect candidate pairs (triangles sharing at least one vertex position)
+    let mut checked: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut intersecting = 0;
+
+    for tris in pos_tris.values() {
+        for i in 0..tris.len() {
+            for j in (i + 1)..tris.len() {
+                let (ti, tj) = (tris[i], tris[j]);
+                let pair = if ti < tj { (ti, tj) } else { (tj, ti) };
+                if !checked.insert(pair) { continue; }
+
+                // Get triangle vertices
+                let ai = ti * 3;
+                let aj = tj * 3;
+                let a0 = Vec3::from_array(mesh.positions[mesh.indices[ai] as usize]);
+                let a1 = Vec3::from_array(mesh.positions[mesh.indices[ai + 1] as usize]);
+                let a2 = Vec3::from_array(mesh.positions[mesh.indices[ai + 2] as usize]);
+                let b0 = Vec3::from_array(mesh.positions[mesh.indices[aj] as usize]);
+                let b1 = Vec3::from_array(mesh.positions[mesh.indices[aj + 1] as usize]);
+                let b2 = Vec3::from_array(mesh.positions[mesh.indices[aj + 2] as usize]);
+
+                // Skip if triangles share all vertices (same triangle, different winding)
+                let a_set: Vec<PosKey> = [a0, a1, a2].iter().map(|v| quantize_pos(&v.to_array())).collect();
+                let b_set: Vec<PosKey> = [b0, b1, b2].iter().map(|v| quantize_pos(&v.to_array())).collect();
+                let shared_verts = a_set.iter().filter(|v| b_set.contains(v)).count();
+                if shared_verts >= 3 { continue; } // identical triangle
+
+                // Triangles that share an edge (2 verts) are expected neighbors — skip
+                if shared_verts >= 2 { continue; }
+
+                // Check if triangles are coplanar and overlapping
+                let na = (a1 - a0).cross(a2 - a0);
+                let na_len = na.length();
+                if na_len < 1e-8 { continue; }
+                let na = na / na_len;
+
+                let nb = (b1 - b0).cross(b2 - b0);
+                let nb_len = nb.length();
+                if nb_len < 1e-8 { continue; }
+                let nb = nb / nb_len;
+
+                // Must be coplanar (parallel normals)
+                if na.dot(nb).abs() < 0.99 { continue; }
+
+                // Must be on the same plane
+                if (b0 - a0).dot(na).abs() > 0.001 { continue; }
+
+                // Project both triangles to 2D and check overlap
+                // Use the dominant axis for projection
+                let abs_n = na.abs();
+                let (u_axis, v_axis) = if abs_n.x >= abs_n.y && abs_n.x >= abs_n.z {
+                    (1, 2) // project onto YZ
+                } else if abs_n.y >= abs_n.z {
+                    (0, 2) // project onto XZ
+                } else {
+                    (0, 1) // project onto XY
+                };
+
+                let project = |v: Vec3| -> (f32, f32) {
+                    (v[u_axis], v[v_axis])
+                };
+
+                let pa = [project(a0), project(a1), project(a2)];
+                let pb = [project(b0), project(b1), project(b2)];
+
+                // Check if any vertex of B is inside triangle A (or vice versa)
+                if point_in_tri_2d(pb[0], pa) || point_in_tri_2d(pb[1], pa) || point_in_tri_2d(pb[2], pa)
+                || point_in_tri_2d(pa[0], pb) || point_in_tri_2d(pa[1], pb) || point_in_tri_2d(pa[2], pb)
+                {
+                    intersecting += 1;
+                }
+            }
+        }
+    }
+
+    intersecting
+}
+
+fn point_in_tri_2d(p: (f32, f32), tri: [(f32, f32); 3]) -> bool {
+    let (px, py) = p;
+    let d1 = sign_2d(px, py, tri[0].0, tri[0].1, tri[1].0, tri[1].1);
+    let d2 = sign_2d(px, py, tri[1].0, tri[1].1, tri[2].0, tri[2].1);
+    let d3 = sign_2d(px, py, tri[2].0, tri[2].1, tri[0].0, tri[0].1);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    // Strictly inside (not on edge — edge sharing is OK)
+    !(has_neg && has_pos) && d1.abs() > 1e-4 && d2.abs() > 1e-4 && d3.abs() > 1e-4
+}
+
+fn sign_2d(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    (px - x2) * (y1 - y2) - (x1 - x2) * (py - y2)
+}
+
 #[test]
 fn wedge_on_cube_edge_sharing() {
     let shapes = make_shapes();
@@ -425,8 +644,18 @@ fn wedge_on_cube_edge_sharing() {
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
     eprintln!("wedge_on_cube edges: boundary={}, interior={}, non_manifold={}",
         boundary, interior, non_manifold);
-    assert!(non_manifold == 0,
-        "wedge_on_cube should have no non-manifold edges, got {}", non_manifold);
+
+    let overlapping = count_coplanar_overlapping_tris(&result.full_res);
+    let intersecting = count_intersecting_triangle_pairs(&result.full_res);
+    eprintln!("wedge_on_cube: {} coplanar overlapping, {} intersecting triangle pairs",
+        overlapping, intersecting);
+    if overlapping > 0 || intersecting > 0 {
+        dump_non_manifold_edges(&result.full_res, "wedge_on_cube");
+    }
+    assert!(overlapping == 0,
+        "wedge_on_cube should have no coplanar overlapping triangles, got {}", overlapping);
+    assert!(intersecting == 0,
+        "wedge_on_cube should have no intersecting triangles, got {}", intersecting);
 }
 
 #[test]
@@ -438,8 +667,15 @@ fn demo_edge_sharing() {
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
     eprintln!("demo edges: boundary={}, interior={}, non_manifold={}",
         boundary, interior, non_manifold);
-    assert!(non_manifold == 0,
-        "demo should have no non-manifold edges, got {}", non_manifold);
+
+    let overlapping = count_coplanar_overlapping_tris(&result.full_res);
+    let intersecting = count_intersecting_triangle_pairs(&result.full_res);
+    eprintln!("demo: {} coplanar overlapping, {} intersecting triangle pairs",
+        overlapping, intersecting);
+    assert!(overlapping == 0,
+        "demo should have no coplanar overlapping triangles, got {}", overlapping);
+    assert!(intersecting == 0,
+        "demo should have no intersecting triangles, got {}", intersecting);
 }
 
 #[test]

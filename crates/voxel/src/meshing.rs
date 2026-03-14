@@ -710,11 +710,37 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             chamfer_offsets.push([0.0; 3]);
         }
 
+        // Collect chamfer strip face normals at this vertex for coplanarity check
+        let mut strip_normals: Vec<Vec3> = Vec::new();
+        for &ek in &sharp_edge_keys {
+            if let Some(info) = sharp_set.get(&ek) {
+                if info.faces.len() >= 2 {
+                    // The strip's plane normal is the average of the two face normals
+                    let na = solid.faces[info.faces[0]].normal;
+                    let nb = solid.faces[info.faces[1]].normal;
+                    strip_normals.push((na + nb).normalize_or_zero());
+                }
+            }
+        }
+
         // Check winding of first triangle against axis
         let tri_normal = (ring[1].0 - ring[0].0).cross(ring[2].0 - ring[0].0);
         let flip = tri_normal.dot(axis) < 0.0;
 
         for i in 1..ring.len() - 1 {
+            // Check if this fan triangle is coplanar with any chamfer strip
+            // (same plane = the strip already covers this area)
+            let fan_normal = {
+                let va = ring[0].0;
+                let vb = ring[i].0;
+                let vc = ring[i + 1].0;
+                (vb - va).cross(vc - va).normalize_or_zero()
+            };
+            let coplanar_with_strip = strip_normals.iter().any(|sn| {
+                fan_normal.dot(*sn).abs() > 0.95
+            });
+            if coplanar_with_strip { continue; }
+
             let a = ring_start;
             let b = ring_start + i as u32;
             let c = ring_start + i as u32 + 1;
