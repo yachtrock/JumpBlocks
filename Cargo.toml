@@ -18,6 +18,7 @@ crossbeam-channel = "0.5.15"
 lightyear = { version = "0.26", features = ["udp", "netcode"] }
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
+rhai = { version = "1", features = ["sync"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
