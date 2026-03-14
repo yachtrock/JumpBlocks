@@ -10,6 +10,7 @@ mod world;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dPlugin;
@@ -357,6 +358,16 @@ fn make_dummy_items() -> Vec<InventoryItem> {
 // Game systems
 // ---------------------------------------------------------------------------
 
+fn toggle_wireframe(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut wireframe_config: ResMut<WireframeConfig>,
+) {
+    if keyboard.just_pressed(KeyCode::F2) {
+        wireframe_config.global = !wireframe_config.global;
+        info!("Wireframe: {}", if wireframe_config.global { "ON" } else { "OFF" });
+    }
+}
+
 fn toggle_inventory(
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
@@ -582,7 +593,9 @@ fn main() {
             edge_detection::EdgeDetectionPlugin,
             native_gamepad::NativeGamepadPlugin,
             UiPlugin::new(game_ui),
+            WireframePlugin::default(),
         ));
+        app.add_systems(Update, toggle_wireframe);
         app.add_systems(Startup, send_initial_ui_data);
         app.add_systems(PreUpdate, toggle_inventory);
         app.add_systems(PostUpdate, handle_ui_events);
