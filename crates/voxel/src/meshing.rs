@@ -325,6 +325,48 @@ fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Sutherland-Hodgman polygon clipping
+// ---------------------------------------------------------------------------
+
+/// Clip a convex polygon against a half-plane. Keeps the side where `plane_normal` points.
+fn clip_polygon_by_plane(polygon: &[Vec3], plane_point: Vec3, plane_normal: Vec3) -> Vec<Vec3> {
+    if polygon.len() < 3 { return polygon.to_vec(); }
+    let mut output = Vec::new();
+    let n = polygon.len();
+    for i in 0..n {
+        let s = polygon[i];
+        let e = polygon[(i + 1) % n];
+        let ds = (s - plane_point).dot(plane_normal);
+        let de = (e - plane_point).dot(plane_normal);
+
+        if de >= -1e-6 {
+            // E is inside
+            if ds < -1e-6 {
+                // S is outside → add intersection
+                let t = ds / (ds - de);
+                output.push(s.lerp(e, t));
+            }
+            output.push(e);
+        } else if ds >= -1e-6 {
+            // E is outside, S is inside → add intersection only
+            let t = ds / (ds - de);
+            output.push(s.lerp(e, t));
+        }
+    }
+    output
+}
+
+/// A clip plane from a chamfer strip, used to trim neighboring faces.
+struct ChamferClipPlane {
+    point: Vec3,
+    normal: Vec3,
+    /// The two faces forming this chamfer (don't clip these).
+    faces: [usize; 2],
+    /// The edge vertices (for lookup).
+    verts: [u32; 2],
+}
+
+// ---------------------------------------------------------------------------
 // Chamfered mesh generation (edge-graph post-process)
 // ---------------------------------------------------------------------------
 
@@ -346,56 +388,87 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         }
     }
 
+    // ---------------------------------------------------------------
+    // Pass 1: compute inner vertices for every face
+    // ---------------------------------------------------------------
+    let all_inner: Vec<Vec<Vec3>> = solid.faces.iter().map(|face| {
+        let n = face.verts.len();
+        let normal = face.normal;
+
+        let edge_sharp_flags: Vec<bool> = (0..n).map(|i| {
+            let key = edge_key(face.verts[i], face.verts[(i + 1) % n]);
+            sharp_set.contains_key(&key)
+        }).collect();
+
+        let edge_inward_dirs: Vec<Vec3> = (0..n).map(|i| {
+            let p0 = solid.positions[face.verts[i] as usize];
+            let p1 = solid.positions[face.verts[(i + 1) % n] as usize];
+            (p1 - p0).normalize_or_zero().cross(normal).normalize_or_zero()
+        }).collect();
+
+        (0..n).map(|vi| {
+            let mut offset = Vec3::ZERO;
+            let prev = (vi + n - 1) % n;
+            if edge_sharp_flags[prev] {
+                offset += edge_inward_dirs[prev] * CHAMFER_WIDTH;
+            }
+            if edge_sharp_flags[vi] {
+                offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
+            }
+            solid.positions[face.verts[vi] as usize] + offset
+        }).collect()
+    }).collect();
+
+    // ---------------------------------------------------------------
+    // Pass 2: collect chamfer strip clip planes
+    // ---------------------------------------------------------------
+    let mut clip_planes: Vec<ChamferClipPlane> = Vec::new();
+    // vertex → indices into clip_planes
+    let mut vert_clip_planes: Vec<Vec<usize>> = vec![Vec::new(); solid.positions.len()];
+
+    for (&(ev0, ev1), info) in &edge_graph {
+        if !is_sharp(info, &solid) { continue; }
+        if info.faces.len() < 2 { continue; } // boundary edges don't clip neighbors
+
+        let fi_a = info.faces[0];
+        let fi_b = info.faces[1];
+
+        let a0 = find_face_inner_at_vert(&solid.faces[fi_a], &all_inner[fi_a], ev0).unwrap();
+        let a1 = find_face_inner_at_vert(&solid.faces[fi_a], &all_inner[fi_a], ev1).unwrap();
+        let b0 = find_face_inner_at_vert(&solid.faces[fi_b], &all_inner[fi_b], ev0).unwrap();
+
+        let strip_normal = (a1 - a0).cross(b0 - a0);
+        if strip_normal.length_squared() < 1e-10 { continue; }
+        let strip_normal = strip_normal.normalize();
+
+        let cp_idx = clip_planes.len();
+        clip_planes.push(ChamferClipPlane {
+            point: a0,
+            normal: strip_normal,
+            faces: [fi_a, fi_b],
+            verts: [ev0, ev1],
+        });
+        vert_clip_planes[ev0 as usize].push(cp_idx);
+        vert_clip_planes[ev1 as usize].push(cp_idx);
+    }
+
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut chamfer_offsets: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // Per-face: compute inner vertices, emit inner face + chamfer strips
-    for (_fi, face) in solid.faces.iter().enumerate() {
+    // ---------------------------------------------------------------
+    // Pass 3: emit inner faces
+    // ---------------------------------------------------------------
+    // TODO: clip faces against chamfer strip planes to prevent z-fighting
+    // at corners. Previous attempts were too aggressive (infinite planes
+    // cut through unrelated faces). Need bounded clip regions.
+    for (fi, face) in solid.faces.iter().enumerate() {
         let n = face.verts.len();
-        let normal = face.normal;
-        let normal_arr = normal.to_array();
+        let normal_arr = face.normal.to_array();
+        let inner = &all_inner[fi];
 
-        // For each edge of this face, check if sharp + compute inward direction
-        let mut edge_sharp: Vec<bool> = Vec::with_capacity(n);
-        let mut edge_inward: Vec<Vec3> = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let v0 = face.verts[i];
-            let v1 = face.verts[(i + 1) % n];
-            let key = edge_key(v0, v1);
-            let sharp = sharp_set.contains_key(&key);
-            edge_sharp.push(sharp);
-
-            let p0 = solid.positions[v0 as usize];
-            let p1 = solid.positions[v1 as usize];
-            let edge_dir = (p1 - p0).normalize_or_zero();
-            edge_inward.push(edge_dir.cross(normal).normalize_or_zero());
-        }
-
-        // Compute inner position for each vertex of this face, then clip
-        // against adjacent faces connected by SMOOTH edges to prevent z-fighting.
-        // (Faces connected by sharp edges are the chamfer target — don't clip those.)
-        let inner: Vec<Vec3> = (0..n).map(|vi| {
-            let mut offset = Vec3::ZERO;
-            let prev = (vi + n - 1) % n;
-            if edge_sharp[prev] {
-                offset += edge_inward[prev] * CHAMFER_WIDTH;
-            }
-            if edge_sharp[vi] {
-                offset += edge_inward[vi] * CHAMFER_WIDTH;
-            }
-
-            let outer_vi = face.verts[vi] as usize;
-            let pos = solid.positions[outer_vi] + offset;
-
-
-            pos
-        }).collect();
-
-        // --- Emit inner face ---
         let inner_base = positions.len() as u32;
         for i in 0..n {
             positions.push(inner[i].to_array());
@@ -403,74 +476,279 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             uvs.push([0.0, 0.0]);
             chamfer_offsets.push([0.0; 3]);
         }
-        // Triangulate (fan from vertex 0 — works for convex 3 or 4 verts)
         for i in 1..n - 1 {
             indices.push(inner_base + i as u32 + 1);
             indices.push(inner_base + i as u32);
             indices.push(inner_base);
         }
+    }
 
-        // --- Emit chamfer strips for sharp edges ---
-        for i in 0..n {
-            if !edge_sharp[i] { continue; }
+    // ---------------------------------------------------------------
+    // Pass 3: emit chamfer strips per-edge (not per-face)
+    // ---------------------------------------------------------------
+    // Helper: find a face's inner vertex index for a given shared vertex
+    fn find_face_inner_at_vert(face: &SolidFace, inner: &[Vec3], vert: u32) -> Option<Vec3> {
+        face.verts.iter().position(|&v| v == vert).map(|i| inner[i])
+    }
 
-            let vi = i;
-            let vj = (i + 1) % n;
-            let outer_i = solid.positions[face.verts[vi] as usize];
-            let outer_j = solid.positions[face.verts[vj] as usize];
-            let inner_i = inner[vi];
-            let inner_j = inner[vj];
+    for (&(ev0, ev1), info) in &edge_graph {
+        if !is_sharp(info, &solid) { continue; }
 
-            // Chamfer strip: outer_i, outer_j, inner_j, inner_i
+        let chamfer_mode = if info.faces.len() >= 2 {
+            let m0 = solid.faces[info.faces[0]].chamfer_mode;
+            let m1 = solid.faces[info.faces[1]].chamfer_mode;
+            if m0 == ChamferMode::Smooth && m1 == ChamferMode::Smooth {
+                ChamferMode::Smooth
+            } else {
+                ChamferMode::Hard
+            }
+        } else {
+            solid.faces[info.faces[0]].chamfer_mode
+        };
+
+        if info.faces.len() >= 2 {
+            // Interior sharp edge: chamfer strip connects both faces' inner vertices
+            let fi_a = info.faces[0];
+            let fi_b = info.faces[1];
+            let face_a = &solid.faces[fi_a];
+            let face_b = &solid.faces[fi_b];
+            let inner_a = &all_inner[fi_a];
+            let inner_b = &all_inner[fi_b];
+
+            let a0 = find_face_inner_at_vert(face_a, inner_a, ev0).unwrap();
+            let a1 = find_face_inner_at_vert(face_a, inner_a, ev1).unwrap();
+            let b0 = find_face_inner_at_vert(face_b, inner_b, ev0).unwrap();
+            let b1 = find_face_inner_at_vert(face_b, inner_b, ev1).unwrap();
+
+            // Check winding: the strip should face outward (along average of face normals)
+            let na = face_a.normal;
+            let nb = face_b.normal;
+            let expected_out = (na + nb).normalize_or_zero();
+            let tri_normal = (a1 - a0).cross(b0 - a0);
+            let flipped = tri_normal.dot(expected_out) > 0.0;
+
+            let (p0, p1, p2, p3) = if flipped {
+                (b0, b1, a1, a0)
+            } else {
+                (a0, a1, b1, b0)
+            };
+            // After potential flip, n_first/n_second track which face normal
+            // goes with p0,p1 vs p2,p3
+            let (n_first, n_second) = if flipped { (nb, na) } else { (na, nb) };
+
             let base = positions.len() as u32;
             positions.extend_from_slice(&[
-                outer_i.to_array(), outer_j.to_array(),
-                inner_j.to_array(), inner_i.to_array(),
+                p0.to_array(), p1.to_array(),
+                p2.to_array(), p3.to_array(),
             ]);
-
-            let edge_outward = -edge_inward[i];
-
-            // Determine chamfer mode for this edge
-            let key = edge_key(face.verts[vi], face.verts[vj]);
-            let chamfer_mode = if let Some(info) = sharp_set.get(&key) {
-                // Use smooth only if both faces are smooth
-                if info.faces.len() >= 2 {
-                    let m0 = solid.faces[info.faces[0]].chamfer_mode;
-                    let m1 = solid.faces[info.faces[1]].chamfer_mode;
-                    if m0 == ChamferMode::Smooth && m1 == ChamferMode::Smooth {
-                        ChamferMode::Smooth
-                    } else {
-                        ChamferMode::Hard
-                    }
-                } else {
-                    face.chamfer_mode
-                }
-            } else {
-                face.chamfer_mode
-            };
 
             match chamfer_mode {
                 ChamferMode::Hard => {
-                    let cn = (normal + edge_outward).normalize_or_zero().to_array();
+                    let cn = expected_out.to_array();
                     normals.extend_from_slice(&[cn, cn, cn, cn]);
                 }
                 ChamferMode::Smooth => {
-                    let outer_n = (normal + edge_outward).normalize_or_zero().to_array();
-                    normals.extend_from_slice(&[outer_n, outer_n, normal_arr, normal_arr]);
+                    let nf = n_first.to_array();
+                    let ns = n_second.to_array();
+                    normals.extend_from_slice(&[nf, nf, ns, ns]);
                 }
             }
 
             uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-
-            // Chamfer offset: outer verts can be pushed inward by shader
-            let off_i = (inner_i - outer_i).to_array();
-            let off_j = (inner_j - outer_j).to_array();
-            chamfer_offsets.extend_from_slice(&[off_i, off_j, [0.0; 3], [0.0; 3]]);
+            chamfer_offsets.extend_from_slice(&[[0.0; 3]; 4]);
 
             indices.extend_from_slice(&[
                 base + 2, base + 1, base,
                 base + 3, base + 2, base,
             ]);
+        } else {
+            // Boundary edge: strip from inner to outer (original position)
+            let fi_a = info.faces[0];
+            let face_a = &solid.faces[fi_a];
+            let inner_a = &all_inner[fi_a];
+
+            let a0 = find_face_inner_at_vert(face_a, inner_a, ev0).unwrap();
+            let a1 = find_face_inner_at_vert(face_a, inner_a, ev1).unwrap();
+            let outer0 = solid.positions[ev0 as usize];
+            let outer1 = solid.positions[ev1 as usize];
+
+            let na = face_a.normal;
+            let edge_dir = (solid.positions[ev1 as usize] - solid.positions[ev0 as usize]).normalize_or_zero();
+            let outward = edge_dir.cross(na).normalize_or_zero();
+
+            // Check winding
+            let tri_normal = (a1 - a0).cross(outer0 - a0);
+            let expected_out = (na + outward).normalize_or_zero();
+            let flipped = tri_normal.dot(expected_out) > 0.0;
+
+            let (p0, p1, p2, p3) = if flipped {
+                (outer0, outer1, a1, a0)
+            } else {
+                (a0, a1, outer1, outer0)
+            };
+
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&[
+                p0.to_array(), p1.to_array(),
+                p2.to_array(), p3.to_array(),
+            ]);
+
+            match chamfer_mode {
+                ChamferMode::Hard => {
+                    let cn = expected_out.to_array();
+                    normals.extend_from_slice(&[cn, cn, cn, cn]);
+                }
+                ChamferMode::Smooth => {
+                    let (n_inner, n_outer) = if flipped {
+                        (outward.to_array(), na.to_array())
+                    } else {
+                        (na.to_array(), outward.to_array())
+                    };
+                    normals.extend_from_slice(&[n_inner, n_inner, n_outer, n_outer]);
+                }
+            }
+
+            uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+            chamfer_offsets.extend_from_slice(&[[0.0; 3]; 4]);
+
+            indices.extend_from_slice(&[
+                base + 2, base + 1, base,
+                base + 3, base + 2, base,
+            ]);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Pass 4: corner caps at vertices with 3+ sharp edges
+    // ---------------------------------------------------------------
+    for (vi, adj_faces) in vertex_faces.iter().enumerate() {
+        if adj_faces.is_empty() { continue; }
+
+        // Count unique sharp edges at this vertex
+        let mut sharp_edge_keys: Vec<(u32, u32)> = Vec::new();
+        for &fi in adj_faces {
+            let face = &solid.faces[fi];
+            let n = face.verts.len();
+            for i in 0..n {
+                if face.verts[i] as usize == vi || face.verts[(i + 1) % n] as usize == vi {
+                    let key = edge_key(face.verts[i], face.verts[(i + 1) % n]);
+                    if sharp_set.contains_key(&key) && !sharp_edge_keys.contains(&key) {
+                        sharp_edge_keys.push(key);
+                    }
+                }
+            }
+        }
+
+        if sharp_edge_keys.len() < 3 { continue; }
+
+        // Collect unique inner vertex positions + face normals from each adjacent face
+        let outer = solid.positions[vi];
+        let mut ring: Vec<(Vec3, Vec3)> = Vec::new(); // (position, face_normal)
+        for &fi in adj_faces {
+            let face = &solid.faces[fi];
+            if let Some(inner_pos) = find_face_inner_at_vert(face, &all_inner[fi], vi as u32) {
+                if (inner_pos - outer).length_squared() > 1e-8 {
+                    let dup = ring.iter().any(|(r, _)| (*r - inner_pos).length_squared() < 1e-6);
+                    if !dup {
+                        ring.push((inner_pos, face.normal));
+                    }
+                }
+            }
+        }
+
+        if ring.len() < 3 { continue; }
+
+        // Sort ring by angle around the outer vertex.
+        // Use average face normal as the sort axis.
+        let axis = adj_faces.iter()
+            .map(|&fi| solid.faces[fi].normal)
+            .sum::<Vec3>()
+            .normalize_or_zero();
+
+        // Build a stable reference frame perpendicular to axis
+        let ref_dir = if axis.x.abs() < 0.9 {
+            axis.cross(Vec3::X).normalize_or_zero()
+        } else {
+            axis.cross(Vec3::Y).normalize_or_zero()
+        };
+        let tangent = axis.cross(ref_dir).normalize_or_zero();
+
+        ring.sort_by(|a, b| {
+            let da = a.0 - outer;
+            let db = b.0 - outer;
+            let angle_a = da.dot(tangent).atan2(da.dot(ref_dir));
+            let angle_b = db.dot(tangent).atan2(db.dot(ref_dir));
+            angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Determine corner chamfer mode: Hard wins over Smooth
+        let corner_mode = {
+            let mut mode = ChamferMode::Smooth;
+            for &ek in &sharp_edge_keys {
+                if let Some(info) = sharp_set.get(&ek) {
+                    for &fi in &info.faces {
+                        if solid.faces[fi].chamfer_mode == ChamferMode::Hard {
+                            mode = ChamferMode::Hard;
+                        }
+                    }
+                }
+            }
+            mode
+        };
+
+        // Triangulate the ring polygon (fan from ring[0])
+        let ring_start = positions.len() as u32;
+        for (rp, rn) in &ring {
+            positions.push(rp.to_array());
+            // Hard chamfer: flat averaged normal. Smooth/fillet: per-face normal.
+            let n = match corner_mode {
+                ChamferMode::Hard => axis.to_array(),
+                ChamferMode::Smooth => rn.to_array(),
+            };
+            normals.push(n);
+            uvs.push([0.0, 0.0]);
+            chamfer_offsets.push([0.0; 3]);
+        }
+
+        // Collect chamfer strip face normals at this vertex for coplanarity check
+        let mut strip_normals: Vec<Vec3> = Vec::new();
+        for &ek in &sharp_edge_keys {
+            if let Some(info) = sharp_set.get(&ek) {
+                if info.faces.len() >= 2 {
+                    // The strip's plane normal is the average of the two face normals
+                    let na = solid.faces[info.faces[0]].normal;
+                    let nb = solid.faces[info.faces[1]].normal;
+                    strip_normals.push((na + nb).normalize_or_zero());
+                }
+            }
+        }
+
+        // Check winding of first triangle against axis
+        let tri_normal = (ring[1].0 - ring[0].0).cross(ring[2].0 - ring[0].0);
+        let flip = tri_normal.dot(axis) < 0.0;
+
+        for i in 1..ring.len() - 1 {
+            // Check if this fan triangle is coplanar with any chamfer strip
+            // (same plane = the strip already covers this area)
+            let fan_normal = {
+                let va = ring[0].0;
+                let vb = ring[i].0;
+                let vc = ring[i + 1].0;
+                (vb - va).cross(vc - va).normalize_or_zero()
+            };
+            let coplanar_with_strip = strip_normals.iter().any(|sn| {
+                fan_normal.dot(*sn).abs() > 0.95
+            });
+            if coplanar_with_strip { continue; }
+
+            let a = ring_start;
+            let b = ring_start + i as u32;
+            let c = ring_start + i as u32 + 1;
+            if flip {
+                indices.extend_from_slice(&[a, c, b]);
+            } else {
+                indices.extend_from_slice(&[a, b, c]);
+            }
         }
     }
 

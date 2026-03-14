@@ -1,4 +1,5 @@
 mod camera;
+mod curtain;
 mod debug_ui;
 mod edge_detection;
 mod layers;
@@ -10,10 +11,11 @@ mod world;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dPlugin;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use jumpblocks_ui::{Canvas, UiInputState, UiPlugin};
 use jumpblocks_ui::ffd::FfdSim;
@@ -357,6 +359,16 @@ fn make_dummy_items() -> Vec<InventoryItem> {
 // Game systems
 // ---------------------------------------------------------------------------
 
+fn toggle_wireframe(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut wireframe_config: ResMut<WireframeConfig>,
+) {
+    if keyboard.just_pressed(KeyCode::F2) {
+        wireframe_config.global = !wireframe_config.global;
+        info!("Wireframe: {}", if wireframe_config.global { "ON" } else { "OFF" });
+    }
+}
+
 fn toggle_inventory(
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
@@ -476,11 +488,11 @@ fn main() {
         NetworkRole::DedicatedServer
     } else if let Some(ref addr_str) = cli.connect {
         let server_addr: SocketAddr = addr_str
-            .parse()
+            .parse::<SocketAddr>()
             .unwrap_or_else(|_| {
                 // Try adding default port if only IP was given
                 format!("{}:{}", addr_str, DEFAULT_PORT)
-                    .parse()
+                    .parse::<SocketAddr>()
                     .expect("Invalid server address. Use format: IP:PORT (e.g. 192.168.1.5:5000)")
             });
         NetworkRole::Client { server_addr }
@@ -578,11 +590,14 @@ fn main() {
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
             camera::CameraPlugin,
+            curtain::CurtainPlugin,
             debug_ui::DebugUiPlugin,
             edge_detection::EdgeDetectionPlugin,
             native_gamepad::NativeGamepadPlugin,
             UiPlugin::new(game_ui),
+            WireframePlugin::default(),
         ));
+        app.add_systems(Update, toggle_wireframe);
         app.add_systems(Startup, send_initial_ui_data);
         app.add_systems(PreUpdate, toggle_inventory);
         app.add_systems(PostUpdate, handle_ui_events);

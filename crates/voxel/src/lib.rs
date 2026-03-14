@@ -2,6 +2,9 @@ pub mod chunk;
 pub mod meshing;
 pub mod shape;
 
+#[cfg(test)]
+mod tests;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};

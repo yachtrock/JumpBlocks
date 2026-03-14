@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 /// Global chamfer width in world units.
-pub const CHAMFER_WIDTH: f32 = 0.06;
+pub const CHAMFER_WIDTH: f32 = 0.12;
 
 /// Cardinal facing direction for voxels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
