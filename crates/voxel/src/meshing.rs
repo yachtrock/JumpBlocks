@@ -878,18 +878,30 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         let flip = tri_normal.dot(axis) < 0.0;
 
         for i in 1..ring.len() - 1 {
-            // Skip fan triangles coplanar with any existing geometry
-            // (inner face or chamfer strip already covers this area)
-            let fan_normal = {
-                let va = ring[0].0;
-                let vb = ring[i].0;
-                let vc = ring[i + 1].0;
-                (vb - va).cross(vc - va).normalize_or_zero()
-            };
-            let coplanar = adjacent_normals.iter().any(|an| {
-                fan_normal.dot(*an).abs() > 0.95
-            });
-            if coplanar { continue; }
+            // Skip fan triangles that are truly coplanar with an existing face
+            // or chamfer strip (same normal AND all vertices on the same plane).
+            let va = ring[0].0;
+            let vb = ring[i].0;
+            let vc = ring[i + 1].0;
+            let fan_normal = (vb - va).cross(vc - va).normalize_or_zero();
+
+            let mut skip = false;
+            // Check against inner faces at this vertex
+            for &fi in adj_faces {
+                let face = &solid.faces[fi];
+                let fn_normal = face.normal;
+                if fan_normal.dot(fn_normal).abs() < 0.99 { continue; }
+                // Same normal — check if triangle is on the face's plane
+                let face_point = solid.positions[face.verts[0] as usize];
+                let da = (va - face_point).dot(fn_normal).abs();
+                let db = (vb - face_point).dot(fn_normal).abs();
+                let dc = (vc - face_point).dot(fn_normal).abs();
+                if da < 0.001 && db < 0.001 && dc < 0.001 {
+                    skip = true;
+                    break;
+                }
+            }
+            if skip { continue; }
 
             let a = ring_start;
             let b = ring_start + i as u32;
