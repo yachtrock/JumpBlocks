@@ -10,7 +10,7 @@ export const CLOSE_SPEED = 10.5;
 export const PANEL_WIDTH = 480.0;
 
 /// Returns the inventory-specific portion of persistent state.
-export fn init_inventory_state() {
+fn init_inventory_state() {
     #{
         selected: 0,
         cursor_pulse: 0.0,
@@ -21,7 +21,7 @@ export fn init_inventory_state() {
 
 /// Draws the inventory panel and handles its input.
 /// Called from hud.rhai's draw(). Returns the (possibly mutated) inventory state.
-export fn draw_inventory(inv, data, ww, wh) {
+fn draw_inventory(inv, data, ww, wh) {
     let dt = 1.0 / 120.0;
 
     // --- Phase transitions ---
