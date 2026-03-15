@@ -1,3 +1,4 @@
+mod action_state;
 mod camera;
 mod curtain;
 mod debug_ui;
@@ -168,6 +169,7 @@ fn handle_ui_events(
     mut input_block: ResMut<UiInputBlock>,
     data_tx: Res<UiDataTx>,
     mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut enter_state_queue: ResMut<action_state::EnterActionStateQueue>,
 ) {
     while let Ok(event) = event_rx.0.try_recv() {
         match event {
@@ -192,6 +194,21 @@ fn handle_ui_events(
             GameUiEvent::ItemSelected(slot) => {
                 if let Some(item) = inv_state.items.get(slot) {
                     info!("Selected item [{}]: {}", slot, item.name);
+
+                    // Enter building state with item context
+                    let mut context = std::collections::HashMap::new();
+                    context.insert(
+                        "item_name".to_string(),
+                        action_state::StateValue::Str(item.name.clone()),
+                    );
+                    context.insert(
+                        "selected_slot".to_string(),
+                        action_state::StateValue::Int(slot as i64),
+                    );
+                    enter_state_queue.0.push(action_state::EnterActionStateRequest {
+                        state_name: "building".to_string(),
+                        context,
+                    });
                 }
             }
         }
@@ -343,6 +360,7 @@ fn main() {
             jumpblocks_voxel::VoxelPlugin,
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
+            action_state::ActionStatePlugin,
             camera::CameraPlugin,
             curtain::CurtainPlugin,
             debug_ui::DebugUiPlugin,
