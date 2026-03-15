@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::action_state::{ActionState, ActionStateVars};
 use crate::player_state::PlayerState;
 
 /// Default port for the game server.
@@ -71,6 +72,8 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<NetworkedRotation>();
         app.register_component::<NetworkedState>();
         app.register_component::<OwnedByClient>();
+        app.register_component::<ActionState>();
+        app.register_component::<ActionStateVars>();
     }
 }
 
@@ -347,12 +350,12 @@ fn handle_new_client_connections(query: Query<Entity, Added<Connected>>) {
 fn init_local_player_networking(
     mut commands: Commands,
     local_players: Query<
-        (Entity, &Transform, &PlayerState),
+        (Entity, &Transform, &PlayerState, &ActionState),
         (With<LocalPlayer>, Without<NetworkedPosition>),
     >,
     role: Res<NetworkRole>,
 ) {
-    for (entity, transform, state) in local_players.iter() {
+    for (entity, transform, state, action_state) in local_players.iter() {
         // Choose the right replication mode based on our role
         let replicate = match *role {
             NetworkRole::ListenServer | NetworkRole::DedicatedServer => {
@@ -368,6 +371,7 @@ fn init_local_player_networking(
             NetworkedPosition(transform.translation),
             NetworkedRotation(Quat::IDENTITY),
             NetworkedState(*state),
+            action_state.clone(),
             replicate,
         ));
     }

@@ -100,9 +100,13 @@ fn face_is_occluded(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshResult {
+pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable, mode: crate::PresentationMode) -> ChunkMeshResult {
     let t0 = Instant::now();
-    let full_res = generate_chamfered_mesh(data, shapes);
+    let full_res = match mode {
+        crate::PresentationMode::Flat => generate_lod_mesh(data, shapes),
+        crate::PresentationMode::EdgeGraphChamfer => generate_chamfered_mesh(data, shapes),
+        crate::PresentationMode::HalfEdgeChamfer => crate::halfedge_chamfer::generate_halfedge_chamfer(data, shapes),
+    };
     let t1 = Instant::now();
     let lod = generate_lod_mesh(data, shapes);
     let t2 = Instant::now();
@@ -110,7 +114,8 @@ pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshRe
     let full_ms = (t1 - t0).as_secs_f64() * 1000.0;
     let lod_ms = (t2 - t1).as_secs_f64() * 1000.0;
     info!(
-        "Chunk meshed: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
+        "Chunk meshed [{}]: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
+        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::EdgeGraphChamfer => "edge-graph", crate::PresentationMode::HalfEdgeChamfer => "half-edge" },
         full_ms, lod_ms, full_ms + lod_ms,
         full_res.positions.len(), full_res.indices.len() / 3,
         lod.positions.len(), lod.indices.len() / 3,
@@ -194,18 +199,18 @@ fn quantize(p: Vec3) -> (i32, i32, i32) {
     )
 }
 
-struct SolidFace {
+pub struct SolidFace {
     /// Indices into SolidMesh.positions (3 or 4 verts).
-    verts: Vec<u32>,
-    normal: Vec3,
-    chamfer_mode: ChamferMode,
-    /// Source voxel position in chunk coords — used to avoid clipping against own faces.
-    voxel: (usize, usize, usize),
+    pub verts: Vec<u32>,
+    pub normal: Vec3,
+    pub chamfer_mode: ChamferMode,
+    /// Source voxel position in chunk coords.
+    pub voxel: (usize, usize, usize),
 }
 
-struct SolidMesh {
-    positions: Vec<Vec3>,
-    faces: Vec<SolidFace>,
+pub struct SolidMesh {
+    pub positions: Vec<Vec3>,
+    pub faces: Vec<SolidFace>,
     vert_map: HashMap<(i32, i32, i32), u32>,
 }
 
@@ -222,6 +227,11 @@ impl SolidMesh {
             idx
         })
     }
+}
+
+/// Public entry point for building the solid mesh (used by halfedge_chamfer).
+pub fn build_solid_mesh_public(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
+    build_solid_mesh(data, shapes)
 }
 
 fn build_solid_mesh(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
@@ -430,9 +440,10 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         normal: Vec3,
         owning_voxels: [(usize, usize, usize); 2],
         edge_verts: [u32; 2],
-        /// AABB of the strip polygon for spatial filtering
         aabb_min: Vec3,
         aabb_max: Vec3,
+        /// Dot product of the two face normals forming this chamfer
+        face_normal_dot: f32,
     }
     let mut voxel_strip_clips: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
     let mut all_strip_clips: Vec<StripClip> = Vec::new();
@@ -467,6 +478,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         all_strip_clips.push(StripClip {
             point: a0, normal: strip_normal, owning_voxels: owning,
             edge_verts: [ev0, ev1], aabb_min: strip_min, aabb_max: strip_max,
+            face_normal_dot: face_a.normal.dot(face_b.normal),
         });
 
         // Associate with owning voxels
@@ -510,13 +522,24 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
                     let sc = &all_strip_clips[ci];
                     // Only use strips owned by the neighbor (not our own voxel)
                     if sc.owning_voxels.contains(&face.voxel) { continue; }
-                    // Only clip against DIAGONAL strips (non-axis-aligned edges).
-                    // Axis-aligned strips (cube edges) stay within voxel bounds.
-                    let ev0_pos = solid.positions[sc.edge_verts[0] as usize];
-                    let ev1_pos = solid.positions[sc.edge_verts[1] as usize];
-                    let diff = (ev1_pos - ev0_pos).abs();
-                    let axis_count = (diff.x > 1e-4) as u8 + (diff.y > 1e-4) as u8 + (diff.z > 1e-4) as u8;
-                    if axis_count < 2 { continue; } // axis-aligned edge, skip
+                    // Only clip against strips whose geometry extends past their
+                    // owning voxels' bounds (diagonal chamfer strips at corners).
+                    let mut owner_min = Vec3::splat(f32::MAX);
+                    let mut owner_max = Vec3::splat(f32::MIN);
+                    for &(ovx, ovy, ovz) in &sc.owning_voxels {
+                        let lo = Vec3::new(ovx as f32 * VOXEL_WIDTH, ovy as f32 * VOXEL_HEIGHT, ovz as f32 * VOXEL_WIDTH);
+                        let hi = lo + Vec3::new(VOXEL_WIDTH, VOXEL_HEIGHT, VOXEL_WIDTH);
+                        owner_min = owner_min.min(lo);
+                        owner_max = owner_max.max(hi);
+                    }
+                    let margin = CHAMFER_WIDTH * 0.5;
+                    let extends = sc.aabb_min.x < owner_min.x - margin
+                        || sc.aabb_max.x > owner_max.x + margin
+                        || sc.aabb_min.y < owner_min.y - margin
+                        || sc.aabb_max.y > owner_max.y + margin
+                        || sc.aabb_min.z < owner_min.z - margin
+                        || sc.aabb_max.z > owner_max.z + margin;
+                    if !extends { continue; }
                     // Only clip if this face's AABB overlaps the strip's AABB
                     let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
                     let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();
@@ -681,8 +704,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             };
 
             // Clip strip against faces of neighboring voxels that the strip
-            // Strips are allowed to extend past voxel boundaries.
-            // Inner faces of neighbor voxels will be clipped to accommodate.
+            // Strips extend past voxel bounds; neighbor faces are clipped to accommodate.
 
             if strip_poly.len() >= 3 {
                 let base = positions.len() as u32;
@@ -738,7 +760,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
                 vec![a0, a1, outer1, outer0]
             };
 
-            // Boundary strips extend freely; neighbor faces are clipped to accommodate.
+            // Boundary strips extend freely.
 
             if strip_poly.len() >= 3 {
                 let strip_normal = expected_out.to_array();
@@ -878,18 +900,30 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         let flip = tri_normal.dot(axis) < 0.0;
 
         for i in 1..ring.len() - 1 {
-            // Skip fan triangles coplanar with any existing geometry
-            // (inner face or chamfer strip already covers this area)
-            let fan_normal = {
-                let va = ring[0].0;
-                let vb = ring[i].0;
-                let vc = ring[i + 1].0;
-                (vb - va).cross(vc - va).normalize_or_zero()
-            };
-            let coplanar = adjacent_normals.iter().any(|an| {
-                fan_normal.dot(*an).abs() > 0.95
-            });
-            if coplanar { continue; }
+            // Skip fan triangles that are truly coplanar with an existing face
+            // or chamfer strip (same normal AND all vertices on the same plane).
+            let va = ring[0].0;
+            let vb = ring[i].0;
+            let vc = ring[i + 1].0;
+            let fan_normal = (vb - va).cross(vc - va).normalize_or_zero();
+
+            let mut skip = false;
+            // Check against inner faces at this vertex
+            for &fi in adj_faces {
+                let face = &solid.faces[fi];
+                let fn_normal = face.normal;
+                if fan_normal.dot(fn_normal).abs() < 0.99 { continue; }
+                // Same normal — check if triangle is on the face's plane
+                let face_point = solid.positions[face.verts[0] as usize];
+                let da = (va - face_point).dot(fn_normal).abs();
+                let db = (vb - face_point).dot(fn_normal).abs();
+                let dc = (vc - face_point).dot(fn_normal).abs();
+                if da < 0.001 && db < 0.001 && dc < 0.001 {
+                    skip = true;
+                    break;
+                }
+            }
+            if skip { continue; }
 
             let a = ring_start;
             let b = ring_start + i as u32;

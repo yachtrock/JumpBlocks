@@ -2,6 +2,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_tnua::builtins::{TnuaBuiltinJumpConfig, TnuaBuiltinWalkConfig};
 
+use crate::action_state::{ActionState, ConsumedInputs};
 use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
 use crate::network::LocalPlayer;
 use crate::player_state::PlayerState;
@@ -105,6 +106,8 @@ fn spawn_player(
         Player,
         LocalPlayer,
         PlayerState::default(),
+        ActionState::default(),
+        ConsumedInputs::default(),
         PlayerSettings { run_multiplier: 1.8 },
         LeanSettings {
             max_angle: 15.0,
@@ -173,6 +176,8 @@ fn spawn_headless_player(
         Player,
         LocalPlayer,
         PlayerState::default(),
+        ActionState::default(),
+        ConsumedInputs::default(),
         PlayerSettings { run_multiplier: 1.8 },
         LeanSettings {
             max_angle: 15.0,
@@ -191,13 +196,16 @@ fn spawn_headless_player(
     info!("Spawned headless player");
 }
 
-fn player_input(
+pub fn player_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
-    mut player_query: Query<(&mut TnuaController<ControlScheme>, &PlayerSettings, &mut LeanState), With<Player>>,
+    mut player_query: Query<
+        (&mut TnuaController<ControlScheme>, &PlayerSettings, &mut LeanState, &ConsumedInputs),
+        With<Player>,
+    >,
     camera_query: Query<&Transform, (With<Camera3d>, Without<Player>)>,
 ) {
-    let Ok((mut controller, settings, mut lean_state)) = player_query.single_mut() else {
+    let Ok((mut controller, settings, mut lean_state, consumed)) = player_query.single_mut() else {
         return;
     };
     let Ok(camera_transform) = camera_query.single() else {
@@ -223,7 +231,7 @@ fn player_input(
     let mut run_pressed = keyboard.pressed(KeyCode::ShiftLeft)
         || keyboard.pressed(KeyCode::ShiftRight);
 
-    // Gather input from gamepad
+    // Gather input from gamepad (respecting consumed inputs from action states)
     for gamepad in gamepads.iter() {
         let stick = Vec2::new(
             gamepad.get(GamepadAxis::LeftStickX).unwrap_or(0.0),
@@ -233,10 +241,10 @@ fn player_input(
         if stick.length() > 0.15 {
             input_dir += stick;
         }
-        if gamepad.pressed(GamepadButton::South) {
+        if !consumed.0.contains("GamepadSouth") && gamepad.pressed(GamepadButton::South) {
             jump_pressed = true;
         }
-        if gamepad.pressed(GamepadButton::East) {
+        if !consumed.0.contains("GamepadEast") && gamepad.pressed(GamepadButton::East) {
             run_pressed = true;
         }
     }

@@ -62,6 +62,28 @@ pub fn stub_engine(script_dir: &Path) -> Engine {
     engine
 }
 
+/// Build a stub engine for action state scripts (assets/action_states/*.rhai).
+/// Registers the same functions as `action_state::build_engine`.
+pub fn stub_action_state_engine() -> Engine {
+    let mut engine = Engine::new();
+    engine.set_max_expr_depths(128, 64);
+
+    engine.register_fn("consume_input", |_name: &str| {});
+    engine.register_fn("exit_state", || {});
+    engine.register_fn("emit", |_name: &str| {});
+    engine.register_fn("replicate", |_name: &str, _value: INT| {});
+    engine.register_fn("replicate", |_name: &str, _value: FLOAT| {});
+    engine.register_fn("replicate", |_name: &str, _value: &str| {});
+    engine.register_fn("replicate", |_name: &str, _value: bool| {});
+    engine.register_fn("input_just_pressed", |_name: &str| -> bool { false });
+    engine.register_fn("input_pressed", |_name: &str| -> bool { false });
+    engine.register_fn("log", |_msg: &str| {});
+    engine.register_fn("set_button_hint", |_label: &str, _keyboard: &str, _gamepad: &str| {});
+    engine.register_fn("clear_button_hints", || {});
+
+    engine
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +95,13 @@ mod tests {
             .join("../../assets/scripts")
             .canonicalize()
             .expect("assets/scripts directory not found")
+    }
+
+    fn action_state_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/action_states")
+            .canonicalize()
+            .expect("assets/action_states directory not found")
     }
 
     #[test]
@@ -100,5 +129,53 @@ mod tests {
         let _ = engine
             .call_fn::<Dynamic>(&mut call_scope, &ast, "init_state", ())
             .unwrap_or_else(|e| panic!("init_state() failed: {e}"));
+    }
+
+    #[test]
+    fn action_state_scripts_compile() {
+        let dir = action_state_dir();
+        let engine = stub_action_state_engine();
+
+        for entry in std::fs::read_dir(&dir).expect("Cannot read action_states directory") {
+            let entry = entry.expect("Cannot read directory entry");
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rhai") {
+                let name = path.file_stem().unwrap().to_string_lossy();
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+
+                let ast = engine
+                    .compile(&source)
+                    .unwrap_or_else(|e| panic!("Compile error in {}: {e}", path.display()));
+
+                // Verify on_enter can be called with a populated context map
+                let mut scope = Scope::new();
+                let mut ctx = rhai::Map::new();
+                ctx.insert("item_name".into(), Dynamic::from("Test Item"));
+                ctx.insert("selected_slot".into(), Dynamic::from(0_i64));
+                let _ = engine
+                    .call_fn::<Dynamic>(&mut scope, &ast, "on_enter", (Dynamic::from(ctx),))
+                    .unwrap_or_else(|e| panic!("{name}: on_enter() failed: {e}"));
+
+                // Verify on_update can be called with state data
+                let mut scope = Scope::new();
+                let mut state = rhai::Map::new();
+                state.insert("item_name".into(), Dynamic::from("Test Item"));
+                let _ = engine
+                    .call_fn::<Dynamic>(
+                        &mut scope,
+                        &ast,
+                        "on_update",
+                        (Dynamic::from(state), Dynamic::UNIT),
+                    )
+                    .unwrap_or_else(|e| panic!("{name}: on_update() failed: {e}"));
+
+                // Verify on_exit can be called
+                let mut scope = Scope::new();
+                let _ = engine
+                    .call_fn::<Dynamic>(&mut scope, &ast, "on_exit", (Dynamic::UNIT,))
+                    .unwrap_or_else(|e| panic!("{name}: on_exit() failed: {e}"));
+            }
+        }
     }
 }

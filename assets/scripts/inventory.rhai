@@ -85,6 +85,7 @@ fn draw_inventory(inv, data, ww, wh) {
         }
         if key_just_pressed("Enter") {
             send_item_selected(inv.selected);
+            send_inventory_closed();
         }
         if key_just_pressed("Escape") {
             send_inventory_closed();

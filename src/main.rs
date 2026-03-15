@@ -1,3 +1,4 @@
+mod action_state;
 mod camera;
 mod curtain;
 mod debug_ui;
@@ -30,6 +31,13 @@ use player::ControlScheme;
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
+struct ButtonHintData {
+    label: String,
+    keyboard: String,
+    gamepad: String,
+}
+
+#[derive(Clone, Debug)]
 struct InventoryItem {
     name: String,
     color: [f32; 4],
@@ -42,6 +50,8 @@ struct GameUiData {
     items: Vec<InventoryItem>,
     health: f32,
     max_health: f32,
+    button_hints: Vec<ButtonHintData>,
+    input_mode: String,
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +168,8 @@ fn toggle_inventory(
             items: inv_state.items.clone(),
             health: 75.0,
             max_health: 100.0,
+            button_hints: Vec::new(),
+            input_mode: "keyboard".to_string(),
         });
     }
 }
@@ -168,6 +180,7 @@ fn handle_ui_events(
     mut input_block: ResMut<UiInputBlock>,
     data_tx: Res<UiDataTx>,
     mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut enter_state_queue: ResMut<action_state::EnterActionStateQueue>,
 ) {
     while let Ok(event) = event_rx.0.try_recv() {
         match event {
@@ -187,11 +200,28 @@ fn handle_ui_events(
                     items: inv_state.items.clone(),
                     health: 75.0,
                     max_health: 100.0,
+                    button_hints: Vec::new(),
+                    input_mode: "keyboard".to_string(),
                 });
             }
             GameUiEvent::ItemSelected(slot) => {
                 if let Some(item) = inv_state.items.get(slot) {
                     info!("Selected item [{}]: {}", slot, item.name);
+
+                    // Enter building state with item context
+                    let mut context = std::collections::HashMap::new();
+                    context.insert(
+                        "item_name".to_string(),
+                        action_state::StateValue::Str(item.name.clone()),
+                    );
+                    context.insert(
+                        "selected_slot".to_string(),
+                        action_state::StateValue::Int(slot as i64),
+                    );
+                    enter_state_queue.0.push(action_state::EnterActionStateRequest {
+                        state_name: "building".to_string(),
+                        context,
+                    });
                 }
             }
         }
@@ -205,6 +235,40 @@ fn send_initial_ui_data(data_tx: Res<UiDataTx>, inv_state: Res<InventoryState>) 
         items: inv_state.items.clone(),
         health: 75.0,
         max_health: 100.0,
+        button_hints: Vec::new(),
+        input_mode: "keyboard".to_string(),
+    });
+}
+
+/// Sync button hints + input mode to the UI thread each frame.
+fn sync_game_ui_data(
+    data_tx: Res<UiDataTx>,
+    inv_state: Res<InventoryState>,
+    button_hints: Res<action_state::ButtonHints>,
+    input_mode: Res<action_state::InputMode>,
+) {
+    let hints: Vec<ButtonHintData> = button_hints
+        .0
+        .iter()
+        .map(|h| ButtonHintData {
+            label: h.label.clone(),
+            keyboard: h.keyboard.clone(),
+            gamepad: h.gamepad.clone(),
+        })
+        .collect();
+
+    let mode = match *input_mode {
+        action_state::InputMode::Keyboard => "keyboard",
+        action_state::InputMode::Gamepad => "gamepad",
+    };
+
+    let _ = data_tx.0.send(GameUiData {
+        inventory_open: inv_state.open,
+        items: inv_state.items.clone(),
+        health: 75.0,
+        max_health: 100.0,
+        button_hints: hints,
+        input_mode: mode.to_string(),
     });
 }
 
@@ -343,6 +407,7 @@ fn main() {
             jumpblocks_voxel::VoxelPlugin,
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
+            action_state::ActionStatePlugin,
             camera::CameraPlugin,
             curtain::CurtainPlugin,
             debug_ui::DebugUiPlugin,
@@ -354,6 +419,7 @@ fn main() {
         app.add_systems(Update, toggle_wireframe);
         app.add_systems(Startup, send_initial_ui_data);
         app.add_systems(PreUpdate, toggle_inventory);
+        app.add_systems(Update, sync_game_ui_data);
         app.add_systems(PostUpdate, handle_ui_events);
     } else if role != NetworkRole::DedicatedServer {
         // Headless client: spawn a player without visuals for network testing

@@ -1,4 +1,5 @@
 pub mod chunk;
+pub mod halfedge_chamfer;
 pub mod meshing;
 pub mod shape;
 
@@ -13,12 +14,43 @@ use chunk::*;
 use meshing::*;
 use shape::*;
 
+/// Which presentation algorithm to use for the full-res mesh.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresentationMode {
+    /// LOD mesh — no chamfer, no shared verts.
+    Flat,
+    /// Edge-graph chamfer post-process.
+    #[default]
+    EdgeGraphChamfer,
+    /// Half-edge mesh chamfer using procedural_modelling crate.
+    HalfEdgeChamfer,
+}
+
+impl PresentationMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Flat => Self::EdgeGraphChamfer,
+            Self::EdgeGraphChamfer => Self::HalfEdgeChamfer,
+            Self::HalfEdgeChamfer => Self::Flat,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Flat => "Flat (no chamfer)",
+            Self::EdgeGraphChamfer => "Edge-Graph Chamfer",
+            Self::HalfEdgeChamfer => "Half-Edge Chamfer",
+        }
+    }
+}
+
 pub struct VoxelPlugin;
 
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShapeTable>()
-            .add_systems(Update, (start_chunk_meshing, handle_chunk_mesh_results));
+            .init_resource::<PresentationMode>()
+            .add_systems(Update, (start_chunk_meshing, handle_chunk_mesh_results, cycle_presentation_mode));
     }
 }
 
@@ -31,8 +63,10 @@ fn start_chunk_meshing(
     mut commands: Commands,
     mut query: Query<(Entity, &mut Chunk), Without<ChunkMeshTask>>,
     shape_table: Res<ShapeTable>,
+    presentation: Res<PresentationMode>,
 ) {
     let pool = AsyncComputeTaskPool::get();
+    let mode = *presentation;
 
     for (entity, mut chunk) in query.iter_mut() {
         if chunk.state != ChunkState::Dirty {
@@ -43,7 +77,7 @@ fn start_chunk_meshing(
         let data = chunk.data.clone();
         let shapes = shape_table.clone();
 
-        let task = pool.spawn(async move { generate_chunk_mesh(&data, &shapes) });
+        let task = pool.spawn(async move { generate_chunk_mesh(&data, &shapes, mode) });
 
         commands.entity(entity).insert(ChunkMeshTask(task));
     }
@@ -81,5 +115,23 @@ fn handle_chunk_mesh_results(
             .remove::<ChunkMeshTask>();
 
         chunk.state = ChunkState::Ready;
+    }
+}
+
+/// F3 cycles the presentation mode and marks all chunks dirty for regeneration.
+fn cycle_presentation_mode(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut presentation: ResMut<PresentationMode>,
+    mut chunks: Query<&mut Chunk>,
+) {
+    if keyboard.just_pressed(KeyCode::F3) {
+        let old = *presentation;
+        *presentation = old.cycle();
+        info!("Presentation mode: {} → {}", old.label(), presentation.label());
+
+        // Mark all chunks dirty to regenerate with new mode
+        for mut chunk in chunks.iter_mut() {
+            chunk.mark_dirty();
+        }
     }
 }

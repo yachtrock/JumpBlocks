@@ -54,4 +54,28 @@ fn draw_hud(data, ww, wh) {
     if !data.inventory_open {
         text(20.0, 54.0, "[TAB] Inventory", 12.0, [0.7, 0.7, 0.7, 0.6]);
     }
+
+    // Button hints from action state (bottom of screen)
+    let hints = data.button_hints;
+    if hints.len() > 0 {
+        let mode = data.input_mode;
+        let hint_y = wh - 50.0;
+        let font_size = 14.0;
+        let spacing = 180.0;
+        let total_width = hints.len() * spacing;
+        let start_x = (ww - total_width) / 2.0;
+
+        // Background bar
+        rect(start_x - 10.0, hint_y - 6.0, total_width + 20.0, 32.0, [0.0, 0.0, 0.0, 0.6]);
+
+        let i = 0;
+        while i < hints.len() {
+            let hint = hints[i];
+            let key = if mode == "gamepad" { hint.gamepad } else { hint.keyboard };
+            let label = "[" + key + "] " + hint.label;
+            let x = start_x + i * spacing;
+            text(x, hint_y, label, font_size, [1.0, 1.0, 1.0, 0.9]);
+            i += 1;
+        }
+    }
 }
