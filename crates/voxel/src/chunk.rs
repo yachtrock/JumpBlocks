@@ -148,6 +148,36 @@ impl ChunkData {
         self.is_filled(x as usize, y as usize, z as usize)
     }
 
+    /// Check whether a block can be placed at `(x, y, z)`.
+    ///
+    /// Rules:
+    /// - The target position must be empty.
+    /// - At least one orthogonal neighbor (±x, ±y, ±z) must be filled.
+    ///
+    /// Currently only checks within this chunk's bounds; out-of-bounds neighbors
+    /// are treated as empty. Once cross-chunk neighbor lookups exist, this method
+    /// should be extended to query adjacent chunks.
+    pub fn can_build_at(&self, x: usize, y: usize, z: usize) -> bool {
+        if x >= CHUNK_X || y >= CHUNK_Y || z >= CHUNK_Z {
+            return false;
+        }
+        if self.get(x, y, z).is_filled() {
+            return false;
+        }
+
+        let ix = x as i32;
+        let iy = y as i32;
+        let iz = z as i32;
+
+        // At least one orthogonal neighbor must be filled
+        self.is_neighbor_filled(ix - 1, iy, iz)
+            || self.is_neighbor_filled(ix + 1, iy, iz)
+            || self.is_neighbor_filled(ix, iy - 1, iz)
+            || self.is_neighbor_filled(ix, iy + 1, iz)
+            || self.is_neighbor_filled(ix, iy, iz - 1)
+            || self.is_neighbor_filled(ix, iy, iz + 1)
+    }
+
     /// Get voxel at signed coordinates. Out-of-bounds returns EMPTY.
     pub fn get_signed(&self, x: i32, y: i32, z: i32) -> Voxel {
         if x < 0 || y < 0 || z < 0 {

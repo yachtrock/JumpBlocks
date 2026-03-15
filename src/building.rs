@@ -103,16 +103,19 @@ fn find_placement_position(
             continue;
         }
 
-        // If occupied, try one voxel up
-        let (final_x, final_y, final_z) = if chunk.data.get(ux, uy, uz).is_filled() {
+        // Must be a valid build spot (empty + has orthogonal neighbor).
+        // If the target is occupied, try one voxel up.
+        let (final_x, final_y, final_z) = if chunk.data.can_build_at(ux, uy, uz) {
+            (ux, uy, uz)
+        } else if chunk.data.get(ux, uy, uz).is_filled() {
             let uy_up = uy + 1;
-            if uy_up < CHUNK_Y && !chunk.data.get(ux, uy_up, uz).is_filled() {
+            if chunk.data.can_build_at(ux, uy_up, uz) {
                 (ux, uy_up, uz)
             } else {
                 continue;
             }
         } else {
-            (ux, uy, uz)
+            continue;
         };
 
         let world_pos = chunk_origin
