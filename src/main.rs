@@ -268,7 +268,7 @@ fn main() {
         data_rx,
         event_tx: event_tx.clone(),
         data: GameUiData::default(),
-        script: scripting::ScriptEngine::new("assets/scripts/inventory.rhai"),
+        script: scripting::ScriptEngine::new("assets/scripts"),
     };
 
     let items = make_dummy_items();

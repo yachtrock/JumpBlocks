@@ -94,6 +94,9 @@ impl Shared {
 // ---------------------------------------------------------------------------
 
 /// Rhai script engine for hot-reloadable UI scripting.
+///
+/// Loads all `.rhai` files from a directory and merges them into a single AST.
+/// This lets scripts be split across files while sharing functions and constants.
 pub struct ScriptEngine {
     engine: Engine,
     ast: Option<AST>,
@@ -103,19 +106,20 @@ pub struct ScriptEngine {
     /// Scope populated with module-level constants from `eval_ast`.
     /// Cloned for each `call_fn` so constants are visible inside functions.
     base_scope: Scope<'static>,
-    script_path: PathBuf,
-    last_modified: Option<SystemTime>,
+    /// Directory containing .rhai script files.
+    script_dir: PathBuf,
+    /// Tracked files and their last-modified times for hot-reload.
+    file_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
     frame_count: u64,
 }
 
 impl ScriptEngine {
-    pub fn new(script_path: impl Into<PathBuf>) -> Self {
+    pub fn new(script_dir: impl Into<PathBuf>) -> Self {
         let shared = Arc::new(Mutex::new(Shared::new()));
         let engine = build_engine(Arc::clone(&shared));
-        let script_path = script_path.into();
+        let script_dir = script_dir.into();
 
-        let ast = load_script(&engine, &script_path);
-        let last_modified = file_mtime(&script_path);
+        let (ast, file_mtimes) = load_script_dir(&engine, &script_dir);
 
         // Run top-level code (const declarations) to populate scope
         let mut base_scope = Scope::new();
@@ -142,8 +146,8 @@ impl ScriptEngine {
             shared,
             state,
             base_scope,
-            script_path,
-            last_modified,
+            script_dir,
+            file_mtimes,
             frame_count: 0,
         }
     }
@@ -253,30 +257,30 @@ impl ScriptEngine {
     }
 
     fn check_hot_reload(&mut self) {
-        let new_mtime = file_mtime(&self.script_path);
-        if new_mtime != self.last_modified {
-            self.last_modified = new_mtime;
-            match load_script(&self.engine, &self.script_path) {
-                Some(ast) => {
-                    eprintln!(
-                        "[rhai] Hot-reloaded: {} (state preserved)",
-                        self.script_path.display()
-                    );
-                    // Re-evaluate top-level code to refresh constants
-                    let mut scope = Scope::new();
-                    if let Err(e) =
-                        self.engine
-                            .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
-                    {
-                        eprintln!("[rhai] Error evaluating top-level code: {e}");
-                    }
-                    self.base_scope = scope;
-                    self.ast = Some(ast);
+        // Check if any script file has changed
+        let current_files = collect_rhai_files(&self.script_dir);
+        let changed = current_files.len() != self.file_mtimes.len()
+            || current_files.iter().zip(self.file_mtimes.iter()).any(
+                |((path_a, mtime_a), (path_b, mtime_b))| path_a != path_b || mtime_a != mtime_b,
+            );
+
+        if changed {
+            let (ast, file_mtimes) = load_script_dir(&self.engine, &self.script_dir);
+            self.file_mtimes = file_mtimes;
+            if let Some(ast) = ast {
+                eprintln!(
+                    "[rhai] Hot-reloaded: {} (state preserved)",
+                    self.script_dir.display()
+                );
+                // Re-evaluate top-level code to refresh constants
+                let mut scope = Scope::new();
+                if let Err(e) = self.engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast) {
+                    eprintln!("[rhai] Error evaluating top-level code: {e}");
                 }
-                None => {
-                    // Keep old AST — compile error already logged
-                }
+                self.base_scope = scope;
+                self.ast = Some(ast);
             }
+            // If None, keep old AST — compile error already logged
         }
     }
 }
@@ -535,31 +539,79 @@ fn build_engine(shared: Arc<Mutex<Shared>>) -> Engine {
 // ---------------------------------------------------------------------------
 
 fn default_state() -> Dynamic {
+    let mut inv = Map::new();
+    inv.insert("selected".into(), Dynamic::from(0_i64));
+    inv.insert("cursor_pulse".into(), Dynamic::from(0.0_f64));
+    inv.insert("phase".into(), Dynamic::from("hidden".to_string()));
+    inv.insert("scale".into(), Dynamic::from(0.6_f64));
+
     let mut map = Map::new();
-    map.insert("selected".into(), Dynamic::from(0_i64));
-    map.insert("cursor_pulse".into(), Dynamic::from(0.0_f64));
-    map.insert("phase".into(), Dynamic::from("hidden".to_string()));
-    map.insert("scale".into(), Dynamic::from(0.6_f64));
+    map.insert("inventory".into(), Dynamic::from(inv));
     Dynamic::from(map)
 }
 
-fn load_script(engine: &Engine, path: &Path) -> Option<AST> {
-    match std::fs::read_to_string(path) {
-        Ok(source) => match engine.compile(&source) {
-            Ok(ast) => {
-                eprintln!("[rhai] Loaded: {}", path.display());
-                Some(ast)
-            }
-            Err(e) => {
-                eprintln!("[rhai] Compile error in {}: {e}", path.display());
-                None
-            }
-        },
+/// Collect all `.rhai` files in a directory, sorted by name (for deterministic merge order).
+fn collect_rhai_files(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "rhai"))
+            .collect(),
         Err(e) => {
-            eprintln!("[rhai] Failed to read {}: {e}", path.display());
-            None
+            eprintln!("[rhai] Failed to read directory {}: {e}", dir.display());
+            return Vec::new();
+        }
+    };
+    // Sort so support modules load before the main hud.rhai (alphabetical)
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| {
+            let mtime = file_mtime(&p);
+            (p, mtime)
+        })
+        .collect()
+}
+
+/// Load all `.rhai` files from a directory, compile each, and merge into one AST.
+fn load_script_dir(engine: &Engine, dir: &Path) -> (Option<AST>, Vec<(PathBuf, Option<SystemTime>)>) {
+    let file_mtimes = collect_rhai_files(dir);
+    if file_mtimes.is_empty() {
+        eprintln!("[rhai] No .rhai files found in {}", dir.display());
+        return (None, file_mtimes);
+    }
+
+    let mut combined_ast: Option<AST> = None;
+    let mut all_ok = true;
+
+    for (path, _) in &file_mtimes {
+        match std::fs::read_to_string(path) {
+            Ok(source) => match engine.compile(&source) {
+                Ok(ast) => {
+                    eprintln!("[rhai] Loaded: {}", path.display());
+                    combined_ast = Some(match combined_ast {
+                        Some(prev) => prev.merge(&ast),
+                        None => ast,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[rhai] Compile error in {}: {e}", path.display());
+                    all_ok = false;
+                }
+            },
+            Err(e) => {
+                eprintln!("[rhai] Failed to read {}: {e}", path.display());
+                all_ok = false;
+            }
         }
     }
+
+    if !all_ok {
+        return (None, file_mtimes);
+    }
+
+    (combined_ast, file_mtimes)
 }
 
 fn file_mtime(path: &Path) -> Option<SystemTime> {

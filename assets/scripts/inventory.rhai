@@ -1,8 +1,7 @@
-// inventory.rhai — Inventory UI with FFD jiggle physics
+// inventory.rhai — Inventory panel UI with FFD jiggle physics
 //
-// Hot-reloadable! Edit this file while the game is running and changes
-// take effect within ~1 second. Script state (selected slot, animation
-// phase, FFD simulations) is preserved across reloads.
+// Provides inventory-specific state and drawing, called from hud.rhai.
+// Hot-reloadable alongside all other scripts in assets/scripts/.
 
 // Layout constants
 const COLS = 4;
@@ -10,8 +9,8 @@ const OPEN_SPEED = 7.0;
 const CLOSE_SPEED = 10.5;
 const PANEL_WIDTH = 480.0;
 
-/// Called once on first load to initialize persistent state.
-fn init_state() {
+/// Returns the inventory-specific portion of persistent state.
+fn init_inventory_state() {
     #{
         selected: 0,
         cursor_pulse: 0.0,
@@ -20,75 +19,70 @@ fn init_state() {
     }
 }
 
-/// Called every frame (~120fps) by the UI thread.
-fn draw(state) {
-    let ww = win_w();
-    let wh = win_h();
+/// Draws the inventory panel and handles its input.
+/// Called from hud.rhai's draw(). Returns the (possibly mutated) inventory state.
+fn draw_inventory(inv, data, ww, wh) {
     let dt = 1.0 / 120.0;
-    let data = game_data();
-
-    // --- Always draw HUD ---
-    draw_hud(data, ww, wh);
 
     // --- Phase transitions ---
-    if data.inventory_open && state.phase == "hidden" {
-        state.phase = "opening";
-        state.scale = 0.6;
+    if data.inventory_open && inv.phase == "hidden" {
+        inv.phase = "opening";
+        inv.scale = 0.6;
     }
-    if !data.inventory_open && state.phase == "open" {
-        state.phase = "closing";
-        if state.ffd_id != () {
-            ffd_pop(state.ffd_id, -12.0);
+    if !data.inventory_open && inv.phase == "open" {
+        inv.phase = "closing";
+        if inv.ffd_id != () {
+            ffd_pop(inv.ffd_id, -12.0);
         }
     }
 
     // --- Scale animation ---
-    if state.phase == "opening" {
-        state.scale += OPEN_SPEED * dt;
-        if state.scale >= 1.0 {
-            state.scale = 1.0;
-            state.phase = "open";
+    if inv.phase == "opening" {
+        inv.scale += OPEN_SPEED * dt;
+        if inv.scale >= 1.0 {
+            inv.scale = 1.0;
+            inv.phase = "open";
         }
     }
-    if state.phase == "closing" {
-        state.scale -= CLOSE_SPEED * dt;
-        if state.scale <= 0.6 {
-            state.phase = "hidden";
-            if state.ffd_id != () {
-                ffd_destroy(state.ffd_id);
-                state.ffd_id = ();
+    if inv.phase == "closing" {
+        inv.scale -= CLOSE_SPEED * dt;
+        if inv.scale <= 0.6 {
+            inv.phase = "hidden";
+            if inv.ffd_id != () {
+                ffd_destroy(inv.ffd_id);
+                inv.ffd_id = ();
             }
-            return state;
+            return inv;
         }
     }
-    if state.phase == "hidden" {
-        return state;
+    if inv.phase == "hidden" {
+        return inv;
     }
 
-    state.cursor_pulse += 0.08;
+    inv.cursor_pulse += 0.08;
     let items = data.items;
     let num_items = items.len();
     let rows = (num_items + COLS - 1) / COLS;
 
     // --- Input (only when fully open) ---
-    if state.phase == "open" {
+    if inv.phase == "open" {
         if key_just_pressed("ArrowRight") {
-            state.selected = min(state.selected + 1, num_items - 1);
+            inv.selected = min(inv.selected + 1, num_items - 1);
         }
-        if key_just_pressed("ArrowLeft") && state.selected > 0 {
-            state.selected -= 1;
+        if key_just_pressed("ArrowLeft") && inv.selected > 0 {
+            inv.selected -= 1;
         }
         if key_just_pressed("ArrowDown") {
-            let next = state.selected + COLS;
+            let next = inv.selected + COLS;
             if next < num_items {
-                state.selected = next;
+                inv.selected = next;
             }
         }
-        if key_just_pressed("ArrowUp") && state.selected >= COLS {
-            state.selected -= COLS;
+        if key_just_pressed("ArrowUp") && inv.selected >= COLS {
+            inv.selected -= COLS;
         }
         if key_just_pressed("Enter") {
-            send_item_selected(state.selected);
+            send_item_selected(inv.selected);
         }
         if key_just_pressed("Escape") {
             send_inventory_closed();
@@ -104,50 +98,50 @@ fn draw(state) {
     let panel_y = cy - full_h * 0.5;
 
     // --- FFD setup ---
-    if state.ffd_id == () {
-        state.ffd_id = ffd_new(panel_x, panel_y, full_w, full_h);
-        ffd_pop(state.ffd_id, 20.0);
-        ffd_jiggle(state.ffd_id, 8.0, 42);
+    if inv.ffd_id == () {
+        inv.ffd_id = ffd_new(panel_x, panel_y, full_w, full_h);
+        ffd_pop(inv.ffd_id, 20.0);
+        ffd_jiggle(inv.ffd_id, 8.0, 42);
     }
 
     // --- Localized impulse on dpad navigation ---
-    if state.phase == "open" {
-        let s = state.scale;
+    if inv.phase == "open" {
+        let s = inv.scale;
         let grid_x0 = panel_x + 16.0 * s;
         let grid_y0 = panel_y + 52.0 * s;
         let cell_w = (full_w * s - 32.0 * s - (COLS.to_float() - 1.0) * 8.0 * s) / COLS.to_float();
         let cell_h = 72.0 * s;
 
-        let sel_col = state.selected % COLS;
-        let sel_row = state.selected / COLS;
+        let sel_col = inv.selected % COLS;
+        let sel_row = inv.selected / COLS;
         let sel_cx = grid_x0 + sel_col.to_float() * (cell_w + 8.0 * s) + cell_w * 0.5;
         let sel_cy = grid_y0 + sel_row.to_float() * (cell_h + 8.0 * s) + cell_h * 0.5;
         let imp = 10.0;
         let imp_r = full_w * 0.4;
 
         if key_just_pressed("ArrowRight") {
-            ffd_impulse_at(state.ffd_id, sel_cx, sel_cy, imp, 0.0, imp_r);
+            ffd_impulse_at(inv.ffd_id, sel_cx, sel_cy, imp, 0.0, imp_r);
         }
         if key_just_pressed("ArrowLeft") {
-            ffd_impulse_at(state.ffd_id, sel_cx, sel_cy, -imp, 0.0, imp_r);
+            ffd_impulse_at(inv.ffd_id, sel_cx, sel_cy, -imp, 0.0, imp_r);
         }
         if key_just_pressed("ArrowDown") {
-            ffd_impulse_at(state.ffd_id, sel_cx, sel_cy, 0.0, imp, imp_r);
+            ffd_impulse_at(inv.ffd_id, sel_cx, sel_cy, 0.0, imp, imp_r);
         }
         if key_just_pressed("ArrowUp") {
-            ffd_impulse_at(state.ffd_id, sel_cx, sel_cy, 0.0, -imp, imp_r);
+            ffd_impulse_at(inv.ffd_id, sel_cx, sel_cy, 0.0, -imp, imp_r);
         }
     }
 
-    ffd_step(state.ffd_id, dt);
+    ffd_step(inv.ffd_id, dt);
 
     // --- Drawing ---
-    let s = state.scale;
+    let s = inv.scale;
     let sw = full_w * s;
     let sh = full_h * s;
     let sx = cx - sw * 0.5;
     let sy = cy - sh * 0.5;
-    let ffd = state.ffd_id;
+    let ffd = inv.ffd_id;
 
     // Dim background (not FFD-warped)
     rect(0.0, 0.0, ww, wh, [0.0, 0.0, 0.0, 0.5]);
@@ -183,9 +177,9 @@ fn draw(state) {
         let cell_x = grid_x + col.to_float() * (cell_w + 8.0 * s);
         let cell_y = grid_y + row.to_float() * (cell_h + 8.0 * s);
 
-        let is_sel = i == state.selected;
+        let is_sel = i == inv.selected;
         let bg = if is_sel {
-            let pulse = clamp(sin(state.cursor_pulse) * 0.15 + 0.35, 0.2, 0.5);
+            let pulse = clamp(sin(inv.cursor_pulse) * 0.15 + 0.35, 0.2, 0.5);
             [0.3, 0.3, pulse + 0.3, 0.9]
         } else {
             [0.18, 0.18, 0.24, 0.8]
@@ -194,7 +188,7 @@ fn draw(state) {
 
         // Selection border highlight
         if is_sel {
-            let b = clamp(sin(state.cursor_pulse) * 0.3 + 0.7, 0.4, 1.0);
+            let b = clamp(sin(inv.cursor_pulse) * 0.3 + 0.7, 0.4, 1.0);
             let sel_c = [0.5, 0.5, b, 1.0];
             rect_ffd(cell_x, cell_y, cell_w, 2.0, sel_c, ffd);
             rect_ffd(cell_x, cell_y + cell_h - 2.0, cell_w, 2.0, sel_c, ffd);
@@ -212,8 +206,8 @@ fn draw(state) {
     }
 
     // --- Detail panel ---
-    if state.selected < num_items {
-        let item = items[state.selected];
+    if inv.selected < num_items {
+        let item = items[inv.selected];
         let detail_y = grid_y + rows.to_float() * (cell_h + 8.0 * s) + 8.0 * s;
         rect_ffd(grid_x, detail_y, sw - 32.0 * s, 1.0,
                  [0.4, 0.4, 0.5, 0.6], ffd);
@@ -225,30 +219,5 @@ fn draw(state) {
                  [0.7, 0.7, 0.7, 1.0], ffd);
     }
 
-    state
-}
-
-/// HUD overlay — always visible regardless of inventory state.
-fn draw_hud(data, ww, wh) {
-    let pct = if data.max_health > 0.0 {
-        data.health / data.max_health
-    } else {
-        0.0
-    };
-
-    // Health bar background
-    rect(20.0, 20.0, 200.0, 24.0, [0.1, 0.1, 0.1, 0.8]);
-    // Health bar fill
-    rect(22.0, 22.0, 196.0 * pct, 20.0, [0.2, 0.9, 0.3, 1.0]);
-    // Health text
-    let hp_text = "HP: " + data.health.to_int() + " / " + data.max_health.to_int();
-    text(28.0, 23.0, hp_text, 16.0, [1.0, 1.0, 1.0, 1.0]);
-
-    // Bottom-right label
-    text(ww - 140.0, wh - 30.0, "JumpBlocks", 14.0, [1.0, 1.0, 1.0, 0.5]);
-
-    // Inventory hint
-    if !data.inventory_open {
-        text(20.0, 54.0, "[TAB] Inventory", 12.0, [0.7, 0.7, 0.7, 0.6]);
-    }
+    inv
 }
