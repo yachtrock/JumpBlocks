@@ -574,7 +574,11 @@ fn collect_rhai_files(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
         .collect()
 }
 
-/// Load all `.rhai` files from a directory, compile each, and merge into one AST.
+/// Load all `.rhai` files from a directory, concatenate sources, and compile as one unit.
+///
+/// Concatenating before compilation (rather than merging ASTs) ensures that
+/// `const` declarations in one file are visible to functions defined in any
+/// file, since Rhai scopes constants per compilation unit.
 fn load_script_dir(engine: &Engine, dir: &Path) -> (Option<AST>, Vec<(PathBuf, Option<SystemTime>)>) {
     let file_mtimes = collect_rhai_files(dir);
     if file_mtimes.is_empty() {
@@ -582,36 +586,29 @@ fn load_script_dir(engine: &Engine, dir: &Path) -> (Option<AST>, Vec<(PathBuf, O
         return (None, file_mtimes);
     }
 
-    let mut combined_ast: Option<AST> = None;
-    let mut all_ok = true;
+    let mut combined_source = String::new();
 
     for (path, _) in &file_mtimes {
         match std::fs::read_to_string(path) {
-            Ok(source) => match engine.compile(&source) {
-                Ok(ast) => {
-                    eprintln!("[rhai] Loaded: {}", path.display());
-                    combined_ast = Some(match combined_ast {
-                        Some(prev) => prev.merge(&ast),
-                        None => ast,
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[rhai] Compile error in {}: {e}", path.display());
-                    all_ok = false;
-                }
-            },
+            Ok(source) => {
+                eprintln!("[rhai] Loaded: {}", path.display());
+                combined_source.push_str(&source);
+                combined_source.push('\n');
+            }
             Err(e) => {
                 eprintln!("[rhai] Failed to read {}: {e}", path.display());
-                all_ok = false;
+                return (None, file_mtimes);
             }
         }
     }
 
-    if !all_ok {
-        return (None, file_mtimes);
+    match engine.compile(&combined_source) {
+        Ok(ast) => (Some(ast), file_mtimes),
+        Err(e) => {
+            eprintln!("[rhai] Compile error: {e}");
+            (None, file_mtimes)
+        }
     }
-
-    (combined_ast, file_mtimes)
 }
 
 fn file_mtime(path: &Path) -> Option<SystemTime> {
