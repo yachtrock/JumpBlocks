@@ -252,6 +252,15 @@ pub fn get_voxel(data: &ChunkData, neighbors: &ChunkNeighbors, x: i32, y: i32, z
     }
 }
 
+/// A pending voxel modification to be incorporated into a chunk.
+#[derive(Debug, Clone)]
+pub struct VoxelModification {
+    pub x: usize,
+    pub y: usize,
+    pub z: usize,
+    pub voxel: Voxel,
+}
+
 // ---------------------------------------------------------------------------
 // ECS component
 // ---------------------------------------------------------------------------
@@ -264,6 +273,10 @@ pub struct Chunk {
     pub state: ChunkState,
     pub world_aligned: bool,
     pub dynamic: bool,
+    /// Queue of voxel modifications waiting to be incorporated into the mesh.
+    /// The building system pushes modifications here; the chunk meshing pipeline
+    /// drains them and triggers a re-mesh.
+    pub pending_modifications: Vec<VoxelModification>,
 }
 
 impl Chunk {
@@ -274,6 +287,7 @@ impl Chunk {
             state: ChunkState::Loaded,
             world_aligned: true,
             dynamic: false,
+            pending_modifications: Vec::new(),
         }
     }
 

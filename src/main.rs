@@ -1,4 +1,5 @@
 mod action_state;
+mod building;
 mod camera;
 mod curtain;
 mod debug_ui;
@@ -412,6 +413,7 @@ fn main() {
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
             action_state::ActionStatePlugin,
+            building::BuildingPlugin,
             camera::CameraPlugin,
             curtain::CurtainPlugin,
             debug_ui::DebugUiPlugin,
