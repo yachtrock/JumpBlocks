@@ -3,12 +3,6 @@
 // Provides inventory-specific state and drawing, called from hud.rhai.
 // Hot-reloadable alongside all other scripts in assets/scripts/.
 
-// Layout constants (exported so they survive compile_into_self_contained)
-export const COLS = 4;
-export const OPEN_SPEED = 7.0;
-export const CLOSE_SPEED = 10.5;
-export const PANEL_WIDTH = 480.0;
-
 /// Returns the inventory-specific portion of persistent state.
 fn init_inventory_state() {
     #{
@@ -22,6 +16,14 @@ fn init_inventory_state() {
 /// Draws the inventory panel and handles its input.
 /// Called from hud.rhai's draw(). Returns the (possibly mutated) inventory state.
 fn draw_inventory(inv, data, ww, wh) {
+    // Layout constants — defined locally because compile_into_self_contained
+    // embeds module functions but does NOT carry module-level constants into
+    // the function scope when invoked via call_fn.
+    const COLS = 4;
+    const OPEN_SPEED = 7.0;
+    const CLOSE_SPEED = 10.5;
+    const PANEL_WIDTH = 480.0;
+
     let dt = 1.0 / 120.0;
 
     // --- Phase transitions ---

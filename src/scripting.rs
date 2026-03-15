@@ -140,9 +140,13 @@ impl ScriptEngine {
             .as_ref()
             .and_then(|ast| {
                 let mut scope = base_scope.clone();
-                engine
-                    .call_fn::<Dynamic>(&mut scope, ast, "init_state", ())
-                    .ok()
+                match engine.call_fn::<Dynamic>(&mut scope, ast, "init_state", ()) {
+                    Ok(state) => Some(state),
+                    Err(e) => {
+                        eprintln!("[rhai] init_state() failed, using defaults: {e}");
+                        None
+                    }
+                }
             })
             .unwrap_or_else(default_state);
 
@@ -199,7 +203,8 @@ impl ScriptEngine {
                     self.state = new_state;
                 }
                 Err(e) => {
-                    if self.frame_count % 120 == 1 {
+                    // Always log first occurrence, then throttle to ~1/sec
+                    if self.frame_count % 120 == 1 || self.frame_count <= 1 {
                         eprintln!("[rhai] Runtime error: {e}");
                     }
                 }
@@ -276,17 +281,18 @@ impl ScriptEngine {
                 load_main_script(&self.engine, &self.main_script, &self.script_dir);
             self.file_mtimes = file_mtimes;
             if let Some(ast) = ast {
-                eprintln!(
-                    "[rhai] Hot-reloaded: {} (state preserved)",
-                    self.script_dir.display()
-                );
                 // Re-evaluate top-level code to refresh imports + constants
                 let mut scope = Scope::new();
                 if let Err(e) = self.engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast) {
-                    eprintln!("[rhai] Error evaluating top-level code: {e}");
+                    eprintln!("[rhai] Hot-reload FAILED (keeping previous script): {e}");
+                } else {
+                    eprintln!(
+                        "[rhai] Hot-reloaded: {} (state preserved)",
+                        self.script_dir.display()
+                    );
+                    self.base_scope = scope;
+                    self.ast = Some(ast);
                 }
-                self.base_scope = scope;
-                self.ast = Some(ast);
             }
             // If None, keep old AST — compile error already logged
         }
