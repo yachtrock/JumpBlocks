@@ -70,11 +70,15 @@ pub struct EnterActionStateQueue(pub Vec<EnterActionStateRequest>);
 // ---------------------------------------------------------------------------
 
 /// A single button hint: label + the key name for keyboard and gamepad.
+/// For compound hints (e.g. "← →" for rotate), use `keyboard2`/`gamepad2`.
 #[derive(Clone, Debug)]
 pub struct ButtonHint {
     pub label: String,
     pub keyboard: String,
     pub gamepad: String,
+    /// Optional second key shown alongside the first (e.g. left+right dpad).
+    pub keyboard2: Option<String>,
+    pub gamepad2: Option<String>,
 }
 
 /// Current button hints, set by the active action state script.
@@ -113,7 +117,7 @@ struct Shared {
     pending_emits: Vec<String>,
     input_just_pressed: HashSet<String>,
     input_pressed: HashSet<String>,
-    button_hints: Vec<(String, String, String)>,
+    button_hints: Vec<(String, String, String, Option<String>, Option<String>)>,
 }
 
 impl Shared {
@@ -423,6 +427,26 @@ fn build_engine(shared: Arc<Mutex<Shared>>) -> Engine {
                     label.to_string(),
                     keyboard.to_string(),
                     gamepad.to_string(),
+                    None,
+                    None,
+                ));
+            },
+        );
+    }
+
+    // set_button_hint_pair(label, keyboard1, keyboard2, gamepad1, gamepad2)
+    // For compound hints like "← →" for rotate
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn(
+            "set_button_hint_pair",
+            move |label: &str, kb1: &str, kb2: &str, gp1: &str, gp2: &str| {
+                s.lock().unwrap().button_hints.push((
+                    label.to_string(),
+                    kb1.to_string(),
+                    gp1.to_string(),
+                    Some(kb2.to_string()),
+                    Some(gp2.to_string()),
                 ));
             },
         );
@@ -687,10 +711,12 @@ fn action_state_update(
             button_hints.0 = s
                 .button_hints
                 .iter()
-                .map(|(label, kb, gp)| ButtonHint {
+                .map(|(label, kb, gp, kb2, gp2)| ButtonHint {
                     label: label.clone(),
                     keyboard: kb.clone(),
                     gamepad: gp.clone(),
+                    keyboard2: kb2.clone(),
+                    gamepad2: gp2.clone(),
                 })
                 .collect();
         }

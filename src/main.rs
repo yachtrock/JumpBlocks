@@ -35,6 +35,8 @@ struct ButtonHintData {
     label: String,
     keyboard: String,
     gamepad: String,
+    keyboard2: Option<String>,
+    gamepad2: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -254,6 +256,8 @@ fn sync_game_ui_data(
             label: h.label.clone(),
             keyboard: h.keyboard.clone(),
             gamepad: h.gamepad.clone(),
+            keyboard2: h.keyboard2.clone(),
+            gamepad2: h.gamepad2.clone(),
         })
         .collect();
 

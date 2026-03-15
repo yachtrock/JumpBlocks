@@ -701,6 +701,14 @@ fn game_data_to_dynamic(data: &GameUiData) -> Dynamic {
             m.insert("label".into(), Dynamic::from(hint.label.clone()));
             m.insert("keyboard".into(), Dynamic::from(hint.keyboard.clone()));
             m.insert("gamepad".into(), Dynamic::from(hint.gamepad.clone()));
+            m.insert(
+                "keyboard2".into(),
+                Dynamic::from(hint.keyboard2.clone().unwrap_or_default()),
+            );
+            m.insert(
+                "gamepad2".into(),
+                Dynamic::from(hint.gamepad2.clone().unwrap_or_default()),
+            );
             Dynamic::from(m)
         })
         .collect();

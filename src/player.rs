@@ -212,18 +212,26 @@ pub fn player_input(
         return;
     };
 
-    // Gather input from keyboard
+    // Gather input from keyboard (respecting consumed inputs from action states)
     let mut input_dir = Vec2::ZERO;
-    if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
+    if (!consumed.0.contains("KeyW") && keyboard.pressed(KeyCode::KeyW))
+        || (!consumed.0.contains("ArrowUp") && keyboard.pressed(KeyCode::ArrowUp))
+    {
         input_dir.y += 1.0;
     }
-    if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
+    if (!consumed.0.contains("KeyS") && keyboard.pressed(KeyCode::KeyS))
+        || (!consumed.0.contains("ArrowDown") && keyboard.pressed(KeyCode::ArrowDown))
+    {
         input_dir.y -= 1.0;
     }
-    if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
+    if (!consumed.0.contains("KeyA") && keyboard.pressed(KeyCode::KeyA))
+        || (!consumed.0.contains("ArrowLeft") && keyboard.pressed(KeyCode::ArrowLeft))
+    {
         input_dir.x -= 1.0;
     }
-    if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
+    if (!consumed.0.contains("KeyD") && keyboard.pressed(KeyCode::KeyD))
+        || (!consumed.0.contains("ArrowRight") && keyboard.pressed(KeyCode::ArrowRight))
+    {
         input_dir.x += 1.0;
     }
 
