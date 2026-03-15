@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/voxel", "crates/ui", "crates/script-lint"]
+members = ["crates/voxel", "crates/ui", "crates/script-lint", "crates/openmesh-sys", "crates/openmesh"]
 
 [package]
 name = "jumpblocks"

@@ -1,6 +1,7 @@
 pub mod chunk;
 pub mod halfedge_chamfer;
 pub mod meshing;
+pub mod openmesh_chamfer;
 pub mod shape;
 
 #[cfg(test)]
@@ -24,6 +25,8 @@ pub enum PresentationMode {
     EdgeGraphChamfer,
     /// Half-edge mesh chamfer using procedural_modelling crate.
     HalfEdgeChamfer,
+    /// Chamfer using the OpenMesh C++ library (PolyMesh, no pre-triangulation).
+    OpenMeshChamfer,
 }
 
 impl PresentationMode {
@@ -31,7 +34,8 @@ impl PresentationMode {
         match self {
             Self::Flat => Self::EdgeGraphChamfer,
             Self::EdgeGraphChamfer => Self::HalfEdgeChamfer,
-            Self::HalfEdgeChamfer => Self::Flat,
+            Self::HalfEdgeChamfer => Self::OpenMeshChamfer,
+            Self::OpenMeshChamfer => Self::Flat,
         }
     }
 
@@ -40,6 +44,7 @@ impl PresentationMode {
             Self::Flat => "Flat (no chamfer)",
             Self::EdgeGraphChamfer => "Edge-Graph Chamfer",
             Self::HalfEdgeChamfer => "Half-Edge Chamfer",
+            Self::OpenMeshChamfer => "OpenMesh Chamfer",
         }
     }
 }

@@ -7,3 +7,4 @@ edition = "2024"
 bevy = "0.18.1"
 avian3d = "0.5"
 procedural_modelling = "0.3"
+jumpblocks_openmesh = { path = "../openmesh" }

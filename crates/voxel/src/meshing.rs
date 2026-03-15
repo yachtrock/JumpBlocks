@@ -106,6 +106,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable, mode: crate::P
         crate::PresentationMode::Flat => generate_lod_mesh(data, shapes),
         crate::PresentationMode::EdgeGraphChamfer => generate_chamfered_mesh(data, shapes),
         crate::PresentationMode::HalfEdgeChamfer => crate::halfedge_chamfer::generate_halfedge_chamfer(data, shapes),
+        crate::PresentationMode::OpenMeshChamfer => crate::openmesh_chamfer::generate_openmesh_chamfer(data, shapes),
     };
     let t1 = Instant::now();
     let lod = generate_lod_mesh(data, shapes);
@@ -115,7 +116,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable, mode: crate::P
     let lod_ms = (t2 - t1).as_secs_f64() * 1000.0;
     info!(
         "Chunk meshed [{}]: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
-        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::EdgeGraphChamfer => "edge-graph", crate::PresentationMode::HalfEdgeChamfer => "half-edge" },
+        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::EdgeGraphChamfer => "edge-graph", crate::PresentationMode::HalfEdgeChamfer => "half-edge", crate::PresentationMode::OpenMeshChamfer => "openmesh" },
         full_ms, lod_ms, full_ms + lod_ms,
         full_res.positions.len(), full_res.indices.len() / 3,
         lod.positions.len(), lod.indices.len() / 3,
