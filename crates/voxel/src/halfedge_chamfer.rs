@@ -271,7 +271,15 @@ impl HEMesh {
             for &v in &vs { pos.push(self.verts[v as usize].pos.to_array()); nrm.push(na); }
             let uv = [[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]];
             for i in 0..vs.len() { uvs.push(uv[i%4]); }
-            for i in 1..vs.len()-1 { idx.extend_from_slice(&[base+i as u32+1, base+i as u32, base]); }
+            for i in 1..vs.len()-1 {
+                // Skip degenerate triangles (colinear vertices from edge removal)
+                let a = self.verts[vs[0] as usize].pos;
+                let b = self.verts[vs[i] as usize].pos;
+                let c = self.verts[vs[i+1] as usize].pos;
+                let area = (b - a).cross(c - a).length();
+                if area < 1e-6 { continue; }
+                idx.extend_from_slice(&[base+i as u32+1, base+i as u32, base]);
+            }
         }
         let n = pos.len();
         ChunkMeshData { positions: pos, normals: nrm, uvs, chamfer_offsets: vec![[0.0;3];n], indices: idx }

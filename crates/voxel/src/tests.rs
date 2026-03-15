@@ -207,6 +207,107 @@ fn demo_chunk() -> ChunkData {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn halfedge_single_cube_topology() {
+    use crate::halfedge_chamfer::generate_halfedge_chamfer;
+
+    let shapes = make_shapes();
+    let data = single_voxel_chunk(Voxel::filled());
+    let result = generate_halfedge_chamfer(&data, &shapes);
+
+    assert_mesh_valid(&result, "he_cube");
+
+    let tri_count = result.indices.len() / 3;
+    let vert_count = result.positions.len();
+
+    eprintln!("halfedge cube: {} verts, {} tris", vert_count, tri_count);
+
+    // A single cube has 6 faces, 12 sharp edges, 8 corners.
+    // After chamfer:
+    //   6 inset face quads (each becomes smaller) = 6 faces
+    //   12 bevel faces (one per sharp edge, hexagons with A,B still present) = 12 faces
+    //   8 corner caps (one per corner, triangles) = 8 faces
+    //   Total faces = 26
+    //
+    // Without chamfer: 6 faces × 2 tris = 12 tris
+    // With chamfer: should be significantly more.
+    assert!(tri_count > 12,
+        "chamfered cube should have more than 12 tris, got {}", tri_count);
+
+    // Check no degenerate triangles
+    assert_no_degenerate_triangles(&result, "he_cube");
+
+    // Check boundary edges (should be 0 for a closed mesh)
+    let (boundary, interior, non_manifold) = count_edge_sharing(&result);
+    eprintln!("halfedge cube edges: boundary={}, interior={}, non_manifold={}", boundary, interior, non_manifold);
+    assert!(non_manifold == 0,
+        "halfedge cube should have no non-manifold edges, got {}", non_manifold);
+    // Boundary edges indicate holes — ideally 0 for a floating cube
+    if boundary > 0 {
+        eprintln!("WARNING: halfedge cube has {} boundary edges (holes)", boundary);
+        dump_boundary_edges(&result, "he_cube");
+    }
+}
+
+#[test]
+fn halfedge_single_cube_no_boundary() {
+    use crate::halfedge_chamfer::generate_halfedge_chamfer;
+
+    let shapes = make_shapes();
+    let data = single_voxel_chunk(Voxel::filled());
+    let result = generate_halfedge_chamfer(&data, &shapes);
+
+    let (boundary, _, _) = count_edge_sharing(&result);
+    assert!(boundary == 0,
+        "halfedge chamfered cube should be watertight (0 boundary edges), got {}", boundary);
+}
+
+#[test]
+fn halfedge_single_wedge_topology() {
+    use crate::halfedge_chamfer::generate_halfedge_chamfer;
+
+    let shapes = make_shapes();
+    let data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+    let result = generate_halfedge_chamfer(&data, &shapes);
+
+    assert_mesh_valid(&result, "he_wedge");
+
+    let tri_count = result.indices.len() / 3;
+    let vert_count = result.positions.len();
+    eprintln!("halfedge wedge: {} verts, {} tris", vert_count, tri_count);
+
+    assert_no_degenerate_triangles(&result, "he_wedge");
+
+    let (boundary, _, non_manifold) = count_edge_sharing(&result);
+    eprintln!("halfedge wedge edges: boundary={}, non_manifold={}", boundary, non_manifold);
+    assert!(non_manifold == 0, "he_wedge non-manifold: {}", non_manifold);
+}
+
+#[test]
+fn halfedge_wedge_on_cube_topology() {
+    use crate::halfedge_chamfer::generate_halfedge_chamfer;
+
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    data.set(8, 15, 8, Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1));
+    data.set(8, 16, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+    let result = generate_halfedge_chamfer(&data, &shapes);
+
+    assert_mesh_valid(&result, "he_woc");
+
+    let tri_count = result.indices.len() / 3;
+    let vert_count = result.positions.len();
+    eprintln!("halfedge wedge_on_cube: {} verts, {} tris", vert_count, tri_count);
+
+    assert_no_degenerate_triangles(&result, "he_woc");
+
+    let (boundary, _, non_manifold) = count_edge_sharing(&result);
+    eprintln!("halfedge woc edges: boundary={}, non_manifold={}", boundary, non_manifold);
+    assert!(non_manifold == 0, "he_woc non-manifold: {}", non_manifold);
+    assert!(boundary == 0,
+        "he_woc should be watertight (0 boundary edges), got {}", boundary);
+}
+
+#[test]
 fn single_cube_mesh_valid() {
     let shapes = make_shapes();
     let data = single_voxel_chunk(Voxel::filled());

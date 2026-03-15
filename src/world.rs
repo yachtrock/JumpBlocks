@@ -161,8 +161,42 @@ fn setup_world(
 
         commands.spawn((
             Chunk::new(chunk_data),
-            MeshMaterial3d(chunk_material),
+            MeshMaterial3d(chunk_material.clone()),
             Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
+            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
+        ));
+
+        // Floating test blocks — isolated shapes for inspecting chamfer
+        let mut test_data = ChunkData::new();
+
+        // Single cube
+        test_data.set(2, 4, 2, Voxel::filled());
+
+        // Single smooth cube
+        test_data.set(5, 4, 2, smooth_voxel);
+
+        // Single wedge (each facing)
+        test_data.set(2, 4, 5, Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+        test_data.set(5, 4, 5, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
+        test_data.set(8, 4, 5, Voxel::new(SHAPE_WEDGE, Facing::South, 1));
+        test_data.set(11, 4, 5, Voxel::new(SHAPE_WEDGE, Facing::West, 1));
+
+        // Single smooth wedge
+        test_data.set(2, 4, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::North, 1));
+        test_data.set(5, 4, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+
+        // Wedge on cube
+        test_data.set(8, 3, 2, smooth_voxel);
+        test_data.set(8, 4, 2, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+
+        // Two adjacent cubes
+        test_data.set(11, 4, 2, Voxel::filled());
+        test_data.set(12, 4, 2, Voxel::filled());
+
+        commands.spawn((
+            Chunk::new(test_data),
+            MeshMaterial3d(chunk_material),
+            Transform::from_translation(Vec3::new(10.0, 0.0, -10.0)),
             CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
         ));
     }
