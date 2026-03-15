@@ -71,8 +71,16 @@ fn draw_hud(data, ww, wh) {
         let i = 0;
         while i < hints.len() {
             let hint = hints[i];
-            let key = if mode == "gamepad" { hint.gamepad } else { hint.keyboard };
-            let label = "[" + key + "] " + hint.label;
+            let key1 = if mode == "gamepad" { hint.gamepad } else { hint.keyboard };
+            let key2 = if mode == "gamepad" { hint.gamepad2 } else { hint.keyboard2 };
+
+            // Compound hint: show both keys side by side
+            let label = if key2 != "" {
+                "[" + key1 + "] [" + key2 + "] " + hint.label;
+            } else {
+                "[" + key1 + "] " + hint.label;
+            };
+
             let x = start_x + i * spacing;
             text(x, hint_y, label, font_size, [1.0, 1.0, 1.0, 0.9]);
             i += 1;
