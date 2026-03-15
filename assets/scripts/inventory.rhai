@@ -3,11 +3,11 @@
 // Provides inventory-specific state and drawing, called from hud.rhai.
 // Hot-reloadable alongside all other scripts in assets/scripts/.
 
-// Layout constants
-const COLS = 4;
-const OPEN_SPEED = 7.0;
-const CLOSE_SPEED = 10.5;
-const PANEL_WIDTH = 480.0;
+// Layout constants (exported so they survive compile_into_self_contained)
+export const COLS = 4;
+export const OPEN_SPEED = 7.0;
+export const CLOSE_SPEED = 10.5;
+export const PANEL_WIDTH = 480.0;
 
 /// Returns the inventory-specific portion of persistent state.
 fn init_inventory_state() {
