@@ -4402,6 +4402,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jumpblocks-script-lint"
+version = "0.1.0"
+dependencies = [
+ "rhai",
+]
+
+[[package]]
 name = "jumpblocks-ui"
 version = "0.1.0"
 dependencies = [
