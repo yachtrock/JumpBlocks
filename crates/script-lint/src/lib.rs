@@ -65,6 +65,7 @@ pub fn stub_engine(script_dir: &Path) -> Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhai::Scope;
 
     fn script_dir() -> std::path::PathBuf {
         // Walk up from crates/script-lint to the workspace root
