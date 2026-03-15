@@ -502,8 +502,8 @@ fn dump_boundary_edges(mesh: &ChunkMeshData, label: &str) {
                 label, p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], tri_idx, n[0], n[1], n[2]);
         }
     }
-    if boundary_count > 6 {
-        eprintln!("  {} ... and {} more (total {})", label, boundary_count - 6, boundary_count);
+    if boundary_count > 20 {
+        eprintln!("  {} ... and {} more (total {})", label, boundary_count - 20, boundary_count);
     }
 }
 

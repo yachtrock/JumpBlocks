@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use bevy::prelude::*;
@@ -402,7 +402,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
     // ---------------------------------------------------------------
     // Pass 1: compute inner vertices for every face
     // ---------------------------------------------------------------
-    let all_inner: Vec<Vec<Vec3>> = solid.faces.iter().map(|face| {
+    let mut all_inner: Vec<Vec<Vec3>> = solid.faces.iter().map(|face| {
         let n = face.verts.len();
         let normal = face.normal;
 
@@ -411,10 +411,19 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             sharp_set.contains_key(&key)
         }).collect();
 
+        // Compute face centroid to verify inward direction
+        let centroid: Vec3 = face.verts.iter()
+            .map(|&vi| solid.positions[vi as usize])
+            .sum::<Vec3>() / n as f32;
+
         let edge_inward_dirs: Vec<Vec3> = (0..n).map(|i| {
             let p0 = solid.positions[face.verts[i] as usize];
             let p1 = solid.positions[face.verts[(i + 1) % n] as usize];
-            (p1 - p0).normalize_or_zero().cross(normal).normalize_or_zero()
+            let candidate = (p1 - p0).normalize_or_zero().cross(normal).normalize_or_zero();
+            // Verify direction points toward face interior (centroid)
+            let edge_mid = (p0 + p1) * 0.5;
+            let to_center = centroid - edge_mid;
+            if to_center.dot(candidate) < 0.0 { -candidate } else { candidate }
         }).collect();
 
         (0..n).map(|vi| {
@@ -426,9 +435,65 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             if edge_sharp_flags[vi] {
                 offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
             }
-            solid.positions[face.verts[vi] as usize] + offset
+            let pos = solid.positions[face.verts[vi] as usize];
+            let inner = pos + offset;
+
+            // Clamp: if a non-sharp edge is adjacent, ensure the inner
+            // vertex stays on the face side of that edge's boundary line.
+            // This prevents the sharp-edge offset from pushing the vertex
+            // across a non-sharp edge into the neighbor face's area.
+            let mut clamped = inner;
+            for &adj_edge_idx in &[prev, vi] {
+                if edge_sharp_flags[adj_edge_idx] { continue; }
+                let ep0 = solid.positions[face.verts[adj_edge_idx] as usize];
+                let ep1 = solid.positions[face.verts[(adj_edge_idx + 1) % n] as usize];
+                let edge_dir = (ep1 - ep0).normalize_or_zero();
+                // Boundary normal perpendicular to edge, in the face plane
+                let boundary_n = edge_dir.cross(normal);
+                // Orient toward face interior
+                let to_center = centroid - (ep0 + ep1) * 0.5;
+                let boundary_n = if to_center.dot(boundary_n) < 0.0 { -boundary_n } else { boundary_n };
+                // If inner vertex is on the wrong side, project back
+                let d = (clamped - ep0).dot(boundary_n);
+                if d < 0.0 {
+                    clamped -= boundary_n * d;
+                }
+            }
+            clamped
         }).collect()
     }).collect();
+
+    // ---------------------------------------------------------------
+    // Pass 1b: unify inner vertices at shared non-sharp edges between
+    // coplanar faces.  When two faces share a non-sharp edge and have
+    // the same normal, their inner vertices at shared vertices may differ
+    // (due to different sharp-edge configurations).  Averaging ensures
+    // both faces agree on the inner edge, preventing boundary edges.
+    // ---------------------------------------------------------------
+    for (&ek, info) in &edge_graph {
+        if info.faces.len() != 2 { continue; }
+        if sharp_set.contains_key(&ek) { continue; }
+        let fi_a = info.faces[0];
+        let fi_b = info.faces[1];
+        let face_a = &solid.faces[fi_a];
+        let face_b = &solid.faces[fi_b];
+        if face_a.normal.dot(face_b.normal) < SHARP_DOT_THRESHOLD { continue; }
+
+        let (v0, v1) = ek;
+        for &v in &[v0, v1] {
+            let pos_a = face_a.verts.iter().position(|&fv| fv == v);
+            let pos_b = face_b.verts.iter().position(|&fv| fv == v);
+            if let (Some(ia), Some(ib)) = (pos_a, pos_b) {
+                let pa = all_inner[fi_a][ia];
+                let pb = all_inner[fi_b][ib];
+                if (pa - pb).length_squared() > 1e-8 {
+                    let avg = (pa + pb) * 0.5;
+                    all_inner[fi_a][ia] = avg;
+                    all_inner[fi_b][ib] = avg;
+                }
+            }
+        }
+    }
 
     // ---------------------------------------------------------------
     // Pass 2b: collect chamfer strip planes per owning voxel
@@ -445,6 +510,12 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
         aabb_max: Vec3,
         /// Dot product of the two face normals forming this chamfer
         face_normal_dot: f32,
+        /// Normals of the two faces forming this strip
+        face_normals: [Vec3; 2],
+        /// Face indices forming this strip
+        face_indices: [usize; 2],
+        /// Inner vertices on each face's side of the strip: [a0, a1] and [b0, b1]
+        inner_verts: [[Vec3; 2]; 2],
     }
     let mut voxel_strip_clips: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
     let mut all_strip_clips: Vec<StripClip> = Vec::new();
@@ -480,6 +551,9 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             point: a0, normal: strip_normal, owning_voxels: owning,
             edge_verts: [ev0, ev1], aabb_min: strip_min, aabb_max: strip_max,
             face_normal_dot: face_a.normal.dot(face_b.normal),
+            face_normals: [face_a.normal, face_b.normal],
+            face_indices: [fi_a, fi_b],
+            inner_verts: [[a0, a1], [b0, b1]],
         });
 
         // Associate with owning voxels
@@ -501,10 +575,62 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
     let mut indices: Vec<u32> = Vec::new();
 
     // ---------------------------------------------------------------
+    // Pass 2c: pre-compute coplanar boundary insertions
+    // ---------------------------------------------------------------
+    // For non-sharp edges between coplanar faces where inner vertices mismatch,
+    // we need to insert the neighbor's inner vertex into this face's polygon.
+    // Key: (face_index, local_edge_index), Value: neighbor's inner vertex to insert
+    // The insertion goes AFTER the edge's end vertex in the polygon.
+    let mut coplanar_insertions: HashMap<(usize, usize), Vec3> = HashMap::new();
+    for (&ek, info) in &edge_graph {
+        if info.faces.len() != 2 { continue; }
+        if sharp_set.contains_key(&ek) { continue; }
+        let fi_a = info.faces[0];
+        let fi_b = info.faces[1];
+        let face_a = &solid.faces[fi_a];
+        let face_b = &solid.faces[fi_b];
+        if face_a.normal.dot(face_b.normal) < SHARP_DOT_THRESHOLD { continue; }
+
+        let (v0, v1) = ek;
+        // For each endpoint, check if inner vertices mismatch
+        for &vert in &[v0, v1] {
+            let ia = face_a.verts.iter().position(|&v| v == vert).map(|i| all_inner[fi_a][i]);
+            let ib = face_b.verts.iter().position(|&v| v == vert).map(|i| all_inner[fi_b][i]);
+            if let (Some(ia), Some(ib)) = (ia, ib) {
+                if (ia - ib).length_squared() > 1e-6 {
+                    // Face A needs face B's inner vertex inserted after this vertex
+                    // Find the edge index in face A that contains `vert` as the SECOND vertex
+                    // (i.e., the edge that ENDS at `vert`), so insertion goes after it.
+                    let n_a = face_a.verts.len();
+                    for ei in 0..n_a {
+                        let e_end = face_a.verts[(ei + 1) % n_a];
+                        if e_end == vert {
+                            // Insert ib after inner vertex at position (ei+1)%n_a
+                            coplanar_insertions.insert((fi_a, (ei + 1) % n_a), ib);
+                            break;
+                        }
+                    }
+                    // Face B needs face A's inner vertex inserted
+                    let n_b = face_b.verts.len();
+                    for ei in 0..n_b {
+                        let e_end = face_b.verts[(ei + 1) % n_b];
+                        if e_end == vert {
+                            coplanar_insertions.insert((fi_b, (ei + 1) % n_b), ia);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
     // Pass 3: emit inner faces, clipped against chamfer strips from neighbors
     // ---------------------------------------------------------------
     for (fi, face) in solid.faces.iter().enumerate() {
         let normal_arr = face.normal.to_array();
+
+        // Use inner vertices directly (insertions disabled for now)
         let inner = &all_inner[fi];
 
         // Collect strip clip planes from NEIGHBOR voxels that might cross this face.
@@ -548,27 +674,78 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
                         && face_min.y <= sc.aabb_max.y && face_max.y >= sc.aabb_min.y
                         && face_min.z <= sc.aabb_max.z && face_max.z >= sc.aabb_min.z;
                     if !overlaps { continue; }
+
+                    // When the face is coplanar with one side of the strip
+                    // AND shares a non-sharp edge with that face, the tilted
+                    // strip plane is nearly parallel and creates unreliable
+                    // clips.  Skip these — the faces are continuous.
+                    {
+                        let mut skip = false;
+                        for side in 0..2 {
+                            if sc.face_normals[side].dot(face.normal).abs() <= 0.95 {
+                                continue;
+                            }
+                            let other_fi = sc.face_indices[side];
+                            if other_fi == fi { skip = true; break; }
+                            let other_face = &solid.faces[other_fi];
+                            let shared: Vec<u32> = face.verts.iter()
+                                .filter(|v| other_face.verts.contains(v))
+                                .copied()
+                                .collect();
+                            if shared.len() >= 2 {
+                                for i in 0..shared.len() {
+                                    for j in i+1..shared.len() {
+                                        let ek = if shared[i] < shared[j] {
+                                            (shared[i], shared[j])
+                                        } else {
+                                            (shared[j], shared[i])
+                                        };
+                                        if !sharp_set.contains_key(&ek) {
+                                            skip = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if skip { break; }
+                        }
+                        if skip { continue; }
+                    }
                     // Keep the side AWAY from the chamfer interior
                     clip_planes.push((sc.point, -sc.normal));
                 }
             }
         }
 
-        if clip_planes.is_empty() {
-            // No clipping needed
-            let n = inner.len();
-            let inner_base = positions.len() as u32;
-            for i in 0..n {
-                positions.push(inner[i].to_array());
+        // Helper: emit a polygon as a fan, skipping degenerate triangles
+        fn emit_polygon_fan(
+            poly: &[Vec3], normal_arr: [f32; 3],
+            positions: &mut Vec<[f32; 3]>, normals: &mut Vec<[f32; 3]>,
+            uvs: &mut Vec<[f32; 2]>, chamfer_offsets: &mut Vec<[f32; 3]>,
+            indices: &mut Vec<u32>,
+        ) {
+            if poly.len() < 3 { return; }
+            let base = positions.len() as u32;
+            for p in poly {
+                positions.push(p.to_array());
                 normals.push(normal_arr);
                 uvs.push([0.0, 0.0]);
                 chamfer_offsets.push([0.0; 3]);
             }
-            for i in 1..n - 1 {
-                indices.push(inner_base + i as u32 + 1);
-                indices.push(inner_base + i as u32);
-                indices.push(inner_base);
+            for i in 1..poly.len() - 1 {
+                let pa = poly[0];
+                let pb = poly[i];
+                let pc = poly[i + 1];
+                // Skip degenerate triangles (zero area from clamping)
+                if (pb - pa).cross(pc - pa).length_squared() < 1e-16 { continue; }
+                indices.push(base + i as u32 + 1);
+                indices.push(base + i as u32);
+                indices.push(base);
             }
+        }
+
+        if clip_planes.is_empty() {
+            emit_polygon_fan(inner, normal_arr, &mut positions, &mut normals,
+                &mut uvs, &mut chamfer_offsets, &mut indices);
         } else {
             // Clip face polygon against neighbor chamfer strip planes.
             // The strip normal points outward from the chamfer surface.
@@ -610,29 +787,135 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
                 }
 
                 if clean_poly.len() >= 3 {
-                    let inner_base = positions.len() as u32;
-                    for p in &clean_poly {
-                        positions.push(p.to_array());
-                        normals.push(normal_arr);
-                        uvs.push([0.0, 0.0]);
-                        chamfer_offsets.push([0.0; 3]);
-                    }
-                    for i in 1..clean_poly.len() - 1 {
-                        indices.push(inner_base + i as u32 + 1);
-                        indices.push(inner_base + i as u32);
-                        indices.push(inner_base);
-                    }
+                    emit_polygon_fan(&clean_poly, normal_arr, &mut positions,
+                        &mut normals, &mut uvs, &mut chamfer_offsets, &mut indices);
                 }
             }
         }
     }
 
     // ---------------------------------------------------------------
-    // Pass 3: emit chamfer strips per-edge (not per-face)
+    // Pass 3b: stitch triangles for coplanar faces with mismatched inner verts
     // ---------------------------------------------------------------
+    // For non-sharp edges between coplanar faces where inner vertices mismatch
+    // at a shared vertex, emit a stitch triangle to fill the gap. The stitch
+    // connects the two mismatched inner vertices and the shared inner vertex
+    // at the OTHER endpoint of the shared edge (where they match).
+    for (&ek, info) in &edge_graph {
+        if info.faces.len() != 2 { continue; }
+        if sharp_set.contains_key(&ek) { continue; }
+        let fi_a = info.faces[0];
+        let fi_b = info.faces[1];
+        let face_a = &solid.faces[fi_a];
+        let face_b = &solid.faces[fi_b];
+        if face_a.normal.dot(face_b.normal) < SHARP_DOT_THRESHOLD { continue; }
+
+        let (v0, v1) = ek;
+        let ia0 = face_a.verts.iter().position(|&v| v == v0).map(|i| all_inner[fi_a][i]);
+        let ia1 = face_a.verts.iter().position(|&v| v == v1).map(|i| all_inner[fi_a][i]);
+        let ib0 = face_b.verts.iter().position(|&v| v == v0).map(|i| all_inner[fi_b][i]);
+        let ib1 = face_b.verts.iter().position(|&v| v == v1).map(|i| all_inner[fi_b][i]);
+
+        let (ia0, ia1, ib0, ib1) = match (ia0, ia1, ib0, ib1) {
+            (Some(a0), Some(a1), Some(b0), Some(b1)) => (a0, a1, b0, b1),
+            _ => continue,
+        };
+
+        let mismatch_0 = (ia0 - ib0).length_squared() > 1e-6;
+        let mismatch_1 = (ia1 - ib1).length_squared() > 1e-6;
+        if !mismatch_0 && !mismatch_1 { continue; }
+
+        let normal_arr = face_a.normal.to_array();
+
+        // Emit a stitch triangle for each mismatched endpoint.
+        // The triangle connects: ia_mismatch, ib_mismatch, shared_inner_at_other_end.
+        // This fills the gap between the two inner face edges without overlapping
+        // because it only covers the "wedge" area between them near the corner.
+        if mismatch_0 {
+            if (ia1 - ib1).length_squared() < 1e-6 {
+                let tri_n = (ib0 - ia0).cross(ia1 - ia0);
+                if tri_n.length_squared() > 1e-16 {
+                    let base = positions.len() as u32;
+                    for &p in &[ia0, ib0, ia1] {
+                        positions.push(p.to_array());
+                        normals.push(normal_arr);
+                        uvs.push([0.0, 0.0]);
+                        chamfer_offsets.push([0.0; 3]);
+                    }
+                    if tri_n.dot(face_a.normal) >= 0.0 {
+                        indices.extend_from_slice(&[base, base + 1, base + 2]);
+                    } else {
+                        indices.extend_from_slice(&[base, base + 2, base + 1]);
+                    }
+                }
+            }
+        }
+        if mismatch_1 {
+            if (ia0 - ib0).length_squared() < 1e-6 {
+                let tri_n = (ib1 - ia1).cross(ia0 - ia1);
+                if tri_n.length_squared() > 1e-16 {
+                    let base = positions.len() as u32;
+                    for &p in &[ia1, ib1, ia0] {
+                        positions.push(p.to_array());
+                        normals.push(normal_arr);
+                        uvs.push([0.0, 0.0]);
+                        chamfer_offsets.push([0.0; 3]);
+                    }
+                    if tri_n.dot(face_a.normal) >= 0.0 {
+                        indices.extend_from_slice(&[base, base + 1, base + 2]);
+                    } else {
+                        indices.extend_from_slice(&[base, base + 2, base + 1]);
+                    }
+                }
+            }
+        }
+        // Both endpoints mismatch: emit a stitch quad (ia0,ia1,ib1,ib0)
+        if mismatch_0 && mismatch_1 {
+            let quad = [ia0, ia1, ib1, ib0];
+            let q_normal = (ia1 - ia0).cross(ib0 - ia0);
+            if q_normal.length_squared() > 1e-16 {
+                let base = positions.len() as u32;
+                for &p in &quad {
+                    positions.push(p.to_array());
+                    normals.push(normal_arr);
+                    uvs.push([0.0, 0.0]);
+                    chamfer_offsets.push([0.0; 3]);
+                }
+                // Two triangles for the quad
+                let flip = q_normal.dot(face_a.normal) < 0.0;
+                if flip {
+                    // (0,2,1) and (0,3,2)
+                    let t1_cross = (quad[2] - quad[0]).cross(quad[1] - quad[0]);
+                    if t1_cross.length_squared() > 1e-16 {
+                        indices.extend_from_slice(&[base, base + 2, base + 1]);
+                    }
+                    let t2_cross = (quad[3] - quad[0]).cross(quad[2] - quad[0]);
+                    if t2_cross.length_squared() > 1e-16 {
+                        indices.extend_from_slice(&[base, base + 3, base + 2]);
+                    }
+                } else {
+                    // (0,1,2) and (0,2,3)
+                    let t1_cross = (quad[1] - quad[0]).cross(quad[2] - quad[0]);
+                    if t1_cross.length_squared() > 1e-16 {
+                        indices.extend_from_slice(&[base, base + 1, base + 2]);
+                    }
+                    let t2_cross = (quad[2] - quad[0]).cross(quad[3] - quad[0]);
+                    if t2_cross.length_squared() > 1e-16 {
+                        indices.extend_from_slice(&[base, base + 2, base + 3]);
+                    }
+                }
+            }
+        }
+    }
+
     fn find_face_inner_at_vert(face: &SolidFace, inner: &[Vec3], vert: u32) -> Option<Vec3> {
         face.verts.iter().position(|&v| v == vert).map(|i| inner[i])
     }
+
+    // ---------------------------------------------------------------
+    // Pass 3c: emit chamfer strips per-edge (not per-face)
+    // ---------------------------------------------------------------
+    // (find_face_inner_at_vert defined above in Pass 3b)
 
     /// Collect face indices from axis-aligned neighbor voxels (excluding owning voxels).
     fn collect_neighbor_clip_faces(
@@ -804,45 +1087,70 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
 
         if sharp_edge_keys.len() < 3 { continue; }
 
-        // Collect unique inner vertex positions + face normals from each adjacent face
+        // Build the ring by following sharp-edge connectivity so that
+        // consecutive ring entries share a strip.  This ensures ring edges
+        // align with strip edges rather than creating orphaned edges.
         let outer = solid.positions[vi];
-        let mut ring: Vec<(Vec3, Vec3)> = Vec::new(); // (position, face_normal)
+
+        // Map face index → (inner_pos, face_normal) for faces at this vertex
+        let mut face_inner: HashMap<usize, (Vec3, Vec3)> = HashMap::new();
         for &fi in adj_faces {
             let face = &solid.faces[fi];
             if let Some(inner_pos) = find_face_inner_at_vert(face, &all_inner[fi], vi as u32) {
                 if (inner_pos - outer).length_squared() > 1e-8 {
-                    let dup = ring.iter().any(|(r, _)| (*r - inner_pos).length_squared() < 1e-6);
-                    if !dup {
-                        ring.push((inner_pos, face.normal));
+                    face_inner.insert(fi, (inner_pos, face.normal));
+                }
+            }
+        }
+
+        // Build face adjacency via sharp edges at this vertex
+        let mut face_neighbors: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &ek in &sharp_edge_keys {
+            if let Some(info) = sharp_set.get(&ek) {
+                if info.faces.len() >= 2 {
+                    let a = info.faces[0];
+                    let b = info.faces[1];
+                    if face_inner.contains_key(&a) && face_inner.contains_key(&b) {
+                        face_neighbors.entry(a).or_default().push(b);
+                        face_neighbors.entry(b).or_default().push(a);
                     }
                 }
             }
         }
 
+        // Traverse the chain: find an endpoint (face with only 1 sharp neighbor)
+        // to start, or start anywhere if it's a closed loop.
+        let start_face = face_neighbors.iter()
+            .find(|(_, nbrs)| nbrs.len() == 1)
+            .map(|(&fi, _)| fi)
+            .or_else(|| face_neighbors.keys().next().copied());
+
+        let ring: Vec<(Vec3, Vec3)> = if let Some(start) = start_face {
+            let mut chain = vec![start];
+            let mut visited = HashSet::new();
+            visited.insert(start);
+            loop {
+                let current = *chain.last().unwrap();
+                let next = face_neighbors.get(&current)
+                    .and_then(|nbrs| nbrs.iter().find(|&&n| !visited.contains(&n)).copied());
+                match next {
+                    Some(n) => { visited.insert(n); chain.push(n); }
+                    None => break,
+                }
+            }
+            chain.iter().filter_map(|fi| face_inner.get(fi).copied()).collect()
+        } else {
+            // Fallback: just collect all face inners (shouldn't happen normally)
+            face_inner.values().copied().collect()
+        };
+
         if ring.len() < 3 { continue; }
 
-        // Sort ring by angle around the outer vertex.
-        // Use average face normal as the sort axis.
+        // Axis for winding check
         let axis = adj_faces.iter()
             .map(|&fi| solid.faces[fi].normal)
             .sum::<Vec3>()
             .normalize_or_zero();
-
-        // Build a stable reference frame perpendicular to axis
-        let ref_dir = if axis.x.abs() < 0.9 {
-            axis.cross(Vec3::X).normalize_or_zero()
-        } else {
-            axis.cross(Vec3::Y).normalize_or_zero()
-        };
-        let tangent = axis.cross(ref_dir).normalize_or_zero();
-
-        ring.sort_by(|a, b| {
-            let da = a.0 - outer;
-            let db = b.0 - outer;
-            let angle_a = da.dot(tangent).atan2(da.dot(ref_dir));
-            let angle_b = db.dot(tangent).atan2(db.dot(ref_dir));
-            angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
-        });
 
         // Determine corner chamfer mode: Hard wins over Smooth
         let corner_mode = {
@@ -859,11 +1167,31 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             mode
         };
 
-        // Triangulate the ring polygon (fan from ring[0])
+        // Triangulate the ring polygon using star triangulation from the
+        // centroid.  This avoids ALL diagonal-vs-strip-edge conflicts because
+        // the centroid is a new interior point not on any strip edge.
+        let centroid: Vec3 = ring.iter().map(|(p, _)| *p).sum::<Vec3>() / ring.len() as f32;
+        let centroid_normal = match corner_mode {
+            ChamferMode::Hard => axis,
+            ChamferMode::Smooth => {
+                let avg_n: Vec3 = ring.iter().map(|(_, n)| *n).sum::<Vec3>();
+                avg_n.normalize_or_zero()
+            }
+        };
+
+        // Push centroid as vertex 0, then ring vertices
+        let center_idx = positions.len() as u32;
+        positions.push(centroid.to_array());
+        normals.push(match corner_mode {
+            ChamferMode::Hard => axis.to_array(),
+            ChamferMode::Smooth => centroid_normal.to_array(),
+        });
+        uvs.push([0.0, 0.0]);
+        chamfer_offsets.push([0.0; 3]);
+
         let ring_start = positions.len() as u32;
         for (rp, rn) in &ring {
             positions.push(rp.to_array());
-            // Hard chamfer: flat averaged normal. Smooth/fillet: per-face normal.
             let n = match corner_mode {
                 ChamferMode::Hard => axis.to_array(),
                 ChamferMode::Smooth => rn.to_array(),
@@ -873,40 +1201,21 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             chamfer_offsets.push([0.0; 3]);
         }
 
-        // Collect ALL adjacent face normals (inner faces + chamfer strips) for overlap check
-        let mut adjacent_normals: Vec<Vec3> = Vec::new();
-        // Add normals from inner faces at this vertex
-        for &fi in adj_faces {
-            let n = solid.faces[fi].normal;
-            if !adjacent_normals.iter().any(|an| an.dot(n).abs() > 0.99) {
-                adjacent_normals.push(n);
-            }
-        }
-        // Add normals from chamfer strips at this vertex
-        for &ek in &sharp_edge_keys {
-            if let Some(info) = sharp_set.get(&ek) {
-                if info.faces.len() >= 2 {
-                    let na = solid.faces[info.faces[0]].normal;
-                    let nb = solid.faces[info.faces[1]].normal;
-                    let sn = (na + nb).normalize_or_zero();
-                    if !adjacent_normals.iter().any(|an| an.dot(sn).abs() > 0.95) {
-                        adjacent_normals.push(sn);
-                    }
-                }
-            }
-        }
-
         // Check winding of first triangle against axis
-        let tri_normal = (ring[1].0 - ring[0].0).cross(ring[2].0 - ring[0].0);
+        let tri_normal = (ring[0].0 - centroid).cross(ring[1].0 - centroid);
         let flip = tri_normal.dot(axis) < 0.0;
 
-        for i in 1..ring.len() - 1 {
-            // Skip fan triangles that are truly coplanar with an existing face
+        for i in 0..ring.len() {
+            let next = (i + 1) % ring.len();
+            // Skip star triangles that are truly coplanar with an existing face
             // or chamfer strip (same normal AND all vertices on the same plane).
-            let va = ring[0].0;
+            let va = centroid;
             let vb = ring[i].0;
-            let vc = ring[i + 1].0;
-            let fan_normal = (vb - va).cross(vc - va).normalize_or_zero();
+            let vc = ring[next].0;
+            // Skip degenerate (zero-area) star triangles
+            let tri_cross = (vb - va).cross(vc - va);
+            if tri_cross.length_squared() < 1e-16 { continue; }
+            let fan_normal = tri_cross.normalize_or_zero();
 
             let mut skip = false;
             // Check against inner faces at this vertex
@@ -926,9 +1235,9 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
             }
             if skip { continue; }
 
-            let a = ring_start;
+            let a = center_idx;
             let b = ring_start + i as u32;
-            let c = ring_start + i as u32 + 1;
+            let c = ring_start + next as u32;
             if flip {
                 indices.extend_from_slice(&[a, c, b]);
             } else {
