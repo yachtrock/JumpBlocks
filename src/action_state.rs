@@ -66,6 +66,31 @@ pub struct EnterActionStateRequest {
 pub struct EnterActionStateQueue(pub Vec<EnterActionStateRequest>);
 
 // ---------------------------------------------------------------------------
+// Button hints
+// ---------------------------------------------------------------------------
+
+/// A single button hint: label + the key name for keyboard and gamepad.
+#[derive(Clone, Debug)]
+pub struct ButtonHint {
+    pub label: String,
+    pub keyboard: String,
+    pub gamepad: String,
+}
+
+/// Current button hints, set by the active action state script.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct ButtonHints(pub Vec<ButtonHint>);
+
+/// Last input source: keyboard or gamepad. Updated each frame based on
+/// which source produced input ("last-input-wins").
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
+pub enum InputMode {
+    #[default]
+    Keyboard,
+    Gamepad,
+}
+
+// ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
 
@@ -74,6 +99,10 @@ pub struct EnterActionStateQueue(pub Vec<EnterActionStateRequest>);
 struct ActionStateInput {
     buttons_just_pressed: HashSet<String>,
     buttons_pressed: HashSet<String>,
+    /// Whether any gamepad input was detected this frame.
+    had_gamepad_input: bool,
+    /// Whether any keyboard input was detected this frame.
+    had_keyboard_input: bool,
 }
 
 /// Shared mutable state accessed by Rhai-registered closures via Arc<Mutex>.
@@ -84,6 +113,7 @@ struct Shared {
     pending_emits: Vec<String>,
     input_just_pressed: HashSet<String>,
     input_pressed: HashSet<String>,
+    button_hints: Vec<(String, String, String)>,
 }
 
 impl Shared {
@@ -95,6 +125,7 @@ impl Shared {
             pending_emits: Vec::new(),
             input_just_pressed: HashSet::new(),
             input_pressed: HashSet::new(),
+            button_hints: Vec::new(),
         }
     }
 
@@ -103,6 +134,8 @@ impl Shared {
         self.replicated_vars.clear();
         self.pending_exit = false;
         self.pending_emits.clear();
+        // NOTE: button_hints are NOT cleared per-frame — they persist until
+        // the script calls clear_button_hints() or the state exits.
     }
 }
 
@@ -380,6 +413,29 @@ fn build_engine(shared: Arc<Mutex<Shared>>) -> Engine {
         info!("[action_state] {msg}");
     });
 
+    // set_button_hint(label, keyboard, gamepad)
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn(
+            "set_button_hint",
+            move |label: &str, keyboard: &str, gamepad: &str| {
+                s.lock().unwrap().button_hints.push((
+                    label.to_string(),
+                    keyboard.to_string(),
+                    gamepad.to_string(),
+                ));
+            },
+        );
+    }
+
+    // clear_button_hints()
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn("clear_button_hints", move || {
+            s.lock().unwrap().button_hints.clear();
+        });
+    }
+
     engine
 }
 
@@ -495,18 +551,22 @@ fn keycode_name(code: KeyCode) -> String {
 // Systems
 // ---------------------------------------------------------------------------
 
-/// Captures gamepad + keyboard into ActionStateInput resource.
+/// Captures gamepad + keyboard into ActionStateInput resource and updates InputMode.
 fn action_state_input_snapshot(
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut input: ResMut<ActionStateInput>,
+    mut input_mode: ResMut<InputMode>,
 ) {
     input.buttons_just_pressed.clear();
     input.buttons_pressed.clear();
+    input.had_keyboard_input = false;
+    input.had_gamepad_input = false;
 
     // Keyboard
     for code in keyboard.get_just_pressed() {
         input.buttons_just_pressed.insert(keycode_name(*code));
+        input.had_keyboard_input = true;
     }
     for code in keyboard.get_pressed() {
         input.buttons_pressed.insert(keycode_name(*code));
@@ -535,11 +595,19 @@ fn action_state_input_snapshot(
             let name = gamepad_button_name(btn);
             if gamepad.just_pressed(btn) {
                 input.buttons_just_pressed.insert(name.to_string());
+                input.had_gamepad_input = true;
             }
             if gamepad.pressed(btn) {
                 input.buttons_pressed.insert(name.to_string());
             }
         }
+    }
+
+    // Last-input-wins for InputMode
+    if input.had_gamepad_input {
+        *input_mode = InputMode::Gamepad;
+    } else if input.had_keyboard_input {
+        *input_mode = InputMode::Keyboard;
     }
 }
 
@@ -549,6 +617,7 @@ fn action_state_update(
     mut engine: ResMut<ActionStateEngine>,
     input: Res<ActionStateInput>,
     mut enter_queue: ResMut<EnterActionStateQueue>,
+    mut button_hints: ResMut<ButtonHints>,
     mut player_query: Query<
         (Entity, &mut ActionState, &mut ConsumedInputs, Option<&ActionStateVars>),
         With<Player>,
@@ -612,16 +681,36 @@ fn action_state_update(
             info!("[action_state] Event emitted: {emit_name}");
         }
 
+        // Copy button hints from shared → resource
+        {
+            let s = engine.shared.lock().unwrap();
+            button_hints.0 = s
+                .button_hints
+                .iter()
+                .map(|(label, kb, gp)| ButtonHint {
+                    label: label.clone(),
+                    keyboard: kb.clone(),
+                    gamepad: gp.clone(),
+                })
+                .collect();
+        }
+
         // Handle exit
         if should_exit {
             engine.exit_state(state_name);
             action_state.0 = None;
             consumed.0.clear();
             commands.entity(entity).remove::<ActionStateVars>();
+            // Auto-clear button hints on state exit
+            button_hints.0.clear();
+            {
+                engine.shared.lock().unwrap().button_hints.clear();
+            }
             info!("[action_state] Exited state: {state_name}");
         }
     } else {
         consumed.0.clear();
+        button_hints.0.clear();
     }
 }
 
@@ -636,6 +725,8 @@ impl Plugin for ActionStatePlugin {
         app.insert_resource(ActionStateInput::default());
         app.insert_resource(ActionStateEngine::new("assets/action_states"));
         app.insert_resource(EnterActionStateQueue::default());
+        app.insert_resource(ButtonHints::default());
+        app.insert_resource(InputMode::default());
 
         app.add_systems(
             Update,

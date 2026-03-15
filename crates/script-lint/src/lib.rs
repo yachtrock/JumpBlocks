@@ -78,6 +78,8 @@ pub fn stub_action_state_engine() -> Engine {
     engine.register_fn("input_just_pressed", |_name: &str| -> bool { false });
     engine.register_fn("input_pressed", |_name: &str| -> bool { false });
     engine.register_fn("log", |_msg: &str| {});
+    engine.register_fn("set_button_hint", |_label: &str, _keyboard: &str, _gamepad: &str| {});
+    engine.register_fn("clear_button_hints", || {});
 
     engine
 }

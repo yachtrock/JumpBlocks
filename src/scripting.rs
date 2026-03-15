@@ -692,5 +692,23 @@ fn game_data_to_dynamic(data: &GameUiData) -> Dynamic {
         .collect();
     map.insert("items".into(), Dynamic::from(items));
 
+    // Button hints from action state
+    let hints: Array = data
+        .button_hints
+        .iter()
+        .map(|hint| {
+            let mut m = Map::new();
+            m.insert("label".into(), Dynamic::from(hint.label.clone()));
+            m.insert("keyboard".into(), Dynamic::from(hint.keyboard.clone()));
+            m.insert("gamepad".into(), Dynamic::from(hint.gamepad.clone()));
+            Dynamic::from(m)
+        })
+        .collect();
+    map.insert("button_hints".into(), Dynamic::from(hints));
+    map.insert(
+        "input_mode".into(),
+        Dynamic::from(data.input_mode.clone()),
+    );
+
     Dynamic::from(map)
 }

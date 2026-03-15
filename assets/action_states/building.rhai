@@ -5,6 +5,12 @@ fn on_enter(ctx) {
     log("Entered building state with item: " + ctx.item_name);
     replicate("block_type", ctx.item_name);
     replicate("slot", ctx.selected_slot);
+
+    // Set button hints for the HUD
+    set_button_hint("Place Block", "F", "ZR");
+    set_button_hint("Put Away", "Esc", "B");
+    set_button_hint("Options", "Q", "ZL");
+
     #{ item_name: ctx.item_name, selected_slot: ctx.selected_slot }
 }
 
@@ -26,5 +32,6 @@ fn on_update(state, input) {
 }
 
 fn on_exit(state) {
+    clear_button_hints();
     log("Exited building state");
 }
