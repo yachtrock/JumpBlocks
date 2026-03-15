@@ -6,13 +6,17 @@
 //! - Rendering the translucent preview mesh (post-system)
 //! - Writing voxels into chunks and triggering re-meshing (post-system)
 //!
-//! The script drives everything via API calls:
-//! - `build_position()` — query where the player can build
-//! - `show_preview(wx, wy, wz, facing)` — show preview at grid position
+//! All positions are in chunk-local voxel coordinates — the script never sees
+//! world-space values. The Rust side converts to world space using each chunk's
+//! transform, so chunks can have arbitrary transforms in the future.
+//!
+//! Script API:
+//! - `build_position()` → `#{ x, y, z }` (chunk-local voxel coords) or `()`
+//! - `show_preview(facing)` — show preview at the current build position
 //! - `show_preview_in_hand(facing)` — show preview floating in front of player
 //! - `hide_preview()` — hide the preview
-//! - `place_block(shape, facing, texture)` — place a block at the build position
-//! - `rotate_facing_right(facing)` / `rotate_facing_left(facing)` — facing helpers
+//! - `place_block(shape, facing, texture)` — place at the current build position
+//! - `rotate_facing_right(facing)` / `rotate_facing_left(facing)` — helpers
 
 use std::sync::{Arc, Mutex};
 
@@ -51,13 +55,14 @@ impl Plugin for BuildingPlugin {
 // Shared API data (accessed by both Rhai closures and ECS systems)
 // ---------------------------------------------------------------------------
 
-/// A valid build position within a chunk.
+/// A valid build position within a chunk (chunk-local coordinates).
 #[derive(Clone)]
 struct BuildPos {
+    /// Voxel coordinates within the chunk.
     x: usize,
     y: usize,
     z: usize,
-    world_pos: Vec3,
+    /// Which chunk entity this position belongs to.
     chunk_entity: Entity,
 }
 
@@ -66,13 +71,10 @@ struct BuildPos {
 enum PreviewState {
     #[default]
     Hidden,
-    AtPosition {
-        world_pos: Vec3,
-        facing: Facing,
-    },
-    InHand {
-        facing: Facing,
-    },
+    /// Show at the current build position (Rust resolves to world space via chunk transform).
+    AtBuildPosition { facing: Facing },
+    /// Show floating in front of the player (no chunk context needed).
+    InHand { facing: Facing },
 }
 
 /// A request to place a block, queued by the script.
@@ -147,13 +149,11 @@ struct PreviewResources {
 // Rhai API registration (startup system)
 // ---------------------------------------------------------------------------
 
-fn register_building_api(
-    mut engine: ResMut<ActionStateEngine>,
-    api: Res<BuildingApi>,
-) {
+fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<BuildingApi>) {
     let inner = api.inner.clone();
 
-    // build_position() -> #{ x, y, z, world_x, world_y, world_z } | ()
+    // build_position() -> #{ x, y, z } | ()
+    // Returns chunk-local voxel coordinates only. No world positions.
     {
         let inner = inner.clone();
         engine.rhai_engine_mut().register_fn(
@@ -166,9 +166,6 @@ fn register_building_api(
                         map.insert("x".into(), Dynamic::from(pos.x as INT));
                         map.insert("y".into(), Dynamic::from(pos.y as INT));
                         map.insert("z".into(), Dynamic::from(pos.z as INT));
-                        map.insert("world_x".into(), Dynamic::from(pos.world_pos.x as f64));
-                        map.insert("world_y".into(), Dynamic::from(pos.world_pos.y as f64));
-                        map.insert("world_z".into(), Dynamic::from(pos.world_pos.z as f64));
                         Dynamic::from(map)
                     }
                     None => Dynamic::UNIT,
@@ -177,33 +174,32 @@ fn register_building_api(
         );
     }
 
-    // show_preview(world_x, world_y, world_z, facing)
+    // show_preview(facing) — show at the current build position
+    // The Rust post-system converts chunk-local coords to world space
+    // using the chunk's transform.
     {
         let inner = inner.clone();
-        engine.rhai_engine_mut().register_fn(
-            "show_preview",
-            move |wx: f64, wy: f64, wz: f64, facing: INT| {
+        engine
+            .rhai_engine_mut()
+            .register_fn("show_preview", move |facing: INT| {
                 let mut data = inner.lock().unwrap();
-                data.preview = PreviewState::AtPosition {
-                    world_pos: Vec3::new(wx as f32, wy as f32, wz as f32),
+                data.preview = PreviewState::AtBuildPosition {
                     facing: facing_from_int(facing),
                 };
-            },
-        );
+            });
     }
 
-    // show_preview_in_hand(facing)
+    // show_preview_in_hand(facing) — show floating in front of player
     {
         let inner = inner.clone();
-        engine.rhai_engine_mut().register_fn(
-            "show_preview_in_hand",
-            move |facing: INT| {
+        engine
+            .rhai_engine_mut()
+            .register_fn("show_preview_in_hand", move |facing: INT| {
                 let mut data = inner.lock().unwrap();
                 data.preview = PreviewState::InHand {
                     facing: facing_from_int(facing),
                 };
-            },
-        );
+            });
     }
 
     // hide_preview()
@@ -217,7 +213,7 @@ fn register_building_api(
             });
     }
 
-    // place_block(shape, facing, texture)
+    // place_block(shape, facing, texture) — place at the current build position
     {
         let inner = inner.clone();
         engine.rhai_engine_mut().register_fn(
@@ -298,7 +294,7 @@ fn compute_build_context(
 fn apply_building_commands(
     mut commands: Commands,
     api: Res<BuildingApi>,
-    mut chunks: Query<&mut Chunk>,
+    mut chunks: Query<(&mut Chunk, &Transform)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut preview_res: ResMut<PreviewResources>,
@@ -310,7 +306,7 @@ fn apply_building_commands(
     for req in &inner.place_requests {
         if let Some(ref pos) = inner.build_pos {
             let voxel = Voxel::new(req.shape, req.facing, req.texture);
-            if let Ok(mut chunk) = chunks.get_mut(pos.chunk_entity) {
+            if let Ok((mut chunk, _)) = chunks.get_mut(pos.chunk_entity) {
                 chunk.data.set(pos.x, pos.y, pos.z, voxel);
                 chunk.pending_modifications.push(VoxelModification {
                     x: pos.x,
@@ -329,7 +325,6 @@ fn apply_building_commands(
     // --- Handle preview ---
     match &inner.preview {
         PreviewState::Hidden => {
-            // Despawn preview if it exists
             if preview_res.entity.is_some() {
                 for entity in preview_query.iter() {
                     commands.entity(entity).despawn();
@@ -337,16 +332,29 @@ fn apply_building_commands(
                 preview_res.entity = None;
             }
         }
-        PreviewState::AtPosition { world_pos, facing } => {
-            let transform = Transform::from_translation(*world_pos)
-                .with_rotation(Quat::from_rotation_y(facing.rotation_radians()));
-            spawn_or_update_preview(
-                &mut commands,
-                &mut preview_res,
-                &mut meshes,
-                &mut materials,
-                transform,
-            );
+        PreviewState::AtBuildPosition { facing } => {
+            // Convert chunk-local voxel coords to world space via chunk transform
+            if let Some(ref pos) = inner.build_pos {
+                if let Ok((_, chunk_transform)) = chunks.get(pos.chunk_entity) {
+                    let local_pos = Vec3::new(
+                        pos.x as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
+                        pos.y as f32 * VOXEL_HEIGHT + VOXEL_HEIGHT * 0.5,
+                        pos.z as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
+                    );
+                    let world_pos = chunk_transform.transform_point(local_pos);
+                    let world_rotation = chunk_transform.rotation
+                        * Quat::from_rotation_y(facing.rotation_radians());
+                    let transform =
+                        Transform::from_translation(world_pos).with_rotation(world_rotation);
+                    spawn_or_update_preview(
+                        &mut commands,
+                        &mut preview_res,
+                        &mut meshes,
+                        &mut materials,
+                        transform,
+                    );
+                }
+            }
         }
         PreviewState::InHand { facing } => {
             let forward_flat =
@@ -428,6 +436,11 @@ fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
 // Placement position search
 // ---------------------------------------------------------------------------
 
+/// Find a valid build position in front of the player.
+///
+/// Converts the world-space target point into each chunk's local coordinate
+/// system using the chunk's transform, so this works with arbitrarily
+/// positioned/rotated chunks.
 fn find_placement_position(
     player_pos: Vec3,
     camera_forward: Vec3,
@@ -438,8 +451,11 @@ fn find_placement_position(
     let target_world = player_pos + forward_flat * 2.0;
 
     for (chunk_entity, chunk, chunk_transform) in chunks.iter() {
-        let chunk_origin = chunk_transform.translation;
-        let local = target_world - chunk_origin;
+        // Convert world target into chunk-local space via inverse transform
+        let local = chunk_transform
+            .compute_affine()
+            .inverse()
+            .transform_point3(target_world);
 
         let vx = (local.x / VOXEL_WIDTH).floor() as i32;
         let vy = (local.y / VOXEL_HEIGHT).floor() as i32;
@@ -468,18 +484,10 @@ fn find_placement_position(
             continue;
         };
 
-        let world_pos = chunk_origin
-            + Vec3::new(
-                fx as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
-                fy as f32 * VOXEL_HEIGHT + VOXEL_HEIGHT * 0.5,
-                fz as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
-            );
-
         return Some(BuildPos {
             x: fx,
             y: fy,
             z: fz,
-            world_pos,
             chunk_entity,
         });
     }

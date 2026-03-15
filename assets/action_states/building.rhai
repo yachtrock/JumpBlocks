@@ -1,8 +1,8 @@
 // Building state — entered when the player selects an inventory item.
 // The script drives block preview and placement via the building API:
-//   build_position()              → grid position in front of player (or () if none)
-//   show_preview(wx, wy, wz, f)  → show translucent block at world position
-//   show_preview_in_hand(f)      → show block floating in front of player
+//   build_position()              → #{ x, y, z } chunk-local voxel coords (or () if none)
+//   show_preview(facing)         → show translucent block at the build position
+//   show_preview_in_hand(facing) → show block floating in front of player
 //   hide_preview()               → hide the preview
 //   place_block(shape, facing, texture) → place at the current build_position
 //   rotate_facing_right(f) / rotate_facing_left(f) → facing helpers (0=N 1=E 2=S 3=W)
@@ -47,7 +47,7 @@ fn on_update(state, input) {
     let pos = build_position();
 
     if pos != () {
-        show_preview(pos.world_x, pos.world_y, pos.world_z, state.facing);
+        show_preview(state.facing);
     } else {
         show_preview_in_hand(state.facing);
     }

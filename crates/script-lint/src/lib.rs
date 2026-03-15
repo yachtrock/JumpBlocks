@@ -87,7 +87,7 @@ pub fn stub_action_state_engine() -> Engine {
 
     // Building API
     engine.register_fn("build_position", || -> Dynamic { Dynamic::UNIT });
-    engine.register_fn("show_preview", |_wx: FLOAT, _wy: FLOAT, _wz: FLOAT, _facing: INT| {});
+    engine.register_fn("show_preview", |_facing: INT| {});
     engine.register_fn("show_preview_in_hand", |_facing: INT| {});
     engine.register_fn("hide_preview", || {});
     engine.register_fn("place_block", |_shape: INT, _facing: INT, _texture: INT| {});
