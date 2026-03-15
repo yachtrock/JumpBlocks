@@ -6,15 +6,9 @@
 //   hide_preview()               → hide the preview
 //   place_block(shape, facing, texture) → place at the current build_position
 //   rotate_facing_right(f) / rotate_facing_left(f) → facing helpers (0=N 1=E 2=S 3=W)
-
-// Facing constants (match Facing enum repr)
-const NORTH = 0;
-const EAST  = 1;
-const SOUTH = 2;
-const WEST  = 3;
-
-// Shape constants (match ShapeTable indices)
-const SHAPE_WEDGE = 2;
+//
+// Facing: 0=North 1=East 2=South 3=West
+// Shapes: 0=cube 1=smooth_cube 2=wedge 3=smooth_wedge
 
 fn on_enter(ctx) {
     log("Entered building state with item: " + ctx.item_name);
@@ -29,7 +23,7 @@ fn on_enter(ctx) {
         item_name: ctx.item_name,
         selected_slot: ctx.selected_slot,
         options_held: false,
-        facing: NORTH
+        facing: 0
     }
 }
 
@@ -58,10 +52,10 @@ fn on_update(state, input) {
         show_preview_in_hand(state.facing);
     }
 
-    // ── Place block ──────────────────────────────────────────────────
+    // ── Place block (wedge = shape 2) ────────────────────────────────
     if input_just_pressed("GamepadRightTrigger") || input_just_pressed("KeyF") {
         if pos != () {
-            place_block(SHAPE_WEDGE, state.facing, 1);
+            place_block(2, state.facing, 1);
             log("Placed " + state.item_name + " facing " + state.facing);
         }
     }
