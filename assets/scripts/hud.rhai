@@ -3,14 +3,16 @@
 // Hot-reloadable! Edit any .rhai file in assets/scripts/ and changes
 // take effect within ~1 second. Script state is preserved across reloads.
 //
-// The engine merges all .rhai files in this directory, so functions
-// defined in inventory.rhai (and future modules) are directly callable.
+// Uses Rhai's module system: `import "inventory" as inv;` pulls in
+// inventory.rhai. Module functions are called as inv::function_name().
+
+import "inventory" as inv;
 
 /// Called once on first load to initialize persistent state.
 /// Collects state from each module into a single map.
 fn init_state() {
     #{
-        inventory: init_inventory_state()
+        inventory: inv::init_inventory_state()
     }
 }
 
@@ -24,7 +26,7 @@ fn draw(state) {
     draw_hud(data, ww, wh);
 
     // --- Inventory panel ---
-    state.inventory = draw_inventory(state.inventory, data, ww, wh);
+    state.inventory = inv::draw_inventory(state.inventory, data, ww, wh);
 
     state
 }

@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use bevy::input::keyboard::KeyCode;
 use jumpblocks_ui::canvas::Canvas;
 use jumpblocks_ui::ffd::FfdSim;
+use rhai::module_resolvers::FileModuleResolver;
 use rhai::{Array, Dynamic, Engine, Map, Scope, AST, FLOAT, INT};
 
 use crate::{GameUiData, GameUiEvent};
@@ -95,8 +96,10 @@ impl Shared {
 
 /// Rhai script engine for hot-reloadable UI scripting.
 ///
-/// Loads all `.rhai` files from a directory and merges them into a single AST.
-/// This lets scripts be split across files while sharing functions and constants.
+/// Uses Rhai's module system: `hud.rhai` is the entry point and can
+/// `import "inventory" as inv;` to pull in other scripts. Modules are
+/// pre-resolved at compile time via `compile_into_self_contained` so
+/// that `call_fn` works with imported module functions.
 pub struct ScriptEngine {
     engine: Engine,
     ast: Option<AST>,
@@ -108,6 +111,8 @@ pub struct ScriptEngine {
     base_scope: Scope<'static>,
     /// Directory containing .rhai script files.
     script_dir: PathBuf,
+    /// Path to the main entry-point script (hud.rhai).
+    main_script: PathBuf,
     /// Tracked files and their last-modified times for hot-reload.
     file_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
     frame_count: u64,
@@ -116,12 +121,13 @@ pub struct ScriptEngine {
 impl ScriptEngine {
     pub fn new(script_dir: impl Into<PathBuf>) -> Self {
         let shared = Arc::new(Mutex::new(Shared::new()));
-        let engine = build_engine(Arc::clone(&shared));
         let script_dir = script_dir.into();
+        let engine = build_engine(Arc::clone(&shared), &script_dir);
+        let main_script = script_dir.join("hud.rhai");
 
-        let (ast, file_mtimes) = load_script_dir(&engine, &script_dir);
+        let (ast, file_mtimes) = load_main_script(&engine, &main_script, &script_dir);
 
-        // Run top-level code (const declarations) to populate scope
+        // Run top-level code (import + const declarations) to populate scope
         let mut base_scope = Scope::new();
         if let Some(ast) = &ast {
             if let Err(e) = engine.eval_ast_with_scope::<Dynamic>(&mut base_scope, ast) {
@@ -147,6 +153,7 @@ impl ScriptEngine {
             state,
             base_scope,
             script_dir,
+            main_script,
             file_mtimes,
             frame_count: 0,
         }
@@ -257,7 +264,7 @@ impl ScriptEngine {
     }
 
     fn check_hot_reload(&mut self) {
-        // Check if any script file has changed
+        // Check if any script file in the directory has changed
         let current_files = collect_rhai_files(&self.script_dir);
         let changed = current_files.len() != self.file_mtimes.len()
             || current_files.iter().zip(self.file_mtimes.iter()).any(
@@ -265,14 +272,15 @@ impl ScriptEngine {
             );
 
         if changed {
-            let (ast, file_mtimes) = load_script_dir(&self.engine, &self.script_dir);
+            let (ast, file_mtimes) =
+                load_main_script(&self.engine, &self.main_script, &self.script_dir);
             self.file_mtimes = file_mtimes;
             if let Some(ast) = ast {
                 eprintln!(
                     "[rhai] Hot-reloaded: {} (state preserved)",
                     self.script_dir.display()
                 );
-                // Re-evaluate top-level code to refresh constants
+                // Re-evaluate top-level code to refresh imports + constants
                 let mut scope = Scope::new();
                 if let Err(e) = self.engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast) {
                     eprintln!("[rhai] Error evaluating top-level code: {e}");
@@ -289,11 +297,16 @@ impl ScriptEngine {
 // Engine construction — register all native functions
 // ---------------------------------------------------------------------------
 
-fn build_engine(shared: Arc<Mutex<Shared>>) -> Engine {
+fn build_engine(shared: Arc<Mutex<Shared>>, script_dir: &Path) -> Engine {
     let mut engine = Engine::new();
 
     // Raise default limits — UI scripts have deep expression nesting
     engine.set_max_expr_depths(128, 64);
+
+    // Module resolver: `import "inventory" as inv;` resolves to
+    // `<script_dir>/inventory.rhai`
+    let resolver = FileModuleResolver::new_with_path(script_dir);
+    engine.set_module_resolver(resolver);
 
     // --- Math helpers ---
     engine.register_fn("min", |a: INT, b: INT| -> INT { a.min(b) });
@@ -574,38 +587,34 @@ fn collect_rhai_files(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
         .collect()
 }
 
-/// Load all `.rhai` files from a directory, concatenate sources, and compile as one unit.
+/// Compile the main script (hud.rhai) into a self-contained AST.
 ///
-/// Concatenating before compilation (rather than merging ASTs) ensures that
-/// `const` declarations in one file are visible to functions defined in any
-/// file, since Rhai scopes constants per compilation unit.
-fn load_script_dir(engine: &Engine, dir: &Path) -> (Option<AST>, Vec<(PathBuf, Option<SystemTime>)>) {
-    let file_mtimes = collect_rhai_files(dir);
-    if file_mtimes.is_empty() {
-        eprintln!("[rhai] No .rhai files found in {}", dir.display());
-        return (None, file_mtimes);
-    }
+/// Uses `compile_into_self_contained` so that `import` statements are
+/// pre-resolved at compile time via the `FileModuleResolver`. This means
+/// imported module functions work correctly with `call_fn`.
+fn load_main_script(
+    engine: &Engine,
+    main_script: &Path,
+    script_dir: &Path,
+) -> (Option<AST>, Vec<(PathBuf, Option<SystemTime>)>) {
+    let file_mtimes = collect_rhai_files(script_dir);
 
-    let mut combined_source = String::new();
-
-    for (path, _) in &file_mtimes {
-        match std::fs::read_to_string(path) {
-            Ok(source) => {
-                eprintln!("[rhai] Loaded: {}", path.display());
-                combined_source.push_str(&source);
-                combined_source.push('\n');
-            }
-            Err(e) => {
-                eprintln!("[rhai] Failed to read {}: {e}", path.display());
-                return (None, file_mtimes);
-            }
-        }
-    }
-
-    match engine.compile(&combined_source) {
-        Ok(ast) => (Some(ast), file_mtimes),
+    let source = match std::fs::read_to_string(main_script) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("[rhai] Compile error: {e}");
+            eprintln!("[rhai] Failed to read {}: {e}", main_script.display());
+            return (None, file_mtimes);
+        }
+    };
+
+    let scope = Scope::new();
+    match engine.compile_into_self_contained(&scope, &source) {
+        Ok(ast) => {
+            eprintln!("[rhai] Compiled: {} (self-contained)", main_script.display());
+            (Some(ast), file_mtimes)
+        }
+        Err(e) => {
+            eprintln!("[rhai] Compile error in {}: {e}", main_script.display());
             (None, file_mtimes)
         }
     }
