@@ -100,9 +100,13 @@ fn face_is_occluded(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshResult {
+pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable, mode: crate::PresentationMode) -> ChunkMeshResult {
     let t0 = Instant::now();
-    let full_res = generate_chamfered_mesh(data, shapes);
+    let full_res = match mode {
+        crate::PresentationMode::Flat => generate_lod_mesh(data, shapes),
+        crate::PresentationMode::EdgeGraphChamfer => generate_chamfered_mesh(data, shapes),
+        crate::PresentationMode::HalfEdgeChamfer => crate::halfedge_chamfer::generate_halfedge_chamfer(data, shapes),
+    };
     let t1 = Instant::now();
     let lod = generate_lod_mesh(data, shapes);
     let t2 = Instant::now();
@@ -110,7 +114,8 @@ pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshRe
     let full_ms = (t1 - t0).as_secs_f64() * 1000.0;
     let lod_ms = (t2 - t1).as_secs_f64() * 1000.0;
     info!(
-        "Chunk meshed: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
+        "Chunk meshed [{}]: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
+        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::EdgeGraphChamfer => "edge-graph", crate::PresentationMode::HalfEdgeChamfer => "half-edge" },
         full_ms, lod_ms, full_ms + lod_ms,
         full_res.positions.len(), full_res.indices.len() / 3,
         lod.positions.len(), lod.indices.len() / 3,
@@ -194,18 +199,18 @@ fn quantize(p: Vec3) -> (i32, i32, i32) {
     )
 }
 
-struct SolidFace {
+pub struct SolidFace {
     /// Indices into SolidMesh.positions (3 or 4 verts).
-    verts: Vec<u32>,
-    normal: Vec3,
-    chamfer_mode: ChamferMode,
-    /// Source voxel position in chunk coords — used to avoid clipping against own faces.
-    voxel: (usize, usize, usize),
+    pub verts: Vec<u32>,
+    pub normal: Vec3,
+    pub chamfer_mode: ChamferMode,
+    /// Source voxel position in chunk coords.
+    pub voxel: (usize, usize, usize),
 }
 
-struct SolidMesh {
-    positions: Vec<Vec3>,
-    faces: Vec<SolidFace>,
+pub struct SolidMesh {
+    pub positions: Vec<Vec3>,
+    pub faces: Vec<SolidFace>,
     vert_map: HashMap<(i32, i32, i32), u32>,
 }
 
@@ -222,6 +227,11 @@ impl SolidMesh {
             idx
         })
     }
+}
+
+/// Public entry point for building the solid mesh (used by halfedge_chamfer).
+pub fn build_solid_mesh_public(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
+    build_solid_mesh(data, shapes)
 }
 
 fn build_solid_mesh(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
