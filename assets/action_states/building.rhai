@@ -24,17 +24,6 @@ fn on_update(state, input) {
     consume_input("KeyQ");
     consume_input("GamepadLeftTrigger");
 
-    // Exit on B / Escape
-    if input_just_pressed("GamepadEast") || input_just_pressed("Escape") {
-        exit_state();
-    }
-
-    // Place block on ZR / F
-    if input_just_pressed("GamepadRightTrigger") || input_just_pressed("KeyF") {
-        log("Place block! (item: " + state.item_name + ")");
-        emit("place_block");
-    }
-
     // Options panel: hold ZL / Q
     let options_held = input_pressed("GamepadLeftTrigger") || input_pressed("KeyQ");
 
@@ -74,6 +63,16 @@ fn on_update(state, input) {
             emit("position_down");
         }
     } else {
+        // Normal mode: exit and place block only work when options panel is closed
+        if input_just_pressed("GamepadEast") || input_just_pressed("Escape") {
+            exit_state();
+        }
+
+        if input_just_pressed("GamepadRightTrigger") || input_just_pressed("KeyF") {
+            log("Place block! (item: " + state.item_name + ")");
+            emit("place_block");
+        }
+
         // Restore normal hints when options released
         if state.options_held {
             clear_button_hints();
