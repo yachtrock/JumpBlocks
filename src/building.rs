@@ -1,18 +1,29 @@
 //! Block placement and preview system.
 //!
-//! When the player is in the "building" action state, this module:
-//! 1. Finds the grid position in front of the player to preview block placement
-//! 2. Draws a translucent preview block at that position (or held in hand if no valid spot)
-//! 3. Handles `place_block` / `rotate_left` / `rotate_right` events from the action state script
-//! 4. On placement, writes the voxel into the chunk and triggers re-meshing
+//! Exposes a Rhai scripting API so action state scripts (e.g. `building.rhai`)
+//! can control block preview and placement. The Rust side handles:
+//! - Computing the valid build position each frame (pre-system)
+//! - Rendering the translucent preview mesh (post-system)
+//! - Writing voxels into chunks and triggering re-meshing (post-system)
+//!
+//! The script drives everything via API calls:
+//! - `build_position()` — query where the player can build
+//! - `show_preview(wx, wy, wz, facing)` — show preview at grid position
+//! - `show_preview_in_hand(facing)` — show preview floating in front of player
+//! - `hide_preview()` — hide the preview
+//! - `place_block(shape, facing, texture)` — place a block at the build position
+//! - `rotate_facing_right(facing)` / `rotate_facing_left(facing)` — facing helpers
+
+use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{
     Chunk, Voxel, VoxelModification, CHUNK_X, CHUNK_Y, CHUNK_Z, VOXEL_HEIGHT, VOXEL_WIDTH,
 };
-use jumpblocks_voxel::shape::{Facing, SHAPE_WEDGE};
+use jumpblocks_voxel::shape::Facing;
+use rhai::{Dynamic, Map, INT};
 
-use crate::action_state::{ActionState, ActionStateEmits};
+use crate::action_state::{ActionState, ActionStateEngine};
 use crate::camera::OrbitCamera;
 use crate::player::Player;
 
@@ -20,71 +31,410 @@ pub struct BuildingPlugin;
 
 impl Plugin for BuildingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BuildingState>().add_systems(
-            Update,
-            (
-                building_system.after(crate::action_state::action_state_update),
-                process_chunk_modifications,
-            ),
-        );
+        app.insert_resource(BuildingApi::new())
+            .init_resource::<PreviewResources>()
+            .add_systems(Startup, register_building_api)
+            .add_systems(
+                Update,
+                (
+                    compute_build_context
+                        .before(crate::action_state::action_state_update),
+                    apply_building_commands
+                        .after(crate::action_state::action_state_update),
+                    process_chunk_modifications,
+                ),
+            );
     }
 }
 
 // ---------------------------------------------------------------------------
-// Resources & Components
+// Shared API data (accessed by both Rhai closures and ECS systems)
 // ---------------------------------------------------------------------------
 
-/// Marker for the translucent preview entity.
-#[derive(Component)]
-struct BlockPreview;
-
-/// Persistent building state across frames.
-#[derive(Resource)]
-pub struct BuildingState {
-    /// Current facing direction for the block being placed.
-    pub facing: Facing,
-    /// The preview entity (spawned once, reused).
-    preview_entity: Option<Entity>,
-    /// Handle to the translucent material for preview blocks.
-    preview_material: Option<Handle<StandardMaterial>>,
-    /// Cached preview mesh handle.
-    preview_mesh: Option<Handle<Mesh>>,
-    /// Was the player in building state last frame?
-    was_building: bool,
+/// A valid build position within a chunk.
+#[derive(Clone)]
+struct BuildPos {
+    x: usize,
+    y: usize,
+    z: usize,
+    world_pos: Vec3,
+    chunk_entity: Entity,
 }
 
-impl Default for BuildingState {
-    fn default() -> Self {
+/// How the preview should be displayed this frame.
+#[derive(Clone, Default)]
+enum PreviewState {
+    #[default]
+    Hidden,
+    AtPosition {
+        world_pos: Vec3,
+        facing: Facing,
+    },
+    InHand {
+        facing: Facing,
+    },
+}
+
+/// A request to place a block, queued by the script.
+#[derive(Clone)]
+struct PlaceRequest {
+    shape: u16,
+    facing: Facing,
+    texture: u16,
+}
+
+/// Inner shared state between Rhai script and ECS systems.
+struct BuildingApiInner {
+    /// Valid build position (set by pre-system, read by script via `build_position()`).
+    build_pos: Option<BuildPos>,
+    /// Player world position (for in-hand preview calculation).
+    player_pos: Vec3,
+    /// Camera forward direction (for in-hand preview calculation).
+    camera_forward: Vec3,
+    /// Preview display command (set by script, read by post-system).
+    preview: PreviewState,
+    /// Block placement requests (set by script, drained by post-system).
+    place_requests: Vec<PlaceRequest>,
+}
+
+impl BuildingApiInner {
+    fn new() -> Self {
         Self {
-            facing: Facing::North,
-            was_building: false,
-            preview_entity: None,
-            preview_material: None,
-            preview_mesh: None,
+            build_pos: None,
+            player_pos: Vec3::ZERO,
+            camera_forward: Vec3::NEG_Z,
+            preview: PreviewState::Hidden,
+            place_requests: Vec::new(),
+        }
+    }
+
+    fn clear_frame(&mut self) {
+        self.build_pos = None;
+        self.preview = PreviewState::Hidden;
+        self.place_requests.clear();
+    }
+}
+
+/// Resource providing the building API shared state.
+#[derive(Resource, Clone)]
+pub struct BuildingApi {
+    inner: Arc<Mutex<BuildingApiInner>>,
+}
+
+impl BuildingApi {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BuildingApiInner::new())),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Finding placement position
+// Preview entity resources
 // ---------------------------------------------------------------------------
 
-/// Result of searching for a valid placement spot.
-struct PlacementResult {
-    chunk_entity: Entity,
-    x: usize,
-    y: usize,
-    z: usize,
-    world_pos: Vec3,
+#[derive(Component)]
+struct BlockPreview;
+
+#[derive(Resource, Default)]
+struct PreviewResources {
+    entity: Option<Entity>,
+    material: Option<Handle<StandardMaterial>>,
+    mesh: Option<Handle<Mesh>>,
 }
 
-/// Find the voxel grid position in front of the player that sits on a chunk.
+// ---------------------------------------------------------------------------
+// Rhai API registration (startup system)
+// ---------------------------------------------------------------------------
+
+fn register_building_api(
+    mut engine: ResMut<ActionStateEngine>,
+    api: Res<BuildingApi>,
+) {
+    let inner = api.inner.clone();
+
+    // build_position() -> #{ x, y, z, world_x, world_y, world_z } | ()
+    {
+        let inner = inner.clone();
+        engine.rhai_engine_mut().register_fn(
+            "build_position",
+            move || -> Dynamic {
+                let data = inner.lock().unwrap();
+                match &data.build_pos {
+                    Some(pos) => {
+                        let mut map = Map::new();
+                        map.insert("x".into(), Dynamic::from(pos.x as INT));
+                        map.insert("y".into(), Dynamic::from(pos.y as INT));
+                        map.insert("z".into(), Dynamic::from(pos.z as INT));
+                        map.insert("world_x".into(), Dynamic::from(pos.world_pos.x as f64));
+                        map.insert("world_y".into(), Dynamic::from(pos.world_pos.y as f64));
+                        map.insert("world_z".into(), Dynamic::from(pos.world_pos.z as f64));
+                        Dynamic::from(map)
+                    }
+                    None => Dynamic::UNIT,
+                }
+            },
+        );
+    }
+
+    // show_preview(world_x, world_y, world_z, facing)
+    {
+        let inner = inner.clone();
+        engine.rhai_engine_mut().register_fn(
+            "show_preview",
+            move |wx: f64, wy: f64, wz: f64, facing: INT| {
+                let mut data = inner.lock().unwrap();
+                data.preview = PreviewState::AtPosition {
+                    world_pos: Vec3::new(wx as f32, wy as f32, wz as f32),
+                    facing: facing_from_int(facing),
+                };
+            },
+        );
+    }
+
+    // show_preview_in_hand(facing)
+    {
+        let inner = inner.clone();
+        engine.rhai_engine_mut().register_fn(
+            "show_preview_in_hand",
+            move |facing: INT| {
+                let mut data = inner.lock().unwrap();
+                data.preview = PreviewState::InHand {
+                    facing: facing_from_int(facing),
+                };
+            },
+        );
+    }
+
+    // hide_preview()
+    {
+        let inner = inner.clone();
+        engine
+            .rhai_engine_mut()
+            .register_fn("hide_preview", move || {
+                let mut data = inner.lock().unwrap();
+                data.preview = PreviewState::Hidden;
+            });
+    }
+
+    // place_block(shape, facing, texture)
+    {
+        let inner = inner.clone();
+        engine.rhai_engine_mut().register_fn(
+            "place_block",
+            move |shape: INT, facing: INT, texture: INT| {
+                let mut data = inner.lock().unwrap();
+                if data.build_pos.is_some() {
+                    data.place_requests.push(PlaceRequest {
+                        shape: shape as u16,
+                        facing: facing_from_int(facing),
+                        texture: texture as u16,
+                    });
+                }
+            },
+        );
+    }
+
+    // rotate_facing_right(facing) -> int
+    engine
+        .rhai_engine_mut()
+        .register_fn("rotate_facing_right", |facing: INT| -> INT {
+            (facing + 1) % 4
+        });
+
+    // rotate_facing_left(facing) -> int
+    engine
+        .rhai_engine_mut()
+        .register_fn("rotate_facing_left", |facing: INT| -> INT {
+            (facing + 3) % 4
+        });
+
+    info!("[building] Registered Rhai API functions");
+}
+
+// ---------------------------------------------------------------------------
+// Pre-system: compute build context before script runs
+// ---------------------------------------------------------------------------
+
+fn compute_build_context(
+    api: Res<BuildingApi>,
+    action_query: Query<(&ActionState, &Transform), With<Player>>,
+    camera_query: Query<&Transform, (With<OrbitCamera>, Without<Player>)>,
+    chunks: Query<(Entity, &Chunk, &Transform)>,
+) {
+    let mut inner = api.inner.lock().unwrap();
+
+    // Always clear — ensures cleanup when leaving building state
+    inner.clear_frame();
+
+    let Ok((action_state, player_transform)) = action_query.single() else {
+        return;
+    };
+    if !action_state
+        .0
+        .as_deref()
+        .is_some_and(|s| s == "building")
+    {
+        return;
+    }
+
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
+
+    let player_pos = player_transform.translation;
+    let cam_forward = camera_transform.forward().as_vec3();
+    inner.player_pos = player_pos;
+    inner.camera_forward = cam_forward;
+
+    // Find valid build position
+    inner.build_pos = find_placement_position(player_pos, cam_forward, &chunks);
+}
+
+// ---------------------------------------------------------------------------
+// Post-system: apply script-driven commands after script runs
+// ---------------------------------------------------------------------------
+
+fn apply_building_commands(
+    mut commands: Commands,
+    api: Res<BuildingApi>,
+    mut chunks: Query<&mut Chunk>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut preview_res: ResMut<PreviewResources>,
+    preview_query: Query<Entity, With<BlockPreview>>,
+) {
+    let inner = api.inner.lock().unwrap();
+
+    // --- Handle place requests ---
+    for req in &inner.place_requests {
+        if let Some(ref pos) = inner.build_pos {
+            let voxel = Voxel::new(req.shape, req.facing, req.texture);
+            if let Ok(mut chunk) = chunks.get_mut(pos.chunk_entity) {
+                chunk.data.set(pos.x, pos.y, pos.z, voxel);
+                chunk.pending_modifications.push(VoxelModification {
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    voxel,
+                });
+                info!(
+                    "Placed block at ({}, {}, {}) shape={} facing={:?}",
+                    pos.x, pos.y, pos.z, req.shape, req.facing
+                );
+            }
+        }
+    }
+
+    // --- Handle preview ---
+    match &inner.preview {
+        PreviewState::Hidden => {
+            // Despawn preview if it exists
+            if preview_res.entity.is_some() {
+                for entity in preview_query.iter() {
+                    commands.entity(entity).despawn();
+                }
+                preview_res.entity = None;
+            }
+        }
+        PreviewState::AtPosition { world_pos, facing } => {
+            let transform = Transform::from_translation(*world_pos)
+                .with_rotation(Quat::from_rotation_y(facing.rotation_radians()));
+            spawn_or_update_preview(
+                &mut commands,
+                &mut preview_res,
+                &mut meshes,
+                &mut materials,
+                transform,
+            );
+        }
+        PreviewState::InHand { facing } => {
+            let forward_flat =
+                Vec3::new(inner.camera_forward.x, 0.0, inner.camera_forward.z)
+                    .normalize_or_zero();
+            let hand_pos = inner.player_pos + forward_flat * 1.5 + Vec3::Y * 0.5;
+            let transform = Transform::from_translation(hand_pos)
+                .with_rotation(Quat::from_rotation_y(facing.rotation_radians()));
+            spawn_or_update_preview(
+                &mut commands,
+                &mut preview_res,
+                &mut meshes,
+                &mut materials,
+                transform,
+            );
+        }
+    }
+}
+
+fn spawn_or_update_preview(
+    commands: &mut Commands,
+    res: &mut PreviewResources,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    transform: Transform,
+) {
+    // Lazy-init material
+    if res.material.is_none() {
+        res.material = Some(materials.add(StandardMaterial {
+            base_color: Color::srgba(0.3, 0.6, 1.0, 0.4),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }));
+    }
+    // Lazy-init mesh
+    if res.mesh.is_none() {
+        res.mesh = Some(meshes.add(build_wedge_preview_mesh()));
+    }
+
+    if let Some(entity) = res.entity {
+        if commands.get_entity(entity).is_ok() {
+            commands.entity(entity).insert(transform);
+            return;
+        }
+        res.entity = None;
+    }
+
+    let entity = commands
+        .spawn((
+            BlockPreview,
+            Mesh3d(res.mesh.clone().unwrap()),
+            MeshMaterial3d(res.material.clone().unwrap()),
+            transform,
+        ))
+        .id();
+    res.entity = Some(entity);
+}
+
+// ---------------------------------------------------------------------------
+// Chunk modification processing
+// ---------------------------------------------------------------------------
+
+fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
+    for mut chunk in chunks.iter_mut() {
+        if chunk.pending_modifications.is_empty() {
+            continue;
+        }
+        let count = chunk.pending_modifications.len();
+        chunk.pending_modifications.clear();
+        chunk.mark_dirty();
+        info!(
+            "Applied {} voxel modification(s), chunk marked dirty for re-mesh",
+            count
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Placement position search
+// ---------------------------------------------------------------------------
+
 fn find_placement_position(
     player_pos: Vec3,
     camera_forward: Vec3,
     chunks: &Query<(Entity, &Chunk, &Transform)>,
-) -> Option<PlacementResult> {
-    let forward_flat = Vec3::new(camera_forward.x, 0.0, camera_forward.z).normalize_or_zero();
+) -> Option<BuildPos> {
+    let forward_flat =
+        Vec3::new(camera_forward.x, 0.0, camera_forward.z).normalize_or_zero();
     let target_world = player_pos + forward_flat * 2.0;
 
     for (chunk_entity, chunk, chunk_transform) in chunks.iter() {
@@ -105,7 +455,7 @@ fn find_placement_position(
 
         // Must be a valid build spot (empty + has orthogonal neighbor).
         // If the target is occupied, try one voxel up.
-        let (final_x, final_y, final_z) = if chunk.data.can_build_at(ux, uy, uz) {
+        let (fx, fy, fz) = if chunk.data.can_build_at(ux, uy, uz) {
             (ux, uy, uz)
         } else if chunk.data.get(ux, uy, uz).is_filled() {
             let uy_up = uy + 1;
@@ -120,17 +470,17 @@ fn find_placement_position(
 
         let world_pos = chunk_origin
             + Vec3::new(
-                final_x as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
-                final_y as f32 * VOXEL_HEIGHT + VOXEL_HEIGHT * 0.5,
-                final_z as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
+                fx as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
+                fy as f32 * VOXEL_HEIGHT + VOXEL_HEIGHT * 0.5,
+                fz as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
             );
 
-        return Some(PlacementResult {
-            chunk_entity,
-            x: final_x,
-            y: final_y,
-            z: final_z,
+        return Some(BuildPos {
+            x: fx,
+            y: fy,
+            z: fz,
             world_pos,
+            chunk_entity,
         });
     }
 
@@ -138,167 +488,31 @@ fn find_placement_position(
 }
 
 // ---------------------------------------------------------------------------
-// Main building system
+// Preview mesh
 // ---------------------------------------------------------------------------
 
-fn building_system(
-    mut commands: Commands,
-    mut building_state: ResMut<BuildingState>,
-    action_emits: Res<ActionStateEmits>,
-    action_query: Query<(&ActionState, &Transform), With<Player>>,
-    camera_query: Query<&Transform, (With<OrbitCamera>, Without<Player>)>,
-    chunks: Query<(Entity, &Chunk, &Transform)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    preview_query: Query<Entity, With<BlockPreview>>,
-) {
-    let Ok((action_state, player_transform)) = action_query.single() else {
-        return;
-    };
-
-    let is_building = action_state
-        .0
-        .as_deref()
-        .is_some_and(|s| s == "building");
-
-    // Clean up preview when exiting building state
-    if !is_building {
-        if building_state.was_building {
-            for entity in preview_query.iter() {
-                commands.entity(entity).despawn();
-            }
-            building_state.preview_entity = None;
-            building_state.was_building = false;
-            building_state.facing = Facing::North;
-        }
-        return;
-    }
-
-    // Handle rotate events
-    for emit in &action_emits.0 {
-        match emit.as_str() {
-            "rotate_left" => {
-                building_state.facing = rotate_facing_left(building_state.facing);
-                info!("Block facing: {:?}", building_state.facing);
-            }
-            "rotate_right" => {
-                building_state.facing = rotate_facing_right(building_state.facing);
-                info!("Block facing: {:?}", building_state.facing);
-            }
-            _ => {}
-        }
-    }
-
-    building_state.was_building = true;
-
-    let Ok(camera_transform) = camera_query.single() else {
-        return;
-    };
-
-    let player_pos = player_transform.translation;
-    let cam_forward = camera_transform.forward().as_vec3();
-    let placement = find_placement_position(player_pos, cam_forward, &chunks);
-
-    // Handle place_block: queue a deferred command to write voxel data
-    let wants_place = action_emits.0.iter().any(|e| e == "place_block");
-    if wants_place {
-        if let Some(ref pl) = placement {
-            let voxel = Voxel::new(SHAPE_WEDGE, building_state.facing, 1);
-            let entity = pl.chunk_entity;
-            let (x, y, z) = (pl.x, pl.y, pl.z);
-            commands.queue(move |world: &mut World| {
-                if let Some(mut chunk) = world.get_mut::<Chunk>(entity) {
-                    chunk.data.set(x, y, z, voxel);
-                    chunk.pending_modifications.push(VoxelModification {
-                        x,
-                        y,
-                        z,
-                        voxel,
-                    });
-                }
-            });
-            info!(
-                "Placed wedge at ({}, {}, {}) facing {:?}",
-                pl.x, pl.y, pl.z, building_state.facing
-            );
-        }
-    }
-
-    // Ensure preview material exists
-    if building_state.preview_material.is_none() {
-        building_state.preview_material = Some(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.3, 0.6, 1.0, 0.4),
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        }));
-    }
-
-    // Ensure preview mesh exists
-    if building_state.preview_mesh.is_none() {
-        building_state.preview_mesh = Some(meshes.add(build_wedge_preview_mesh()));
-    }
-
-    // Compute preview transform
-    let preview_transform = if let Some(ref pl) = placement {
-        Transform::from_translation(pl.world_pos)
-            .with_rotation(Quat::from_rotation_y(building_state.facing.rotation_radians()))
-    } else {
-        // No valid position: hold block in front of player
-        let forward_flat = Vec3::new(cam_forward.x, 0.0, cam_forward.z).normalize_or_zero();
-        let hand_pos = player_pos + forward_flat * 1.5 + Vec3::Y * 0.5;
-        Transform::from_translation(hand_pos)
-            .with_rotation(Quat::from_rotation_y(building_state.facing.rotation_radians()))
-    };
-
-    // Spawn or update preview entity
-    if let Some(entity) = building_state.preview_entity {
-        if commands.get_entity(entity).is_ok() {
-            commands.entity(entity).insert(preview_transform);
-        } else {
-            building_state.preview_entity = None;
-        }
-    }
-
-    if building_state.preview_entity.is_none() {
-        let mesh_handle = building_state.preview_mesh.clone().unwrap();
-        let mat = building_state.preview_material.clone().unwrap();
-        let entity = commands
-            .spawn((
-                BlockPreview,
-                Mesh3d(mesh_handle),
-                MeshMaterial3d(mat),
-                preview_transform,
-            ))
-            .id();
-        building_state.preview_entity = Some(entity);
-    }
-}
-
-/// Build a simple wedge preview mesh (centered on origin, voxel-sized).
 fn build_wedge_preview_mesh() -> Mesh {
     use bevy::mesh::{Indices, PrimitiveTopology};
 
-    // Wedge: back wall (south/-Z) is tall, slope descends toward north/+Z
     let hw = VOXEL_WIDTH * 0.5;
     let hh = VOXEL_HEIGHT * 0.5;
 
+    // Wedge: back wall (south/-Z) is tall, slope descends toward north/+Z
     let positions = vec![
-        // Bottom quad
         [-hw, -hh, -hw], // 0: back-left bottom
         [hw, -hh, -hw],  // 1: back-right bottom
         [hw, -hh, hw],   // 2: front-right bottom
         [-hw, -hh, hw],  // 3: front-left bottom
-        // Top edge (back wall only)
-        [-hw, hh, -hw], // 4: back-left top
-        [hw, hh, -hw],  // 5: back-right top
+        [-hw, hh, -hw],  // 4: back-left top
+        [hw, hh, -hw],   // 5: back-right top
     ];
 
     let indices = vec![
         // Bottom face
-        0u32, 2, 1, 0, 3, 2, // Back wall (south face, -Z)
-        4, 1, 5, 4, 0, 1, // Slope face (from top-back to bottom-front)
-        4, 5, 2, 4, 2, 3, // Left triangle side
-        0, 4, 3, // Right triangle side
+        0u32, 2, 1, 0, 3, 2, // Back wall
+        4, 1, 5, 4, 0, 1, // Slope face
+        4, 5, 2, 4, 2, 3, // Left side
+        0, 4, 3, // Right side
         1, 2, 5,
     ];
 
@@ -313,45 +527,15 @@ fn build_wedge_preview_mesh() -> Mesh {
 }
 
 // ---------------------------------------------------------------------------
-// Chunk modification processing
+// Helpers
 // ---------------------------------------------------------------------------
 
-/// System: drains pending voxel modifications and triggers chunk re-meshing.
-fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
-    for mut chunk in chunks.iter_mut() {
-        if chunk.pending_modifications.is_empty() {
-            continue;
-        }
-
-        let count = chunk.pending_modifications.len();
-        chunk.pending_modifications.clear();
-        chunk.mark_dirty();
-
-        info!(
-            "Applied {} voxel modification(s), chunk marked dirty for re-mesh",
-            count
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Facing rotation helpers
-// ---------------------------------------------------------------------------
-
-fn rotate_facing_right(f: Facing) -> Facing {
-    match f {
-        Facing::North => Facing::East,
-        Facing::East => Facing::South,
-        Facing::South => Facing::West,
-        Facing::West => Facing::North,
-    }
-}
-
-fn rotate_facing_left(f: Facing) -> Facing {
-    match f {
-        Facing::North => Facing::West,
-        Facing::West => Facing::South,
-        Facing::South => Facing::East,
-        Facing::East => Facing::North,
+fn facing_from_int(v: INT) -> Facing {
+    match v & 3 {
+        0 => Facing::North,
+        1 => Facing::East,
+        2 => Facing::South,
+        3 => Facing::West,
+        _ => unreachable!(),
     }
 }

@@ -165,6 +165,12 @@ pub struct ActionStateEngine {
 }
 
 impl ActionStateEngine {
+    /// Access the underlying Rhai engine for registering additional API functions.
+    /// Use this in startup systems to extend the scripting API (e.g. building, combat).
+    pub fn rhai_engine_mut(&mut self) -> &mut Engine {
+        &mut self.engine
+    }
+
     pub fn new(script_dir: impl Into<PathBuf>) -> Self {
         let shared = Arc::new(Mutex::new(Shared::new()));
         let script_dir = script_dir.into();
