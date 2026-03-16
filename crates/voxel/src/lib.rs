@@ -50,13 +50,32 @@ impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShapeTable>()
             .init_resource::<PresentationMode>()
-            .add_systems(Update, (start_chunk_meshing, handle_chunk_mesh_results, cycle_presentation_mode));
+            .add_systems(Update, (
+                promote_loaded_chunks,
+                start_chunk_meshing.after(promote_loaded_chunks),
+                handle_chunk_mesh_results,
+                cycle_presentation_mode,
+            ));
     }
 }
 
 /// Attached to a chunk entity while its mesh is being generated.
 #[derive(Component)]
 struct ChunkMeshTask(Task<ChunkMeshResult>);
+
+/// System that promotes Loaded chunks to Dirty once all their neighbors are
+/// either absent (None) or have data loaded. Currently neighbors are stored as
+/// `Option<ChunkData>` so they're always ready if present — this gate will
+/// become meaningful once neighbors are entity references with their own state.
+fn promote_loaded_chunks(
+    mut query: Query<&mut Chunk>,
+) {
+    for mut chunk in query.iter_mut() {
+        if chunk.state == ChunkState::Loaded {
+            chunk.state = ChunkState::Dirty;
+        }
+    }
+}
 
 /// System that kicks off background mesh generation for dirty chunks.
 fn start_chunk_meshing(

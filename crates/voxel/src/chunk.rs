@@ -160,6 +160,8 @@ impl ChunkData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChunkState {
     #[default]
+    Unloaded,
+    Loaded,
     Dirty,
     Meshing,
     Ready,
@@ -269,7 +271,7 @@ impl Chunk {
         Self {
             data,
             neighbors: ChunkNeighbors::empty(),
-            state: ChunkState::Dirty,
+            state: ChunkState::Loaded,
             world_aligned: true,
             dynamic: false,
         }
@@ -277,6 +279,8 @@ impl Chunk {
 
     /// Mark the chunk as needing a new mesh.
     pub fn mark_dirty(&mut self) {
-        self.state = ChunkState::Dirty;
+        if self.state != ChunkState::Unloaded {
+            self.state = ChunkState::Dirty;
+        }
     }
 }
