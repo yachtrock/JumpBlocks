@@ -275,6 +275,8 @@ pub struct SolidFace {
     pub normal: Vec3,
     /// Source block origin position in chunk coords.
     pub voxel: (usize, usize, usize),
+    /// Block shape size in cells.
+    pub block_size: (u8, u8, u8),
 }
 
 pub struct SolidMesh {
@@ -338,6 +340,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
                 verts: vert_indices,
                 normal,
                 voxel: (ox as usize, oy as usize, oz as usize),
+                block_size: shape.size,
             });
         }
     }
@@ -551,6 +554,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         point: Vec3,
         normal: Vec3,
         owning_voxels: [(usize, usize, usize); 2],
+        owning_sizes: [(u8, u8, u8); 2],
         edge_verts: [u32; 2],
         aabb_min: Vec3,
         aabb_max: Vec3,
@@ -585,8 +589,10 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
         let clip_idx = all_strip_clips.len();
         let owning = [face_a.voxel, face_b.voxel];
+        let sizes = [face_a.block_size, face_b.block_size];
         all_strip_clips.push(StripClip {
             point: a0, normal: strip_normal, owning_voxels: owning,
+            owning_sizes: sizes,
             edge_verts: [ev0, ev1], aabb_min: strip_min, aabb_max: strip_max,
             face_normal_dot: face_a.normal.dot(face_b.normal),
         });
@@ -629,9 +635,10 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     if sc.owning_voxels.contains(&face.voxel) { continue; }
                     let mut owner_min = Vec3::splat(f32::MAX);
                     let mut owner_max = Vec3::splat(f32::MIN);
-                    for &(ovx, ovy, ovz) in &sc.owning_voxels {
+                    for (i, &(ovx, ovy, ovz)) in sc.owning_voxels.iter().enumerate() {
+                        let sz = sc.owning_sizes[i];
                         let lo = Vec3::new(ovx as f32 * VOXEL_SIZE, ovy as f32 * VOXEL_SIZE, ovz as f32 * VOXEL_SIZE);
-                        let hi = lo + Vec3::splat(VOXEL_SIZE);
+                        let hi = lo + Vec3::new(sz.0 as f32 * VOXEL_SIZE, sz.1 as f32 * VOXEL_SIZE, sz.2 as f32 * VOXEL_SIZE);
                         owner_min = owner_min.min(lo);
                         owner_max = owner_max.max(hi);
                     }
