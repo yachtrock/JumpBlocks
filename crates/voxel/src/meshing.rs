@@ -359,6 +359,9 @@ pub struct SolidFace {
     pub voxel: (usize, usize, usize),
     /// Block shape size in cells.
     pub block_size: (u8, u8, u8),
+    /// Original shape face triangulation (grid-aligned).
+    /// Indices are into this face's `verts` list (0..verts.len()).
+    pub orig_triangles: Vec<[usize; 3]>,
 }
 
 pub struct SolidMesh {
@@ -423,6 +426,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
                 normal,
                 voxel: (ox as usize, oy as usize, oz as usize),
                 block_size: shape.size,
+                orig_triangles: face.triangles.clone(),
             });
         }
     }
@@ -605,6 +609,20 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         let n = face.verts.len();
         let normal = face.normal;
 
+        // Block world-space bounds for clamping inner vertices
+        let (ox, oy, oz) = face.voxel;
+        let (sx, sy, sz) = face.block_size;
+        let block_min = Vec3::new(
+            ox as f32 * VOXEL_SIZE,
+            oy as f32 * VOXEL_SIZE,
+            oz as f32 * VOXEL_SIZE,
+        );
+        let block_max = Vec3::new(
+            (ox + sx as usize) as f32 * VOXEL_SIZE,
+            (oy + sy as usize) as f32 * VOXEL_SIZE,
+            (oz + sz as usize) as f32 * VOXEL_SIZE,
+        );
+
         let edge_sharp_flags: Vec<bool> = (0..n).map(|i| {
             let key = edge_key(face.verts[i], face.verts[(i + 1) % n]);
             sharp_set.contains_key(&key)
@@ -622,9 +640,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             let prev_sharp = edge_sharp_flags[prev];
             let next_sharp = edge_sharp_flags[vi];
             if prev_sharp && next_sharp {
-                // If both adjacent edges have nearly the same inward direction
-                // (collinear edges from mid-vertices), only apply the offset once
-                // to avoid "denting" the chamfer at midpoints.
                 let d = edge_inward_dirs[prev].dot(edge_inward_dirs[vi]);
                 if d > 0.99 {
                     offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
@@ -640,7 +655,8 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
                 }
             }
-            solid.positions[face.verts[vi] as usize] + offset
+            let inner = solid.positions[face.verts[vi] as usize] + offset;
+            inner.clamp(block_min, block_max)
         }).collect()
     }).collect();
 
@@ -774,7 +790,19 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                 uvs.push([0.0, 0.0]);
                 chamfer_offsets.push([0.0; 3]);
             }
-            triangulate_convex_polygon(&positions, inner_base, n, &mut indices);
+            // Use the shape's original grid-aligned triangulation.
+            // The inner polygon has the same vertex order as the original face,
+            // so the shape's triangle indices map directly.
+            if face.orig_triangles.len() >= n - 2 {
+                for tri in &face.orig_triangles {
+                    indices.push(inner_base + tri[2] as u32);
+                    indices.push(inner_base + tri[1] as u32);
+                    indices.push(inner_base + tri[0] as u32);
+                }
+            } else {
+                // Fallback to Delaunay if shape triangles are missing/wrong
+                triangulate_convex_polygon(&positions, inner_base, n, &mut indices);
+            }
         } else {
             let mut polygon: Vec<Vec3> = inner.clone();
 
