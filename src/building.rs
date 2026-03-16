@@ -436,26 +436,100 @@ fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
 // Placement position search
 // ---------------------------------------------------------------------------
 
-/// Find a valid build position in front of the player.
+/// Maximum distance (in world units) for the placement ray march.
+const BUILD_RAY_MAX_DIST: f32 = 6.0;
+/// Step size for the ray march (smaller = more precise but slower).
+const BUILD_RAY_STEP: f32 = 0.25;
+
+/// Find a valid build position by marching a ray from the player's eye along
+/// the camera forward direction.
 ///
-/// Converts the world-space target point into each chunk's local coordinate
-/// system using the chunk's transform, so this works with arbitrarily
-/// positioned/rotated chunks.
+/// The ray uses the full 3D camera direction so looking up/down influences
+/// where the block will be placed. Each sample point is converted into every
+/// chunk's local coordinate system (via inverse transform) so this works with
+/// arbitrarily positioned/rotated chunks.
+///
+/// When the ray hits a filled voxel, the *previous* empty sample is used as
+/// the candidate. If no ray hit occurs, the last sample point is used instead.
+/// In both cases, if the candidate isn't directly buildable we search downward
+/// in chunk-local space for the nearest valid position.
 fn find_placement_position(
     player_pos: Vec3,
     camera_forward: Vec3,
     chunks: &Query<(Entity, &Chunk, &Transform)>,
 ) -> Option<BuildPos> {
-    let forward_flat =
-        Vec3::new(camera_forward.x, 0.0, camera_forward.z).normalize_or_zero();
-    let target_world = player_pos + forward_flat * 2.0;
+    let ray_dir = camera_forward.normalize_or_zero();
+    if ray_dir == Vec3::ZERO {
+        return None;
+    }
 
+    // Eye position: offset slightly above player origin so the ray starts
+    // roughly at head height and doesn't immediately intersect the ground.
+    let ray_origin = player_pos + Vec3::Y * 0.5;
+
+    let steps = ((BUILD_RAY_MAX_DIST / BUILD_RAY_STEP) as usize).max(1);
+
+    // Track the previous sample's world position (the last position that was
+    // either empty or out-of-chunk, so we can place *before* a hit).
+    let mut prev_world = ray_origin;
+
+    for i in 1..=steps {
+        let t = i as f32 * BUILD_RAY_STEP;
+        let sample_world = ray_origin + ray_dir * t;
+
+        // Check every chunk for a hit at this sample point.
+        for (chunk_entity, chunk, chunk_transform) in chunks.iter() {
+            let local = chunk_transform
+                .compute_affine()
+                .inverse()
+                .transform_point3(sample_world);
+
+            let vx = (local.x / VOXEL_WIDTH).floor() as i32;
+            let vy = (local.y / VOXEL_HEIGHT).floor() as i32;
+            let vz = (local.z / VOXEL_WIDTH).floor() as i32;
+
+            if vx < 0 || vy < 0 || vz < 0 {
+                continue;
+            }
+            let (ux, uy, uz) = (vx as usize, vy as usize, vz as usize);
+            if ux >= CHUNK_X || uy >= CHUNK_Y || uz >= CHUNK_Z {
+                continue;
+            }
+
+            if chunk.data.get(ux, uy, uz).is_filled() {
+                // We hit something — try to place at the *previous* sample
+                // position (the last point that was empty / outside).
+                if let Some(pos) =
+                    try_place_at_world(prev_world, chunks)
+                {
+                    return Some(pos);
+                }
+                // If that didn't work, try placing on top of the hit voxel
+                // by searching upward.
+                if let Some(pos) = search_down_for_build(ux, uy, uz, chunk, chunk_entity) {
+                    return Some(pos);
+                }
+            }
+        }
+
+        prev_world = sample_world;
+    }
+
+    // No hit along the ray — use the final sample point and search downward.
+    try_place_at_world(prev_world, chunks)
+}
+
+/// Convert a world-space point into chunk-local voxel coords and try to find a
+/// buildable position, searching downward if the exact voxel isn't buildable.
+fn try_place_at_world(
+    world_pos: Vec3,
+    chunks: &Query<(Entity, &Chunk, &Transform)>,
+) -> Option<BuildPos> {
     for (chunk_entity, chunk, chunk_transform) in chunks.iter() {
-        // Convert world target into chunk-local space via inverse transform
         let local = chunk_transform
             .compute_affine()
             .inverse()
-            .transform_point3(target_world);
+            .transform_point3(world_pos);
 
         let vx = (local.x / VOXEL_WIDTH).floor() as i32;
         let vy = (local.y / VOXEL_HEIGHT).floor() as i32;
@@ -469,29 +543,65 @@ fn find_placement_position(
             continue;
         }
 
-        // Must be a valid build spot (empty + has orthogonal neighbor).
-        // If the target is occupied, try one voxel up.
-        let (fx, fy, fz) = if chunk.data.can_build_at(ux, uy, uz) {
-            (ux, uy, uz)
-        } else if chunk.data.get(ux, uy, uz).is_filled() {
-            let uy_up = uy + 1;
-            if chunk.data.can_build_at(ux, uy_up, uz) {
-                (ux, uy_up, uz)
-            } else {
-                continue;
-            }
-        } else {
-            continue;
-        };
+        if chunk.data.can_build_at(ux, uy, uz) {
+            return Some(BuildPos {
+                x: ux,
+                y: uy,
+                z: uz,
+                chunk_entity,
+            });
+        }
 
+        // Search downward for a valid build position.
+        if let Some(pos) = search_down_for_build(ux, uy, uz, chunk, chunk_entity) {
+            return Some(pos);
+        }
+    }
+    None
+}
+
+/// Starting from `(x, y, z)`, search downward (decreasing Y) for the first
+/// voxel where we can build. Also checks one voxel *above* any filled voxel
+/// we encounter, since that's the natural "on top of" placement.
+fn search_down_for_build(
+    x: usize,
+    start_y: usize,
+    z: usize,
+    chunk: &Chunk,
+    chunk_entity: Entity,
+) -> Option<BuildPos> {
+    // First check upward from the start position (common case: on top of a block).
+    if start_y + 1 < CHUNK_Y && chunk.data.can_build_at(x, start_y + 1, z) {
         return Some(BuildPos {
-            x: fx,
-            y: fy,
-            z: fz,
+            x,
+            y: start_y + 1,
+            z,
             chunk_entity,
         });
     }
 
+    // Walk downward looking for a buildable spot.
+    for y in (0..=start_y).rev() {
+        if chunk.data.can_build_at(x, y, z) {
+            return Some(BuildPos {
+                x,
+                y,
+                z,
+                chunk_entity,
+            });
+        }
+        // If we hit a filled voxel, try the slot directly above it.
+        if chunk.data.get(x, y, z).is_filled() && y + 1 <= start_y {
+            if chunk.data.can_build_at(x, y + 1, z) {
+                return Some(BuildPos {
+                    x,
+                    y: y + 1,
+                    z,
+                    chunk_entity,
+                });
+            }
+        }
+    }
     None
 }
 
