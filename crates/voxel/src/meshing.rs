@@ -619,11 +619,26 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         (0..n).map(|vi| {
             let mut offset = Vec3::ZERO;
             let prev = (vi + n - 1) % n;
-            if edge_sharp_flags[prev] {
-                offset += edge_inward_dirs[prev] * CHAMFER_WIDTH;
-            }
-            if edge_sharp_flags[vi] {
-                offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
+            let prev_sharp = edge_sharp_flags[prev];
+            let next_sharp = edge_sharp_flags[vi];
+            if prev_sharp && next_sharp {
+                // If both adjacent edges have nearly the same inward direction
+                // (collinear edges from mid-vertices), only apply the offset once
+                // to avoid "denting" the chamfer at midpoints.
+                let d = edge_inward_dirs[prev].dot(edge_inward_dirs[vi]);
+                if d > 0.99 {
+                    offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
+                } else {
+                    offset += edge_inward_dirs[prev] * CHAMFER_WIDTH;
+                    offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
+                }
+            } else {
+                if prev_sharp {
+                    offset += edge_inward_dirs[prev] * CHAMFER_WIDTH;
+                }
+                if next_sharp {
+                    offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
+                }
             }
             solid.positions[face.verts[vi] as usize] + offset
         }).collect()
