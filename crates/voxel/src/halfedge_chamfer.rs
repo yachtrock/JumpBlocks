@@ -424,8 +424,8 @@ fn chamfer_sharp_edges(mesh: &mut HEMesh, width: f32) {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn generate_halfedge_chamfer(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
-    let solid = build_solid_mesh_public(data, shapes);
+pub fn generate_halfedge_chamfer(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> ChunkMeshData {
+    let solid = build_solid_mesh_public(data, neighbors, shapes);
     if solid.positions.is_empty() || solid.faces.is_empty() {
         return ChunkMeshData { positions: vec![], normals: vec![], uvs: vec![], chamfer_offsets: vec![], indices: vec![] };
     }

@@ -53,11 +53,12 @@ fn compute_world_normal(world_verts: &[Vec3], triangles: &[[usize; 3]]) -> Vec3 
 
 fn neighbor_occludes(
     data: &ChunkData,
+    neighbors: &ChunkNeighbors,
     shapes: &ShapeTable,
     nx: i32, ny: i32, nz: i32,
     side_facing_us: FaceSide,
 ) -> bool {
-    let neighbor = data.get_signed(nx, ny, nz);
+    let neighbor = get_voxel(data, neighbors, nx, ny, nz);
     if neighbor.is_empty() {
         return false;
     }
@@ -82,6 +83,7 @@ fn opposite_side(side: FaceSide) -> FaceSide {
 /// Should this face be culled (hidden by neighbor)?
 fn face_is_occluded(
     data: &ChunkData,
+    neighbors: &ChunkNeighbors,
     shapes: &ShapeTable,
     x: usize, y: usize, z: usize,
     rotated_side: FaceSide,
@@ -90,7 +92,7 @@ fn face_is_occluded(
         let nx = x as i32 + dx;
         let ny = y as i32 + dy;
         let nz = z as i32 + dz;
-        neighbor_occludes(data, shapes, nx, ny, nz, opposite_side(rotated_side))
+        neighbor_occludes(data, neighbors, shapes, nx, ny, nz, opposite_side(rotated_side))
     } else {
         false
     }
@@ -100,15 +102,15 @@ fn face_is_occluded(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable, mode: crate::PresentationMode) -> ChunkMeshResult {
+pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable, mode: crate::PresentationMode) -> ChunkMeshResult {
     let t0 = Instant::now();
     let full_res = match mode {
-        crate::PresentationMode::Flat => generate_lod_mesh(data, shapes),
-        crate::PresentationMode::EdgeGraphChamfer => generate_chamfered_mesh(data, shapes),
-        crate::PresentationMode::HalfEdgeChamfer => crate::halfedge_chamfer::generate_halfedge_chamfer(data, shapes),
+        crate::PresentationMode::Flat => generate_lod_mesh(data, neighbors, shapes),
+        crate::PresentationMode::EdgeGraphChamfer => generate_chamfered_mesh(data, neighbors, shapes),
+        crate::PresentationMode::HalfEdgeChamfer => crate::halfedge_chamfer::generate_halfedge_chamfer(data, neighbors, shapes),
     };
     let t1 = Instant::now();
-    let lod = generate_lod_mesh(data, shapes);
+    let lod = generate_lod_mesh(data, neighbors, shapes);
     let t2 = Instant::now();
 
     let full_ms = (t1 - t0).as_secs_f64() * 1000.0;
@@ -138,7 +140,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, shapes: &ShapeTable, mode: crate::P
 // LOD mesh (unchanged — simple, no chamfer)
 // ---------------------------------------------------------------------------
 
-fn generate_lod_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
+fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> ChunkMeshData {
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut uvs = Vec::new();
@@ -157,7 +159,7 @@ fn generate_lod_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
 
                 for face in &shape.faces {
                     let rotated_side = face.side.rotated_by(facing);
-                    if face_is_occluded(data, shapes, x, y, z, rotated_side) { continue; }
+                    if face_is_occluded(data, neighbors, shapes, x, y, z, rotated_side) { continue; }
 
                     let base_index = positions.len() as u32;
                     let world_verts: Vec<Vec3> = face.vertices.iter()
@@ -230,11 +232,11 @@ impl SolidMesh {
 }
 
 /// Public entry point for building the solid mesh (used by halfedge_chamfer).
-pub fn build_solid_mesh_public(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
-    build_solid_mesh(data, shapes)
+pub fn build_solid_mesh_public(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> SolidMesh {
+    build_solid_mesh(data, neighbors, shapes)
 }
 
-fn build_solid_mesh(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
+fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> SolidMesh {
     let mut mesh = SolidMesh::new();
 
     for y in 0..CHUNK_Y {
@@ -250,7 +252,7 @@ fn build_solid_mesh(data: &ChunkData, shapes: &ShapeTable) -> SolidMesh {
 
                 for face in &shape.faces {
                     let rotated_side = face.side.rotated_by(facing);
-                    if face_is_occluded(data, shapes, x, y, z, rotated_side) { continue; }
+                    if face_is_occluded(data, neighbors, shapes, x, y, z, rotated_side) { continue; }
 
                     let world_verts: Vec<Vec3> = face.vertices.iter()
                         .map(|v| to_world(facing.rotate_point(*v), wx, wy, wz))
@@ -334,6 +336,54 @@ fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
     n0.dot(n1) < SHARP_DOT_THRESHOLD
 }
 
+/// Check if a boundary edge lies on a chunk face where a filled neighbor voxel
+/// would continue the surface. If so, the edge is a seam — not a real boundary —
+/// and should not be chamfered.
+fn is_boundary_edge_at_neighbor_seam(
+    ev0: u32,
+    ev1: u32,
+    face: &SolidFace,
+    solid: &SolidMesh,
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+) -> bool {
+    let p0 = solid.positions[ev0 as usize];
+    let p1 = solid.positions[ev1 as usize];
+    let (vx, vy, vz) = face.voxel;
+
+    // Check each chunk boundary axis. Both vertices must sit on the same
+    // boundary plane, and the neighbor voxel across that boundary must be filled.
+    let checks: [(f32, f32, i32, i32, i32); 6] = [
+        // (coord_of_v0, boundary_value, dx, dy, dz)
+        (p0.x, 0.0,                         -1, 0, 0),  // -X boundary
+        (p0.x, CHUNK_X as f32 * VOXEL_WIDTH,  1, 0, 0),  // +X boundary
+        (p0.y, 0.0,                          0, -1, 0),  // -Y boundary
+        (p0.y, CHUNK_Y as f32 * VOXEL_HEIGHT,  0, 1, 0),  // +Y boundary
+        (p0.z, 0.0,                          0, 0, -1),  // -Z boundary
+        (p0.z, CHUNK_Z as f32 * VOXEL_WIDTH,  0, 0,  1),  // +Z boundary
+    ];
+
+    let eps = 1e-4;
+    for (_, boundary, dx, dy, dz) in checks {
+        // Pick the right coordinate component for each axis
+        let (c0, c1) = match (dx != 0, dy != 0) {
+            (true, _)     => (p0.x, p1.x),
+            (_, true)     => (p0.y, p1.y),
+            _             => (p0.z, p1.z),
+        };
+        if (c0 - boundary).abs() < eps && (c1 - boundary).abs() < eps {
+            let nx = vx as i32 + dx;
+            let ny = vy as i32 + dy;
+            let nz = vz as i32 + dz;
+            let neighbor_voxel = get_voxel(data, neighbors, nx, ny, nz);
+            if neighbor_voxel.is_filled() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Sutherland-Hodgman polygon clipping
 // ---------------------------------------------------------------------------
@@ -380,13 +430,26 @@ struct ChamferClipPlane {
 // Chamfered mesh generation (edge-graph post-process)
 // ---------------------------------------------------------------------------
 
-fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshData {
-    let solid = build_solid_mesh(data, shapes);
+fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> ChunkMeshData {
+    let solid = build_solid_mesh(data, neighbors, shapes);
     let edge_graph = build_edge_graph(&solid);
 
-    // Classify edges
+    // Classify edges — boundary edges at chunk seams with filled neighbors are NOT sharp
     let sharp_set: HashMap<(u32, u32), &EdgeInfo> = edge_graph.iter()
-        .filter(|(_, info)| is_sharp(info, &solid))
+        .filter(|(key, info)| {
+            if !is_sharp(info, &solid) {
+                return false;
+            }
+            // Boundary edge: suppress chamfer if it's at a neighbor seam
+            if info.faces.len() == 1 {
+                let (ev0, ev1) = **key;
+                let face = &solid.faces[info.faces[0]];
+                if is_boundary_edge_at_neighbor_seam(ev0, ev1, face, &solid, data, neighbors) {
+                    return false;
+                }
+            }
+            true
+        })
         .map(|(&key, info)| (key, info))
         .collect();
 
@@ -662,7 +725,7 @@ fn generate_chamfered_mesh(data: &ChunkData, shapes: &ShapeTable) -> ChunkMeshDa
     }
 
     for (&(ev0, ev1), info) in &edge_graph {
-        if !is_sharp(info, &solid) { continue; }
+        if !sharp_set.contains_key(&edge_key(ev0, ev1)) { continue; }
 
         let chamfer_mode = if info.faces.len() >= 2 {
             let m0 = solid.faces[info.faces[0]].chamfer_mode;

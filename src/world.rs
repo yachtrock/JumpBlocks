@@ -1,6 +1,6 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use jumpblocks_voxel::chunk::{Chunk, ChunkData, Voxel};
+use jumpblocks_voxel::chunk::{Chunk, ChunkData, ChunkNeighbors, Voxel};
 use jumpblocks_voxel::shape::{Facing, SHAPE_SMOOTH_CUBE, SHAPE_SMOOTH_WEDGE, SHAPE_WEDGE};
 
 use crate::layers::GameLayer;
@@ -179,13 +179,6 @@ fn setup_world(
             ..default()
         });
 
-        commands.spawn((
-            Chunk::new(chunk_data),
-            MeshMaterial3d(chunk_material.clone()),
-            Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
-            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
-        ));
-
         // ---- Neighbor chunk (+X direction) ----
         // Positioned so its x=0 face meets chunk 1's x=15 face
         let neighbor_material = materials.add(StandardMaterial {
@@ -225,8 +218,28 @@ fn setup_world(
             neighbor_data.set(3, 1, z, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::West, 1));
         }
 
+        // Wire up neighbor references between the two adjacent chunks (+X / -X)
+        let mut chunk1_neighbors = ChunkNeighbors::empty();
+        chunk1_neighbors.set(1, 0, 0, neighbor_data.clone());
+
+        let mut chunk2_neighbors = ChunkNeighbors::empty();
+        chunk2_neighbors.set(-1, 0, 0, chunk_data.clone());
+
+        let mut chunk1 = Chunk::new(chunk_data);
+        chunk1.neighbors = chunk1_neighbors;
+
+        let mut chunk2 = Chunk::new(neighbor_data);
+        chunk2.neighbors = chunk2_neighbors;
+
         commands.spawn((
-            Chunk::new(neighbor_data),
+            chunk1,
+            MeshMaterial3d(chunk_material.clone()),
+            Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
+            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
+        ));
+
+        commands.spawn((
+            chunk2,
             MeshMaterial3d(neighbor_material),
             Transform::from_translation(Vec3::new(11.0, 0.0, 5.0)),
             CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),

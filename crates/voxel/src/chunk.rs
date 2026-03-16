@@ -165,10 +165,100 @@ pub enum ChunkState {
     Ready,
 }
 
+// ---------------------------------------------------------------------------
+// Chunk neighbors
+// ---------------------------------------------------------------------------
+
+/// All 26 neighbor directions of a chunk in a 3×3×3 grid (excluding center).
+///
+/// Each neighbor is identified by its offset `(dx, dy, dz)` where each component
+/// is –1, 0, or +1. Stored as a flat array of 26 `Option<ChunkData>` slots.
+///
+/// `None` means the neighbor chunk doesn't exist (treated as all air).
+#[derive(Clone)]
+pub struct ChunkNeighbors {
+    slots: [Option<ChunkData>; 26],
+}
+
+impl Default for ChunkNeighbors {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl ChunkNeighbors {
+    pub fn empty() -> Self {
+        // const initializer not available for Option<ChunkData> (Box inside), so build at runtime
+        Self {
+            slots: std::array::from_fn(|_| None),
+        }
+    }
+
+    /// Convert a `(dx, dy, dz)` offset (each –1/0/+1, not all zero) to a flat index 0..25.
+    #[inline]
+    fn offset_to_index(dx: i32, dy: i32, dz: i32) -> usize {
+        debug_assert!((-1..=1).contains(&dx) && (-1..=1).contains(&dy) && (-1..=1).contains(&dz));
+        debug_assert!(dx != 0 || dy != 0 || dz != 0, "center is not a neighbor");
+        let raw = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
+        // raw 0..26, center = 13 → skip it
+        if raw < 13 { raw } else { raw - 1 }
+    }
+
+    pub fn get(&self, dx: i32, dy: i32, dz: i32) -> Option<&ChunkData> {
+        self.slots[Self::offset_to_index(dx, dy, dz)].as_ref()
+    }
+
+    pub fn set(&mut self, dx: i32, dy: i32, dz: i32, data: ChunkData) {
+        self.slots[Self::offset_to_index(dx, dy, dz)] = Some(data);
+    }
+}
+
+/// Look up a voxel at signed coordinates that may extend into neighbor chunks.
+///
+/// Coordinates are relative to the *current* chunk. If they fall outside
+/// `[0..CHUNK_X) × [0..CHUNK_Y) × [0..CHUNK_Z)`, the appropriate neighbor is
+/// consulted. Missing neighbors (or coords more than one chunk away) return
+/// `Voxel::EMPTY`.
+pub fn get_voxel(data: &ChunkData, neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> Voxel {
+    let in_x = x >= 0 && x < CHUNK_X as i32;
+    let in_y = y >= 0 && y < CHUNK_Y as i32;
+    let in_z = z >= 0 && z < CHUNK_Z as i32;
+
+    if in_x && in_y && in_z {
+        return data.get(x as usize, y as usize, z as usize);
+    }
+
+    // Which neighbor chunk?
+    let dx = if x < 0 { -1 } else if x >= CHUNK_X as i32 { 1 } else { 0 };
+    let dy = if y < 0 { -1 } else if y >= CHUNK_Y as i32 { 1 } else { 0 };
+    let dz = if z < 0 { -1 } else if z >= CHUNK_Z as i32 { 1 } else { 0 };
+
+    // More than one chunk away → air
+    let local_x = x - dx * CHUNK_X as i32;
+    let local_y = y - dy * CHUNK_Y as i32;
+    let local_z = z - dz * CHUNK_Z as i32;
+    if local_x < 0 || local_x >= CHUNK_X as i32
+        || local_y < 0 || local_y >= CHUNK_Y as i32
+        || local_z < 0 || local_z >= CHUNK_Z as i32
+    {
+        return Voxel::EMPTY;
+    }
+
+    match neighbors.get(dx, dy, dz) {
+        Some(neighbor) => neighbor.get(local_x as usize, local_y as usize, local_z as usize),
+        None => Voxel::EMPTY,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ECS component
+// ---------------------------------------------------------------------------
+
 /// ECS component representing a voxel chunk.
 #[derive(Component)]
 pub struct Chunk {
     pub data: ChunkData,
+    pub neighbors: ChunkNeighbors,
     pub state: ChunkState,
     pub world_aligned: bool,
     pub dynamic: bool,
@@ -178,6 +268,7 @@ impl Chunk {
     pub fn new(data: ChunkData) -> Self {
         Self {
             data,
+            neighbors: ChunkNeighbors::empty(),
             state: ChunkState::Dirty,
             world_aligned: true,
             dynamic: false,

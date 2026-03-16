@@ -75,9 +75,10 @@ fn start_chunk_meshing(
 
         chunk.state = ChunkState::Meshing;
         let data = chunk.data.clone();
+        let neighbors = chunk.neighbors.clone();
         let shapes = shape_table.clone();
 
-        let task = pool.spawn(async move { generate_chunk_mesh(&data, &shapes, mode) });
+        let task = pool.spawn(async move { generate_chunk_mesh(&data, &neighbors, &shapes, mode) });
 
         commands.entity(entity).insert(ChunkMeshTask(task));
     }
