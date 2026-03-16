@@ -25,7 +25,7 @@ struct Vert { pos: Vec3, edge: EId }
 #[derive(Clone, Debug)]
 struct Edge { origin: VId, twin: EId, next: EId, prev: EId, face: Option<FId> }
 #[derive(Clone, Debug)]
-struct Face { edge: EId, normal: Vec3, mode: ChamferMode, alive: bool }
+struct Face { edge: EId, normal: Vec3, alive: bool }
 
 struct HEMesh {
     verts: Vec<Vert>,
@@ -137,9 +137,8 @@ impl HEMesh {
 
         // Create new face for ne2 side
         let old_n = fid.map(|f| self.faces[f as usize].normal).unwrap_or(Vec3::Y);
-        let old_m = fid.map(|f| self.faces[f as usize].mode).unwrap_or(ChamferMode::Hard);
         let nf = self.faces.len() as FId;
-        self.faces.push(Face { edge: ne2, normal: old_n, mode: old_m, alive: true });
+        self.faces.push(Face { edge: ne2, normal: old_n, alive: true });
         self.edges[ne2 as usize].face = Some(nf);
 
         // Assign new face to all edges on ne2's loop
@@ -219,7 +218,7 @@ impl HEMesh {
             let n = sf.verts.len();
             if n < 3 { continue; }
             let fid = m.faces.len() as FId;
-            m.faces.push(Face { edge: m.edges.len() as EId, normal: sf.normal, mode: sf.chamfer_mode, alive: true });
+            m.faces.push(Face { edge: m.edges.len() as EId, normal: sf.normal, alive: true });
             let first = m.edges.len() as EId;
             for i in 0..n {
                 let o = sf.verts[i];

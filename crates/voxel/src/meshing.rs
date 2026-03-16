@@ -205,7 +205,6 @@ pub struct SolidFace {
     /// Indices into SolidMesh.positions (3 or 4 verts).
     pub verts: Vec<u32>,
     pub normal: Vec3,
-    pub chamfer_mode: ChamferMode,
     /// Source voxel position in chunk coords.
     pub voxel: (usize, usize, usize),
 }
@@ -265,7 +264,6 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
                     mesh.faces.push(SolidFace {
                         verts: vert_indices,
                         normal,
-                        chamfer_mode: face.chamfer_mode,
                         voxel: (x, y, z),
                     });
                 }
@@ -727,18 +725,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     for (&(ev0, ev1), info) in &edge_graph {
         if !sharp_set.contains_key(&edge_key(ev0, ev1)) { continue; }
 
-        let chamfer_mode = if info.faces.len() >= 2 {
-            let m0 = solid.faces[info.faces[0]].chamfer_mode;
-            let m1 = solid.faces[info.faces[1]].chamfer_mode;
-            if m0 == ChamferMode::Smooth && m1 == ChamferMode::Smooth {
-                ChamferMode::Smooth
-            } else {
-                ChamferMode::Hard
-            }
-        } else {
-            solid.faces[info.faces[0]].chamfer_mode
-        };
-
         if info.faces.len() >= 2 {
             // Interior sharp edge: chamfer strip connects both faces' inner vertices
             let fi_a = info.faces[0];
@@ -775,17 +761,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
                 for (pi, p) in strip_poly.iter().enumerate() {
                     positions.push(p.to_array());
-                    let n = match chamfer_mode {
-                        ChamferMode::Hard => expected_out.to_array(),
-                        ChamferMode::Smooth => {
-                            // First half of polygon gets face A normal,
-                            // second half gets face B normal
-                            if pi < strip_poly.len() / 2 {
-                                n_first.to_array()
-                            } else {
-                                n_second.to_array()
-                            }
-                        }
+                    // Smooth fillet: interpolate normals from face A to face B
+                    let n = if pi < strip_poly.len() / 2 {
+                        n_first.to_array()
+                    } else {
+                        n_second.to_array()
                     };
                     normals.push(n);
                     uvs.push([0.0, 0.0]);
@@ -906,31 +886,12 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Determine corner chamfer mode: Hard wins over Smooth
-        let corner_mode = {
-            let mut mode = ChamferMode::Smooth;
-            for &ek in &sharp_edge_keys {
-                if let Some(info) = sharp_set.get(&ek) {
-                    for &fi in &info.faces {
-                        if solid.faces[fi].chamfer_mode == ChamferMode::Hard {
-                            mode = ChamferMode::Hard;
-                        }
-                    }
-                }
-            }
-            mode
-        };
-
         // Triangulate the ring polygon (fan from ring[0])
         let ring_start = positions.len() as u32;
         for (rp, rn) in &ring {
             positions.push(rp.to_array());
-            // Hard chamfer: flat averaged normal. Smooth/fillet: per-face normal.
-            let n = match corner_mode {
-                ChamferMode::Hard => axis.to_array(),
-                ChamferMode::Smooth => rn.to_array(),
-            };
-            normals.push(n);
+            // Fillet: use per-face normal for smooth interpolation
+            normals.push(rn.to_array());
             uvs.push([0.0, 0.0]);
             chamfer_offsets.push([0.0; 3]);
         }

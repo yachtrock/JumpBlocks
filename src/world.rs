@@ -1,7 +1,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{Chunk, ChunkData, ChunkNeighbors, Voxel};
-use jumpblocks_voxel::shape::{Facing, SHAPE_SMOOTH_CUBE, SHAPE_SMOOTH_WEDGE, SHAPE_WEDGE};
+use jumpblocks_voxel::shape::{Facing, SHAPE_CUBE, SHAPE_WEDGE};
 
 use crate::layers::GameLayer;
 
@@ -108,7 +108,7 @@ fn setup_world(
         }
 
         // Staircase: each step is 1 voxel tall (0.5 world units), 3 wide — smooth cube
-        let smooth_voxel = Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1);
+        let smooth_voxel = Voxel::new(SHAPE_CUBE, Facing::North, 1);
         for step in 0..8 {
             let y_base = 1 + step;
             for x in 0..3 {
@@ -130,7 +130,7 @@ fn setup_world(
         // Wedge ramp alongside the stairs (z=7..9, 3 wide)
         // Facing East: tall wall at -X, slope descends toward +X
         // One wedge per step forms a continuous diagonal slope
-        let wedge_e = Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1);
+        let wedge_e = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
         for step in 0..8 {
             let y_base = 1 + step;
             for z_off in 0..3 {
@@ -166,7 +166,7 @@ fn setup_world(
             chunk_data.set(15, y, 4, smooth_voxel);
         }
         // Wedge at boundary top pointing into neighbor
-        chunk_data.set(15, 6, 4, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::West, 1));
+        chunk_data.set(15, 6, 4, Voxel::new(SHAPE_WEDGE, Facing::West, 1));
 
         // Row of cubes along boundary at ground level (z=7..9)
         for z in 7..10 {
@@ -199,7 +199,7 @@ fn setup_world(
             neighbor_data.set(0, y, 4, smooth_voxel);
         }
         // Wedge pointing back toward chunk 1
-        neighbor_data.set(0, 6, 4, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+        neighbor_data.set(0, 6, 4, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
 
         // Matching row of cubes along boundary at ground level (z=7..9)
         for z in 7..10 {
@@ -215,7 +215,7 @@ fn setup_world(
         }
         // Wedge ramp on top
         for z in 7..10 {
-            neighbor_data.set(3, 1, z, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::West, 1));
+            neighbor_data.set(3, 1, z, Voxel::new(SHAPE_WEDGE, Facing::West, 1));
         }
 
         // Wire up neighbor references between the two adjacent chunks (+X / -X)
@@ -261,12 +261,12 @@ fn setup_world(
         test_data.set(11, 4, 5, Voxel::new(SHAPE_WEDGE, Facing::West, 1));
 
         // Single smooth wedge
-        test_data.set(2, 4, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::North, 1));
-        test_data.set(5, 4, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+        test_data.set(2, 4, 8, Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+        test_data.set(5, 4, 8, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
 
         // Wedge on cube
         test_data.set(8, 3, 2, smooth_voxel);
-        test_data.set(8, 4, 2, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+        test_data.set(8, 4, 2, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
 
         // Two adjacent cubes
         test_data.set(11, 4, 2, Voxel::filled());

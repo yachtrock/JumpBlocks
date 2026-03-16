@@ -157,8 +157,8 @@ fn block_2x2x2(voxel: Voxel) -> ChunkData {
 /// Build the demo staircase + ramp chunk (same as world.rs).
 fn demo_chunk() -> ChunkData {
     let mut data = ChunkData::new();
-    let smooth_voxel = Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1);
-    let wedge_e = Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1);
+    let smooth_voxel = Voxel::new(SHAPE_CUBE, Facing::North, 1);
+    let wedge_e = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
 
     // Ground layer
     for x in 0..10 {
@@ -288,8 +288,8 @@ fn halfedge_wedge_on_cube_topology() {
 
     let shapes = make_shapes();
     let mut data = ChunkData::new();
-    data.set(8, 15, 8, Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1));
-    data.set(8, 16, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+    data.set(8, 15, 8, Voxel::new(SHAPE_CUBE, Facing::North, 1));
+    data.set(8, 16, 8, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
     let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
 
     assert_mesh_valid(&result, "he_woc");
@@ -332,16 +332,6 @@ fn single_cube_watertight() {
 }
 
 #[test]
-fn single_smooth_cube_mesh_valid() {
-    let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1));
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
-
-    assert_mesh_valid(&result.full_res, "smooth_cube full_res");
-    assert_mesh_valid(&result.lod, "smooth_cube lod");
-}
-
-#[test]
 fn single_wedge_mesh_valid() {
     let shapes = make_shapes();
     let data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, Facing::North, 1));
@@ -362,16 +352,6 @@ fn single_wedge_all_facings_valid() {
         assert_mesh_valid(&result.full_res, &format!("{} full_res", label));
         assert_mesh_valid(&result.lod, &format!("{} lod", label));
     }
-}
-
-#[test]
-fn single_smooth_wedge_mesh_valid() {
-    let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
-
-    assert_mesh_valid(&result.full_res, "smooth_wedge full_res");
-    assert_mesh_valid(&result.lod, "smooth_wedge lod");
 }
 
 #[test]
@@ -425,8 +405,8 @@ fn adjacent_wedges_same_facing_valid() {
 fn wedge_on_cube_valid() {
     let shapes = make_shapes();
     let mut data = ChunkData::new();
-    let cube = Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1);
-    let wedge = Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1);
+    let cube = Voxel::new(SHAPE_CUBE, Facing::North, 1);
+    let wedge = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
     // Cube with wedge on top (like ramp step)
     data.set(8, 15, 8, cube);
     data.set(8, 16, 8, wedge);
@@ -508,8 +488,8 @@ fn chamfered_mesh_no_extra_holes() {
 
     // Wedge on cube: should be closed
     let mut woc_data = ChunkData::new();
-    woc_data.set(8, 15, 8, Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1));
-    woc_data.set(8, 16, 8, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+    woc_data.set(8, 15, 8, Voxel::new(SHAPE_CUBE, Facing::North, 1));
+    woc_data.set(8, 16, 8, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
     let woc_result = generate_chunk_mesh(&woc_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
     let (woc_boundary, _, _) = count_edge_sharing(&woc_result.full_res);
     eprintln!("wedge_on_cube boundary edges: {}", woc_boundary);
@@ -839,8 +819,8 @@ fn sign_2d(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
 fn wedge_on_cube_edge_sharing() {
     let shapes = make_shapes();
     let mut data = ChunkData::new();
-    let cube = Voxel::new(SHAPE_SMOOTH_CUBE, Facing::North, 1);
-    let wedge = Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1);
+    let cube = Voxel::new(SHAPE_CUBE, Facing::North, 1);
+    let wedge = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
     data.set(8, 15, 8, cube);
     data.set(8, 16, 8, wedge);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
