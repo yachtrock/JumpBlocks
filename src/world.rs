@@ -154,6 +154,26 @@ fn setup_world(
         chunk_data.set(4, 2, 10, wedge_s);
         chunk_data.set(6, 2, 10, wedge_w);
 
+        // Bridge platform reaching the +X boundary (x=15)
+        // Platform at y=1, z=3..6, from x=10 to x=15
+        for x in 10..16 {
+            for z in 3..6 {
+                chunk_data.set(x, 1, z, smooth_voxel);
+            }
+        }
+        // A column at the boundary edge
+        for y in 2..6 {
+            chunk_data.set(15, y, 4, smooth_voxel);
+        }
+        // Wedge at boundary top pointing into neighbor
+        chunk_data.set(15, 6, 4, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::West, 1));
+
+        // Row of cubes along boundary at ground level (z=7..9)
+        for z in 7..10 {
+            chunk_data.set(15, 0, z, Voxel::filled());
+            chunk_data.set(15, 1, z, Voxel::filled());
+        }
+
         let chunk_material = materials.add(StandardMaterial {
             base_color: Color::srgb(0.6, 0.5, 0.4),
             ..default()
@@ -166,7 +186,53 @@ fn setup_world(
             CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
         ));
 
-        // Floating test blocks — isolated shapes for inspecting chamfer
+        // ---- Neighbor chunk (+X direction) ----
+        // Positioned so its x=0 face meets chunk 1's x=15 face
+        let neighbor_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.4, 0.55, 0.7),
+            ..default()
+        });
+
+        let mut neighbor_data = ChunkData::new();
+
+        // Continuation of the bridge platform at x=0, y=1, z=3..6
+        for x in 0..6 {
+            for z in 3..6 {
+                neighbor_data.set(x, 1, z, smooth_voxel);
+            }
+        }
+        // Matching column on this side of the boundary
+        for y in 2..6 {
+            neighbor_data.set(0, y, 4, smooth_voxel);
+        }
+        // Wedge pointing back toward chunk 1
+        neighbor_data.set(0, 6, 4, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::East, 1));
+
+        // Matching row of cubes along boundary at ground level (z=7..9)
+        for z in 7..10 {
+            neighbor_data.set(0, 0, z, Voxel::filled());
+            neighbor_data.set(0, 1, z, Voxel::filled());
+        }
+
+        // A small structure only in the neighbor chunk
+        for x in 3..6 {
+            for z in 7..10 {
+                neighbor_data.set(x, 0, z, smooth_voxel);
+            }
+        }
+        // Wedge ramp on top
+        for z in 7..10 {
+            neighbor_data.set(3, 1, z, Voxel::new(SHAPE_SMOOTH_WEDGE, Facing::West, 1));
+        }
+
+        commands.spawn((
+            Chunk::new(neighbor_data),
+            MeshMaterial3d(neighbor_material),
+            Transform::from_translation(Vec3::new(11.0, 0.0, 5.0)),
+            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
+        ));
+
+        // ---- Floating test blocks — isolated shapes for inspecting chamfer ----
         let mut test_data = ChunkData::new();
 
         // Single cube
