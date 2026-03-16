@@ -43,6 +43,88 @@ fn to_world(v: Vec3, wx: f32, wy: f32, wz: f32) -> Vec3 {
     )
 }
 
+/// Triangulate a convex polygon using greedy ear-clipping that maximizes
+/// the minimum angle (Delaunay-like quality). Avoids the sliver triangles
+/// that simple fan triangulation creates for elongated polygons.
+///
+/// Emits triangle indices into `indices` with the reversed winding order
+/// that the chamfer code expects: `[i+1, i, base]` style.
+fn triangulate_convex_polygon(
+    positions: &[[f32; 3]],
+    base: u32,
+    n: usize,
+    indices: &mut Vec<u32>,
+) {
+    if n < 3 { return; }
+    if n == 3 {
+        indices.extend_from_slice(&[base + 2, base + 1, base]);
+        return;
+    }
+    if n == 4 {
+        // Two possible splits — pick the one with better minimum angle
+        let p: Vec<Vec3> = (0..4).map(|i| Vec3::from_array(positions[(base as usize) + i])).collect();
+        let min_a = min_angle_3d(p[0], p[1], p[2]).min(min_angle_3d(p[0], p[2], p[3]));
+        let min_b = min_angle_3d(p[0], p[1], p[3]).min(min_angle_3d(p[1], p[2], p[3]));
+        if min_a >= min_b {
+            indices.extend_from_slice(&[base + 2, base + 1, base]);
+            indices.extend_from_slice(&[base + 3, base + 2, base]);
+        } else {
+            indices.extend_from_slice(&[base + 3, base + 1, base]);
+            indices.extend_from_slice(&[base + 3, base + 2, base + 1]);
+        }
+        return;
+    }
+
+    // For 5+ vertices: greedy ear-clipping — remove the ear with the
+    // largest minimum angle at each step
+    let mut remaining: Vec<u32> = (0..n as u32).map(|i| base + i).collect();
+
+    while remaining.len() > 3 {
+        let m = remaining.len();
+        let mut best_ear = 0;
+        let mut best_min_angle = -1.0f32;
+
+        for i in 0..m {
+            let pi = remaining[(i + m - 1) % m] as usize;
+            let ci = remaining[i] as usize;
+            let ni = remaining[(i + 1) % m] as usize;
+            let pp = Vec3::from_array(positions[pi]);
+            let pc = Vec3::from_array(positions[ci]);
+            let pn = Vec3::from_array(positions[ni]);
+            let angle = min_angle_3d(pp, pc, pn);
+            if angle > best_min_angle {
+                best_min_angle = angle;
+                best_ear = i;
+            }
+        }
+
+        let m = remaining.len();
+        let prev = remaining[(best_ear + m - 1) % m];
+        let curr = remaining[best_ear];
+        let next = remaining[(best_ear + 1) % m];
+        // Reversed winding for Bevy
+        indices.extend_from_slice(&[next, curr, prev]);
+        remaining.remove(best_ear);
+    }
+
+    // Last triangle
+    indices.extend_from_slice(&[remaining[2], remaining[1], remaining[0]]);
+}
+
+/// Minimum angle (in radians) of a triangle defined by three 3D points.
+fn min_angle_3d(a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    let ab = (b - a).normalize_or_zero();
+    let ac = (c - a).normalize_or_zero();
+    let ba = (a - b).normalize_or_zero();
+    let bc = (c - b).normalize_or_zero();
+    let ca = (a - c).normalize_or_zero();
+    let cb = (b - c).normalize_or_zero();
+    let angle_a = ab.dot(ac).clamp(-1.0, 1.0).acos();
+    let angle_b = ba.dot(bc).clamp(-1.0, 1.0).acos();
+    let angle_c = ca.dot(cb).clamp(-1.0, 1.0).acos();
+    angle_a.min(angle_b).min(angle_c)
+}
+
 fn compute_world_normal(world_verts: &[Vec3], triangles: &[[usize; 3]]) -> Vec3 {
     let tri = &triangles[0];
     let a = world_verts[tri[0]];
@@ -622,7 +704,14 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
         let (vx, vy, vz) = face.voxel;
         let mut clip_planes: Vec<(Vec3, Vec3)> = Vec::new();
-        for &(dx, dy, dz) in &[(-1i32,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)] {
+        let (sx, sy, sz) = face.block_size;
+        // Check neighbors at the block's outer boundary, not just ±1 from origin
+        let neighbor_offsets: [(i32, i32, i32); 6] = [
+            (-1, 0, 0), (sx as i32, 0, 0),
+            (0, -1, 0), (0, sy as i32, 0),
+            (0, 0, -1), (0, 0, sz as i32),
+        ];
+        for &(dx, dy, dz) in &neighbor_offsets {
             let nx = vx as i32 + dx;
             let ny = vy as i32 + dy;
             let nz = vz as i32 + dz;
@@ -670,11 +759,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                 uvs.push([0.0, 0.0]);
                 chamfer_offsets.push([0.0; 3]);
             }
-            for i in 1..n - 1 {
-                indices.push(inner_base + i as u32 + 1);
-                indices.push(inner_base + i as u32);
-                indices.push(inner_base);
-            }
+            triangulate_convex_polygon(&positions, inner_base, n, &mut indices);
         } else {
             let mut polygon: Vec<Vec3> = inner.clone();
 
@@ -715,11 +800,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                         uvs.push([0.0, 0.0]);
                         chamfer_offsets.push([0.0; 3]);
                     }
-                    for i in 1..clean_poly.len() - 1 {
-                        indices.push(inner_base + i as u32 + 1);
-                        indices.push(inner_base + i as u32);
-                        indices.push(inner_base);
-                    }
+                    triangulate_convex_polygon(&positions, inner_base, clean_poly.len(), &mut indices);
                 }
             }
         }
@@ -802,11 +883,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     uvs.push([0.0, 0.0]);
                     chamfer_offsets.push([0.0; 3]);
                 }
-                for i in 1..strip_poly.len() - 1 {
-                    indices.push(base + i as u32 + 1);
-                    indices.push(base + i as u32);
-                    indices.push(base);
-                }
+                triangulate_convex_polygon(&positions, base, strip_poly.len(), &mut indices);
             }
         } else {
             let fi_a = info.faces[0];
@@ -841,11 +918,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     uvs.push([0.0, 0.0]);
                     chamfer_offsets.push([0.0; 3]);
                 }
-                for i in 1..strip_poly.len() - 1 {
-                    indices.push(base + i as u32 + 1);
-                    indices.push(base + i as u32);
-                    indices.push(base);
-                }
+                triangulate_convex_polygon(&positions, base, strip_poly.len(), &mut indices);
             }
         }
     }

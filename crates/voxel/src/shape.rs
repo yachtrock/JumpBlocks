@@ -360,15 +360,19 @@ fn cube_shape() -> BlockShape {
 /// from back (south, z=0) at y=2 to front (north, z=2) at y=1.
 /// Every edge has at least 1 cell of material.
 fn wedge_shape() -> BlockShape {
+    // All faces have vertices at every cell boundary to prevent T-junctions
+    // with adjacent cube blocks (2x1x2). v[8]/v[9] are at y=1 midpoints.
     let v = [
-        Vec3::new(0.0, 0.0, 0.0), // 0: left  bottom back
-        Vec3::new(2.0, 0.0, 0.0), // 1: right bottom back
-        Vec3::new(0.0, 0.0, 2.0), // 2: left  bottom front
-        Vec3::new(2.0, 0.0, 2.0), // 3: right bottom front
-        Vec3::new(0.0, 1.0, 2.0), // 4: left  mid    front
-        Vec3::new(2.0, 1.0, 2.0), // 5: right mid    front
-        Vec3::new(0.0, 2.0, 0.0), // 6: left  top    back
-        Vec3::new(2.0, 2.0, 0.0), // 7: right top    back
+        Vec3::new(0.0, 0.0, 0.0), //  0: left  bottom back
+        Vec3::new(2.0, 0.0, 0.0), //  1: right bottom back
+        Vec3::new(0.0, 0.0, 2.0), //  2: left  bottom front
+        Vec3::new(2.0, 0.0, 2.0), //  3: right bottom front
+        Vec3::new(0.0, 1.0, 2.0), //  4: left  mid    front
+        Vec3::new(2.0, 1.0, 2.0), //  5: right mid    front
+        Vec3::new(0.0, 2.0, 0.0), //  6: left  top    back
+        Vec3::new(2.0, 2.0, 0.0), //  7: right top    back
+        Vec3::new(0.0, 1.0, 0.0), //  8: left  mid    back  (y=1 boundary)
+        Vec3::new(2.0, 1.0, 0.0), //  9: right mid    back  (y=1 boundary)
     ];
 
     let faces = vec![
@@ -390,16 +394,19 @@ fn wedge_shape() -> BlockShape {
                 CellCover { cell: (1, 0, 1), side: FaceSide::Bottom, full: true },
             ],
         },
-        // South/Back wall (-Z): full height z=0, y=0..2
+        // South/Back wall (-Z): 6-vertex polygon with y=1 midpoints
+        // v[0]=(0,0,0), v[1]=(2,0,0), v[9]=(2,1,0), v[7]=(2,2,0), v[6]=(0,2,0), v[8]=(0,1,0)
         BlockFace {
-            vertices: vec![v[0], v[1], v[7], v[6]],
-            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            vertices: vec![v[0], v[1], v[9], v[7], v[6], v[8]],
+            triangles: vec![[0, 1, 2], [0, 2, 5], [5, 2, 3], [5, 3, 4]],
             normal: Vec3::NEG_Z,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
-                // Ridge (top) omitted — internal edge shared with slope face
-                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::East] },
+                // Ridge (v[7]→v[6]) omitted — internal edge shared with slope
+                VoxelEdge { v0: 4, v1: 5, neighbor_sides: vec![FaceSide::West] },
+                VoxelEdge { v0: 5, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             cell_coverage: vec![
                 CellCover { cell: (0, 0, 0), side: FaceSide::South, full: true },
@@ -437,16 +444,18 @@ fn wedge_shape() -> BlockShape {
             ],
             cell_coverage: vec![], // diagonal — never culled
         },
-        // West (-X): trapezoid in x=0 plane
+        // West (-X): 5-vertex pentagon with y=1 midpoint
+        // v[2]=(0,0,2), v[0]=(0,0,0), v[8]=(0,1,0), v[6]=(0,2,0), v[4]=(0,1,2)
         BlockFace {
-            vertices: vec![v[2], v[0], v[6], v[4]],
-            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            vertices: vec![v[2], v[0], v[8], v[6], v[4]],
+            triangles: vec![[0, 1, 2], [0, 2, 4], [2, 3, 4]],
             normal: Vec3::NEG_X,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::South] },
-                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::West] },
-                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::North] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 3, v1: 4, neighbor_sides: vec![FaceSide::West] },
+                VoxelEdge { v0: 4, v1: 0, neighbor_sides: vec![FaceSide::North] },
             ],
             cell_coverage: vec![
                 CellCover { cell: (0, 0, 0), side: FaceSide::West, full: true },
@@ -455,16 +464,18 @@ fn wedge_shape() -> BlockShape {
                 CellCover { cell: (0, 1, 1), side: FaceSide::West, full: false },
             ],
         },
-        // East (+X): trapezoid in x=2 plane
+        // East (+X): 5-vertex pentagon with y=1 midpoint
+        // v[1]=(2,0,0), v[3]=(2,0,2), v[5]=(2,1,2), v[7]=(2,2,0), v[9]=(2,1,0)
         BlockFace {
-            vertices: vec![v[1], v[3], v[5], v[7]],
-            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            vertices: vec![v[1], v[3], v[5], v[7], v[9]],
+            triangles: vec![[0, 1, 2], [0, 2, 4], [4, 2, 3]],
             normal: Vec3::X,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::North] },
                 VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::East] },
-                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 3, v1: 4, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 4, v1: 0, neighbor_sides: vec![FaceSide::South] },
             ],
             cell_coverage: vec![
                 CellCover { cell: (1, 0, 0), side: FaceSide::East, full: true },
