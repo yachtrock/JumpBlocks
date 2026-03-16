@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
-use crate::chunk::*;
+use crate::chunk::{ChunkData, ChunkNeighbors};
 use crate::meshing::{ChunkMeshData, build_solid_mesh_public};
 use crate::shape::*;
 

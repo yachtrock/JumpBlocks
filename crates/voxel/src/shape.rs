@@ -3,7 +3,7 @@ use bevy::prelude::*;
 /// Global chamfer width in world units.
 pub const CHAMFER_WIDTH: f32 = 0.12;
 
-/// Cardinal facing direction for voxels.
+/// Cardinal facing direction for blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum Facing {
@@ -35,18 +35,29 @@ impl Facing {
         }
     }
 
-    /// Rotate a point in normalized voxel space (0..1, 0..1, 0..1) by this facing
-    /// around the center of the voxel (0.5, y, 0.5).
+    /// Rotate a point in block-local space by this facing.
+    /// For a 1x1x1 block, coordinates are in 0..1 and rotation is around (0.5, y, 0.5).
+    /// For larger blocks, use `rotate_block_point` with the block size.
     pub fn rotate_point(&self, p: Vec3) -> Vec3 {
-        let cx = p.x - 0.5;
-        let cz = p.z - 0.5;
-        let (rx, rz) = match self {
-            Facing::North => (cx, cz),
-            Facing::East => (-cz, cx),
-            Facing::South => (-cx, -cz),
-            Facing::West => (cz, -cx),
+        self.rotate_block_point(p, (1, 1, 1))
+    }
+
+    /// Rotate a point in block-local space for a block of given size.
+    /// Rotation is around the center of the block's XZ footprint.
+    pub fn rotate_block_point(&self, p: Vec3, size: (u8, u8, u8)) -> Vec3 {
+        let cx_size = size.0 as f32;
+        let cz_size = size.2 as f32;
+        let half_x = cx_size * 0.5;
+        let half_z = cz_size * 0.5;
+        let cx = p.x - half_x;
+        let cz = p.z - half_z;
+        let (rx, rz, new_half_x, new_half_z) = match self {
+            Facing::North => (cx, cz, half_x, half_z),
+            Facing::East => (-cz, cx, half_z, half_x),
+            Facing::South => (-cx, -cz, half_x, half_z),
+            Facing::West => (cz, -cx, half_z, half_x),
         };
-        Vec3::new(rx + 0.5, p.y, rz + 0.5)
+        Vec3::new(rx + new_half_x, p.y, rz + new_half_z)
     }
 
     /// Return the inverse facing (undoes this rotation).
@@ -70,7 +81,7 @@ impl Facing {
     }
 }
 
-/// Which side of the voxel a face is on, used for neighbor occlusion checks.
+/// Which side of a cell a face is on, used for neighbor occlusion checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaceSide {
     Top,    // +Y
@@ -119,9 +130,21 @@ impl FaceSide {
             }
         }
     }
+
+    pub fn opposite(&self) -> FaceSide {
+        match self {
+            FaceSide::Top => FaceSide::Bottom,
+            FaceSide::Bottom => FaceSide::Top,
+            FaceSide::North => FaceSide::South,
+            FaceSide::South => FaceSide::North,
+            FaceSide::East => FaceSide::West,
+            FaceSide::West => FaceSide::East,
+            FaceSide::None => FaceSide::None,
+        }
+    }
 }
 
-/// An edge of a voxel face, defined by two vertex indices into the face's vertex list.
+/// An edge of a block face, defined by two vertex indices into the face's vertex list.
 #[derive(Debug, Clone)]
 pub struct VoxelEdge {
     /// Index of the start vertex in the parent face's vertices.
@@ -134,71 +157,48 @@ pub struct VoxelEdge {
     pub neighbor_sides: Vec<FaceSide>,
 }
 
-/// A face of a voxel shape.
+/// Which cell within a block a face covers, and on which side.
 #[derive(Debug, Clone)]
-pub struct VoxelFace {
-    /// Vertices in normalized voxel space (0..1, 0..1, 0..1 where Y=1 is VOXEL_HEIGHT).
+pub struct CellCover {
+    /// Cell position within the block (0..size.x, 0..size.y, 0..size.z).
+    pub cell: (u8, u8, u8),
+    /// Which side of that cell this face covers.
+    pub side: FaceSide,
+    /// Whether this face fully covers that cell-side.
+    pub full: bool,
+}
+
+/// A face of a block shape.
+#[derive(Debug, Clone)]
+pub struct BlockFace {
+    /// Vertices in block-local space (x in 0..size.0, y in 0..size.1, z in 0..size.2).
     pub vertices: Vec<Vec3>,
     /// Triangle indices (into `vertices`).
     pub triangles: Vec<[usize; 3]>,
-    /// The face normal in normalized voxel space.
+    /// The face normal in block-local space.
     pub normal: Vec3,
-    /// Which side of the voxel this face occupies (for neighbor occlusion).
-    pub side: FaceSide,
     /// Edges of this face, used for chamfering.
     pub edges: Vec<VoxelEdge>,
+    /// Which cells this face covers and on which sides (for occlusion).
+    /// Empty means diagonal/internal — never culled by neighbor check.
+    pub cell_coverage: Vec<CellCover>,
 }
 
-/// Which sides a shape fully occludes in its local frame.
-/// Indexed as [Top, Bottom, North, South, East, West].
-#[derive(Debug, Clone, Copy)]
-pub struct OcclusionMask(pub [bool; 6]);
-
-impl OcclusionMask {
-    /// All sides occluded (full cube).
-    pub const FULL: Self = Self([true; 6]);
-    /// No sides occluded.
-    pub const NONE: Self = Self([false; 6]);
-
-    fn side_index(side: FaceSide) -> Option<usize> {
-        match side {
-            FaceSide::Top => Some(0),
-            FaceSide::Bottom => Some(1),
-            FaceSide::North => Some(2),
-            FaceSide::South => Some(3),
-            FaceSide::East => Some(4),
-            FaceSide::West => Some(5),
-            FaceSide::None => None,
-        }
-    }
-
-    /// Check if a world-space side is occluded, accounting for the voxel's facing.
-    /// `world_side` is the side to check in world space.
-    /// `facing` is the voxel's facing direction.
-    pub fn occludes_world_side(&self, world_side: FaceSide, facing: Facing) -> bool {
-        // Un-rotate world side to local side
-        let local_side = world_side.rotated_by(facing.inverse());
-        if let Some(idx) = Self::side_index(local_side) {
-            self.0[idx]
-        } else {
-            false
-        }
-    }
-}
-
-/// A voxel shape definition — a collection of faces.
+/// A block shape definition.
 #[derive(Debug, Clone)]
-pub struct VoxelShape {
+pub struct BlockShape {
     pub name: String,
-    pub faces: Vec<VoxelFace>,
-    /// Which sides this shape fully occludes (in local/unrotated frame).
-    pub occlusion: OcclusionMask,
+    /// Dimensions of this block in cells.
+    pub size: (u8, u8, u8),
+    pub faces: Vec<BlockFace>,
+    /// Which cells this shape occupies (relative to origin).
+    pub occupied_cells: Vec<(u8, u8, u8)>,
 }
 
-/// Resource holding all registered voxel shapes. Index 0 is always the cube.
+/// Resource holding all registered block shapes. Index 0 is always the cube.
 #[derive(Resource, Debug, Clone)]
 pub struct ShapeTable {
-    pub shapes: Vec<VoxelShape>,
+    pub shapes: Vec<BlockShape>,
 }
 
 impl Default for ShapeTable {
@@ -206,8 +206,8 @@ impl Default for ShapeTable {
         let mut table = Self {
             shapes: Vec::new(),
         };
-        table.shapes.push(cube_shape());    // shape 0: cube (fillet edges)
-        table.shapes.push(wedge_shape());   // shape 1: wedge/ramp (fillet edges)
+        table.shapes.push(cube_shape());    // shape 0: cube
+        table.shapes.push(wedge_shape());   // shape 1: wedge/ramp
         table
     }
 }
@@ -217,229 +217,271 @@ pub const SHAPE_CUBE: u16 = 0;
 pub const SHAPE_WEDGE: u16 = 1;
 
 impl ShapeTable {
-    pub fn get(&self, index: u16) -> Option<&VoxelShape> {
+    pub fn get(&self, index: u16) -> Option<&BlockShape> {
         self.shapes.get(index as usize)
     }
 
-    pub fn register(&mut self, shape: VoxelShape) -> u16 {
+    pub fn register(&mut self, shape: BlockShape) -> u16 {
         let idx = self.shapes.len() as u16;
         self.shapes.push(shape);
         idx
     }
 }
 
-/// Shape 0: the standard full cube.
-fn cube_shape() -> VoxelShape {
-    // Vertices of a unit cube in normalized space (0..1, 0..1, 0..1)
-    //
-    //     4-----5       Y+
-    //    /|    /|        |
-    //   6-----7 |        |
-    //   | 0---|-1       +--- X+
-    //   |/    |/        /
-    //   2-----3        Z+
-    //
+/// Shape 0: the standard full cube (2x1x2).
+fn cube_shape() -> BlockShape {
     let v = [
         Vec3::new(0.0, 0.0, 0.0), // 0: left  bottom back
-        Vec3::new(1.0, 0.0, 0.0), // 1: right bottom back
-        Vec3::new(0.0, 0.0, 1.0), // 2: left  bottom front
-        Vec3::new(1.0, 0.0, 1.0), // 3: right bottom front
+        Vec3::new(2.0, 0.0, 0.0), // 1: right bottom back
+        Vec3::new(0.0, 0.0, 2.0), // 2: left  bottom front
+        Vec3::new(2.0, 0.0, 2.0), // 3: right bottom front
         Vec3::new(0.0, 1.0, 0.0), // 4: left  top    back
-        Vec3::new(1.0, 1.0, 0.0), // 5: right top    back
-        Vec3::new(0.0, 1.0, 1.0), // 6: left  top    front
-        Vec3::new(1.0, 1.0, 1.0), // 7: right top    front
+        Vec3::new(2.0, 1.0, 0.0), // 5: right top    back
+        Vec3::new(0.0, 1.0, 2.0), // 6: left  top    front
+        Vec3::new(2.0, 1.0, 2.0), // 7: right top    front
     ];
 
     let faces = vec![
-        // Top (+Y): vertices 4,5,7,6
-        VoxelFace {
+        // Top (+Y)
+        BlockFace {
             vertices: vec![v[4], v[5], v[7], v[6]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::Y,
-            side: FaceSide::Top,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::South] },  // back edge
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right edge
-                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::North] },  // front edge
-                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left edge
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::North] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
+            ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 0), side: FaceSide::Top, full: true },
+                CellCover { cell: (1, 0, 0), side: FaceSide::Top, full: true },
+                CellCover { cell: (0, 0, 1), side: FaceSide::Top, full: true },
+                CellCover { cell: (1, 0, 1), side: FaceSide::Top, full: true },
             ],
         },
-        // Bottom (-Y): vertices 2,3,1,0
-        VoxelFace {
+        // Bottom (-Y)
+        BlockFace {
             vertices: vec![v[2], v[3], v[1], v[0]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::NEG_Y,
-            side: FaceSide::Bottom,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::North] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
                 VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::South] },
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 0), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (1, 0, 0), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (0, 0, 1), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (1, 0, 1), side: FaceSide::Bottom, full: true },
+            ],
         },
-        // North (+Z): vertices 3,2,6,7
-        VoxelFace {
+        // North (+Z)
+        BlockFace {
             vertices: vec![v[3], v[2], v[6], v[7]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::Z,
-            side: FaceSide::North,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::West] },
                 VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::East] },
             ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 1), side: FaceSide::North, full: true },
+                CellCover { cell: (1, 0, 1), side: FaceSide::North, full: true },
+            ],
         },
-        // South (-Z): vertices 0,1,5,4
-        VoxelFace {
+        // South (-Z)
+        BlockFace {
             vertices: vec![v[0], v[1], v[5], v[4]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::NEG_Z,
-            side: FaceSide::South,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
                 VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 0), side: FaceSide::South, full: true },
+                CellCover { cell: (1, 0, 0), side: FaceSide::South, full: true },
+            ],
         },
-        // East (+X): vertices 1,3,7,5
-        VoxelFace {
+        // East (+X)
+        BlockFace {
             vertices: vec![v[1], v[3], v[7], v[5]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::X,
-            side: FaceSide::East,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::North] },
                 VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::South] },
             ],
+            cell_coverage: vec![
+                CellCover { cell: (1, 0, 0), side: FaceSide::East, full: true },
+                CellCover { cell: (1, 0, 1), side: FaceSide::East, full: true },
+            ],
         },
-        // West (-X): vertices 2,0,4,6
-        VoxelFace {
+        // West (-X)
+        BlockFace {
             vertices: vec![v[2], v[0], v[4], v[6]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::NEG_X,
-            side: FaceSide::West,
             edges: vec![
                 VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
                 VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::South] },
                 VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::Top] },
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::North] },
             ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 0), side: FaceSide::West, full: true },
+                CellCover { cell: (0, 0, 1), side: FaceSide::West, full: true },
+            ],
         },
     ];
 
-    VoxelShape {
+    BlockShape {
         name: "cube".to_string(),
+        size: (2, 1, 2),
         faces,
-        occlusion: OcclusionMask::FULL,
+        occupied_cells: vec![
+            (0, 0, 0), (1, 0, 0), (0, 0, 1), (1, 0, 1),
+        ],
     }
 }
 
-/// Shape 1: wedge/ramp.
+/// Shape 1: wedge/ramp (2x2x2) with solid base.
 ///
-/// Default facing (North): slope descends from back (south, -Z) to front (north, +Z).
-/// The tall wall is at the back (south side).
-///
-/// ```text
-///     4-----5       Back wall (south)
-///    /     /         Slope descends toward +Z
-///   /     /
-///  2-----3          Front is at ground level (y=0)
-/// ```
-///
-/// Vertices:
-///   0: (0,0,0)  left  bottom back
-///   1: (1,0,0)  right bottom back
-///   2: (0,0,1)  left  bottom front
-///   3: (1,0,1)  right bottom front
-///   4: (0,1,0)  left  top    back
-///   5: (1,1,0)  right top    back
-fn wedge_shape() -> VoxelShape {
+/// Bottom half is a solid cube base. Top half has a slope that descends
+/// from back (south, z=0) at y=2 to front (north, z=2) at y=1.
+/// Every edge has at least 1 cell of material.
+fn wedge_shape() -> BlockShape {
     let v = [
         Vec3::new(0.0, 0.0, 0.0), // 0: left  bottom back
-        Vec3::new(1.0, 0.0, 0.0), // 1: right bottom back
-        Vec3::new(0.0, 0.0, 1.0), // 2: left  bottom front
-        Vec3::new(1.0, 0.0, 1.0), // 3: right bottom front
-        Vec3::new(0.0, 1.0, 0.0), // 4: left  top    back
-        Vec3::new(1.0, 1.0, 0.0), // 5: right top    back
+        Vec3::new(2.0, 0.0, 0.0), // 1: right bottom back
+        Vec3::new(0.0, 0.0, 2.0), // 2: left  bottom front
+        Vec3::new(2.0, 0.0, 2.0), // 3: right bottom front
+        Vec3::new(0.0, 1.0, 2.0), // 4: left  mid    front
+        Vec3::new(2.0, 1.0, 2.0), // 5: right mid    front
+        Vec3::new(0.0, 2.0, 0.0), // 6: left  top    back
+        Vec3::new(2.0, 2.0, 0.0), // 7: right top    back
     ];
 
     let faces = vec![
-        // Bottom (-Y): quad [2, 3, 1, 0]
-        VoxelFace {
+        // Bottom (-Y): full 2x2 quad at y=0
+        BlockFace {
             vertices: vec![v[2], v[3], v[1], v[0]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::NEG_Y,
-            side: FaceSide::Bottom,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::North] },  // front
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right
-                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::South] },  // back
-                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::North] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
+            ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 0), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (1, 0, 0), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (0, 0, 1), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (1, 0, 1), side: FaceSide::Bottom, full: true },
             ],
         },
-        // Back/South wall (-Z): quad [0, 1, 5, 4]
-        VoxelFace {
-            vertices: vec![v[0], v[1], v[5], v[4]],
+        // South/Back wall (-Z): full height z=0, y=0..2
+        BlockFace {
+            vertices: vec![v[0], v[1], v[7], v[6]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::NEG_Z,
-            side: FaceSide::South,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] }, // bottom
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
                 // Ridge (top) omitted — internal edge shared with slope face
-                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
+            ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 0), side: FaceSide::South, full: true },
+                CellCover { cell: (1, 0, 0), side: FaceSide::South, full: true },
+                CellCover { cell: (0, 1, 0), side: FaceSide::South, full: true },
+                CellCover { cell: (1, 1, 0), side: FaceSide::South, full: true },
             ],
         },
-        // Slope face: quad [4, 5, 3, 2] — from back-top to front-bottom
-        // Normal is computed from world-space vertices at mesh time.
-        VoxelFace {
-            vertices: vec![v[4], v[5], v[3], v[2]],
+        // North/Front wall (+Z): short front z=2, y=0..1
+        BlockFace {
+            vertices: vec![v[3], v[2], v[4], v[5]],
             triangles: vec![[0, 1, 2], [0, 2, 3]],
-            normal: Vec3::new(0.0, 1.0, 1.0).normalize(),
-            side: FaceSide::None, // diagonal — no single neighbor can occlude
+            normal: Vec3::Z,
             edges: vec![
-                // Ridge (top) omitted — internal edge shared with back face
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // right diagonal (top→bottom)
-                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::North, FaceSide::Bottom] },  // bottom/front (right→left)
-                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },   // left diagonal (bottom→top)
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::West] },
+                // Top edge shared with slope — omitted
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::East] },
+            ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 1), side: FaceSide::North, full: true },
+                CellCover { cell: (1, 0, 1), side: FaceSide::North, full: true },
             ],
         },
-        // Left/West triangle (-X): [0, 4, 2]
-        VoxelFace {
-            vertices: vec![v[0], v[4], v[2]],
-            triangles: vec![[0, 1, 2]],
+        // Slope face: from back-top to front-mid — diagonal, never culled
+        BlockFace {
+            vertices: vec![v[6], v[7], v[5], v[4]],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            normal: Vec3::new(0.0, 2.0, 1.0).normalize(),
+            edges: vec![
+                // Ridge (top/back) omitted — internal edge shared with south face
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },
+                // Bottom/front edge shared with north face — omitted
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
+            ],
+            cell_coverage: vec![], // diagonal — never culled
+        },
+        // West (-X): trapezoid in x=0 plane
+        BlockFace {
+            vertices: vec![v[2], v[0], v[6], v[4]],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::NEG_X,
-            side: FaceSide::West,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (bottom→top)
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::West] },   // hypotenuse — chamfer when side is exposed
-                VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (front→back)
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::South] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::West] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::North] },
+            ],
+            cell_coverage: vec![
+                CellCover { cell: (0, 0, 0), side: FaceSide::West, full: true },
+                CellCover { cell: (0, 0, 1), side: FaceSide::West, full: true },
+                CellCover { cell: (0, 1, 0), side: FaceSide::West, full: false },
+                CellCover { cell: (0, 1, 1), side: FaceSide::West, full: false },
             ],
         },
-        // Right/East triangle (+X): [1, 3, 5]
-        VoxelFace {
-            vertices: vec![v[1], v[3], v[5]],
-            triangles: vec![[0, 1, 2]],
+        // East (+X): trapezoid in x=2 plane
+        BlockFace {
+            vertices: vec![v[1], v[3], v[5], v[7]],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
             normal: Vec3::X,
-            side: FaceSide::East,
             edges: vec![
-                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] }, // bottom (back→front)
-                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::East] },   // hypotenuse — chamfer when side is exposed
-                VoxelEdge { v0: 2, v1: 0, neighbor_sides: vec![FaceSide::South, FaceSide::Bottom] },  // back (top→bottom)
+                VoxelEdge { v0: 0, v1: 1, neighbor_sides: vec![FaceSide::Bottom] },
+                VoxelEdge { v0: 1, v1: 2, neighbor_sides: vec![FaceSide::North] },
+                VoxelEdge { v0: 2, v1: 3, neighbor_sides: vec![FaceSide::East] },
+                VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::South] },
+            ],
+            cell_coverage: vec![
+                CellCover { cell: (1, 0, 0), side: FaceSide::East, full: true },
+                CellCover { cell: (1, 0, 1), side: FaceSide::East, full: true },
+                CellCover { cell: (1, 1, 0), side: FaceSide::East, full: false },
+                CellCover { cell: (1, 1, 1), side: FaceSide::East, full: false },
             ],
         },
     ];
 
-    VoxelShape {
+    BlockShape {
         name: "wedge".to_string(),
+        size: (2, 2, 2),
         faces,
-        // Wedge only fully occludes Bottom and South (the full back wall).
-        // Top=false, Bottom=true, North=false, South=true, East=false, West=false
-        occlusion: OcclusionMask([false, true, false, true, false, false]),
+        occupied_cells: vec![
+            (0, 0, 0), (1, 0, 0), (0, 0, 1), (1, 0, 1),
+            (0, 1, 0), (1, 1, 0), (0, 1, 1), (1, 1, 1),
+        ],
     }
 }
-

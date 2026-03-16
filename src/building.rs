@@ -6,12 +6,12 @@
 //! - Rendering the translucent preview mesh (post-system)
 //! - Writing voxels into chunks and triggering re-meshing (post-system)
 //!
-//! All positions are in chunk-local voxel coordinates — the script never sees
+//! All positions are in chunk-local cell coordinates — the script never sees
 //! world-space values. The Rust side converts to world space using each chunk's
 //! transform, so chunks can have arbitrary transforms in the future.
 //!
 //! Script API:
-//! - `build_position()` → `#{ x, y, z }` (chunk-local voxel coords) or `()`
+//! - `build_position()` → `#{ x, y, z }` (chunk-local cell coords) or `()`
 //! - `show_preview(facing)` — show preview at the current build position
 //! - `show_preview_in_hand(facing)` — show preview floating in front of player
 //! - `hide_preview()` — hide the preview
@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{
-    Chunk, Voxel, VoxelModification, CHUNK_X, CHUNK_Y, CHUNK_Z, VOXEL_HEIGHT, VOXEL_WIDTH,
+    Chunk, BlockModification, CHUNK_X, CHUNK_Y, CHUNK_Z, VOXEL_SIZE,
 };
-use jumpblocks_voxel::shape::Facing;
+use jumpblocks_voxel::shape::{Facing, SHAPE_WEDGE};
 use rhai::{Dynamic, Map, INT};
 
 use crate::action_state::{ActionState, ActionStateEngine};
@@ -58,7 +58,7 @@ impl Plugin for BuildingPlugin {
 /// A valid build position within a chunk (chunk-local coordinates).
 #[derive(Clone)]
 struct BuildPos {
-    /// Voxel coordinates within the chunk.
+    /// Cell coordinates within the chunk.
     x: usize,
     y: usize,
     z: usize,
@@ -153,7 +153,6 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
     let inner = api.inner.clone();
 
     // build_position() -> #{ x, y, z } | ()
-    // Returns chunk-local voxel coordinates only. No world positions.
     {
         let inner = inner.clone();
         engine.rhai_engine_mut().register_fn(
@@ -174,9 +173,7 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
         );
     }
 
-    // show_preview(facing) — show at the current build position
-    // The Rust post-system converts chunk-local coords to world space
-    // using the chunk's transform.
+    // show_preview(facing)
     {
         let inner = inner.clone();
         engine
@@ -189,7 +186,7 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
             });
     }
 
-    // show_preview_in_hand(facing) — show floating in front of player
+    // show_preview_in_hand(facing)
     {
         let inner = inner.clone();
         engine
@@ -213,7 +210,7 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
             });
     }
 
-    // place_block(shape, facing, texture) — place at the current build position
+    // place_block(shape, facing, texture)
     {
         let inner = inner.clone();
         engine.rhai_engine_mut().register_fn(
@@ -260,7 +257,6 @@ fn compute_build_context(
 ) {
     let mut inner = api.inner.lock().unwrap();
 
-    // Always clear — ensures cleanup when leaving building state
     inner.clear_frame();
 
     let Ok((action_state, player_transform)) = action_query.single() else {
@@ -283,7 +279,6 @@ fn compute_build_context(
     inner.player_pos = player_pos;
     inner.camera_forward = cam_forward;
 
-    // Find valid build position
     inner.build_pos = find_placement_position(player_pos, cam_forward, &chunks);
 }
 
@@ -305,14 +300,19 @@ fn apply_building_commands(
     // --- Handle place requests ---
     for req in &inner.place_requests {
         if let Some(ref pos) = inner.build_pos {
-            let voxel = Voxel::new(req.shape, req.facing, req.texture);
             if let Ok((mut chunk, _)) = chunks.get_mut(pos.chunk_entity) {
-                chunk.data.set(pos.x, pos.y, pos.z, voxel);
-                chunk.pending_modifications.push(VoxelModification {
+                if req.shape == SHAPE_WEDGE {
+                    chunk.data.place_wedge(pos.x, pos.y, pos.z, req.facing, req.texture);
+                } else {
+                    chunk.data.place_std(pos.x, pos.y, pos.z, req.shape, req.facing, req.texture);
+                }
+                chunk.pending_modifications.push(BlockModification {
                     x: pos.x,
                     y: pos.y,
                     z: pos.z,
-                    voxel,
+                    shape: req.shape,
+                    facing: req.facing,
+                    texture: req.texture,
                 });
                 info!(
                     "Placed block at ({}, {}, {}) shape={} facing={:?}",
@@ -333,13 +333,12 @@ fn apply_building_commands(
             }
         }
         PreviewState::AtBuildPosition { facing } => {
-            // Convert chunk-local voxel coords to world space via chunk transform
             if let Some(ref pos) = inner.build_pos {
                 if let Ok((_, chunk_transform)) = chunks.get(pos.chunk_entity) {
                     let local_pos = Vec3::new(
-                        pos.x as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
-                        pos.y as f32 * VOXEL_HEIGHT + VOXEL_HEIGHT * 0.5,
-                        pos.z as f32 * VOXEL_WIDTH + VOXEL_WIDTH * 0.5,
+                        pos.x as f32 * VOXEL_SIZE + VOXEL_SIZE * 0.5,
+                        pos.y as f32 * VOXEL_SIZE + VOXEL_SIZE * 0.5,
+                        pos.z as f32 * VOXEL_SIZE + VOXEL_SIZE * 0.5,
                     );
                     let world_pos = chunk_transform.transform_point(local_pos);
                     let world_rotation = chunk_transform.rotation
@@ -381,7 +380,6 @@ fn spawn_or_update_preview(
     materials: &mut Assets<StandardMaterial>,
     transform: Transform,
 ) {
-    // Lazy-init material
     if res.material.is_none() {
         res.material = Some(materials.add(StandardMaterial {
             base_color: Color::srgba(0.3, 0.6, 1.0, 0.4),
@@ -389,7 +387,6 @@ fn spawn_or_update_preview(
             ..default()
         }));
     }
-    // Lazy-init mesh
     if res.mesh.is_none() {
         res.mesh = Some(meshes.add(build_wedge_preview_mesh()));
     }
@@ -426,7 +423,7 @@ fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
         chunk.pending_modifications.clear();
         chunk.mark_dirty();
         info!(
-            "Applied {} voxel modification(s), chunk marked dirty for re-mesh",
+            "Applied {} block modification(s), chunk marked dirty for re-mesh",
             count
         );
     }
@@ -436,23 +433,9 @@ fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
 // Placement position search
 // ---------------------------------------------------------------------------
 
-/// Maximum distance (in world units) for the placement ray march.
 const BUILD_RAY_MAX_DIST: f32 = 6.0;
-/// Step size for the ray march (smaller = more precise but slower).
 const BUILD_RAY_STEP: f32 = 0.25;
 
-/// Find a valid build position by marching a ray from the player's eye along
-/// the camera forward direction.
-///
-/// The ray uses the full 3D camera direction so looking up/down influences
-/// where the block will be placed. Each sample point is converted into every
-/// chunk's local coordinate system (via inverse transform) so this works with
-/// arbitrarily positioned/rotated chunks.
-///
-/// When the ray hits a filled voxel, the *previous* empty sample is used as
-/// the candidate. If no ray hit occurs, the last sample point is used instead.
-/// In both cases, if the candidate isn't directly buildable we search downward
-/// in chunk-local space for the nearest valid position.
 fn find_placement_position(
     player_pos: Vec3,
     camera_forward: Vec3,
@@ -463,30 +446,25 @@ fn find_placement_position(
         return None;
     }
 
-    // Eye position: offset slightly above player origin so the ray starts
-    // roughly at head height and doesn't immediately intersect the ground.
     let ray_origin = player_pos + Vec3::Y * 0.5;
 
     let steps = ((BUILD_RAY_MAX_DIST / BUILD_RAY_STEP) as usize).max(1);
 
-    // Track the previous sample's world position (the last position that was
-    // either empty or out-of-chunk, so we can place *before* a hit).
     let mut prev_world = ray_origin;
 
     for i in 1..=steps {
         let t = i as f32 * BUILD_RAY_STEP;
         let sample_world = ray_origin + ray_dir * t;
 
-        // Check every chunk for a hit at this sample point.
         for (chunk_entity, chunk, chunk_transform) in chunks.iter() {
             let local = chunk_transform
                 .compute_affine()
                 .inverse()
                 .transform_point3(sample_world);
 
-            let vx = (local.x / VOXEL_WIDTH).floor() as i32;
-            let vy = (local.y / VOXEL_HEIGHT).floor() as i32;
-            let vz = (local.z / VOXEL_WIDTH).floor() as i32;
+            let vx = (local.x / VOXEL_SIZE).floor() as i32;
+            let vy = (local.y / VOXEL_SIZE).floor() as i32;
+            let vz = (local.z / VOXEL_SIZE).floor() as i32;
 
             if vx < 0 || vy < 0 || vz < 0 {
                 continue;
@@ -496,16 +474,12 @@ fn find_placement_position(
                 continue;
             }
 
-            if chunk.data.get(ux, uy, uz).is_filled() {
-                // We hit something — try to place at the *previous* sample
-                // position (the last point that was empty / outside).
+            if chunk.data.is_occupied(ux, uy, uz) {
                 if let Some(pos) =
                     try_place_at_world(prev_world, chunks)
                 {
                     return Some(pos);
                 }
-                // If that didn't work, try placing on top of the hit voxel
-                // by searching upward.
                 if let Some(pos) = search_down_for_build(ux, uy, uz, chunk, chunk_entity) {
                     return Some(pos);
                 }
@@ -515,12 +489,9 @@ fn find_placement_position(
         prev_world = sample_world;
     }
 
-    // No hit along the ray — use the final sample point and search downward.
     try_place_at_world(prev_world, chunks)
 }
 
-/// Convert a world-space point into chunk-local voxel coords and try to find a
-/// buildable position, searching downward if the exact voxel isn't buildable.
 fn try_place_at_world(
     world_pos: Vec3,
     chunks: &Query<(Entity, &Chunk, &Transform)>,
@@ -531,9 +502,9 @@ fn try_place_at_world(
             .inverse()
             .transform_point3(world_pos);
 
-        let vx = (local.x / VOXEL_WIDTH).floor() as i32;
-        let vy = (local.y / VOXEL_HEIGHT).floor() as i32;
-        let vz = (local.z / VOXEL_WIDTH).floor() as i32;
+        let vx = (local.x / VOXEL_SIZE).floor() as i32;
+        let vy = (local.y / VOXEL_SIZE).floor() as i32;
+        let vz = (local.z / VOXEL_SIZE).floor() as i32;
 
         if vx < 0 || vy < 0 || vz < 0 {
             continue;
@@ -543,7 +514,9 @@ fn try_place_at_world(
             continue;
         }
 
-        if chunk.data.can_build_at(ux, uy, uz) {
+        let (ux, uy, uz) = (ux & !1, uy, uz & !1);
+
+        if chunk.data.can_place_std(ux, uy, uz) {
             return Some(BuildPos {
                 x: ux,
                 y: uy,
@@ -552,7 +525,6 @@ fn try_place_at_world(
             });
         }
 
-        // Search downward for a valid build position.
         if let Some(pos) = search_down_for_build(ux, uy, uz, chunk, chunk_entity) {
             return Some(pos);
         }
@@ -560,9 +532,6 @@ fn try_place_at_world(
     None
 }
 
-/// Starting from `(x, y, z)`, search downward (decreasing Y) for the first
-/// voxel where we can build. Also checks one voxel *above* any filled voxel
-/// we encounter, since that's the natural "on top of" placement.
 fn search_down_for_build(
     x: usize,
     start_y: usize,
@@ -570,8 +539,9 @@ fn search_down_for_build(
     chunk: &Chunk,
     chunk_entity: Entity,
 ) -> Option<BuildPos> {
-    // First check upward from the start position (common case: on top of a block).
-    if start_y + 1 < CHUNK_Y && chunk.data.can_build_at(x, start_y + 1, z) {
+    let x = x & !1;
+    let z = z & !1;
+    if start_y + 1 < CHUNK_Y && chunk.data.can_place_std(x, start_y + 1, z) {
         return Some(BuildPos {
             x,
             y: start_y + 1,
@@ -580,9 +550,8 @@ fn search_down_for_build(
         });
     }
 
-    // Walk downward looking for a buildable spot.
     for y in (0..=start_y).rev() {
-        if chunk.data.can_build_at(x, y, z) {
+        if chunk.data.can_place_std(x, y, z) {
             return Some(BuildPos {
                 x,
                 y,
@@ -590,9 +559,8 @@ fn search_down_for_build(
                 chunk_entity,
             });
         }
-        // If we hit a filled voxel, try the slot directly above it.
-        if chunk.data.get(x, y, z).is_filled() && y + 1 <= start_y {
-            if chunk.data.can_build_at(x, y + 1, z) {
+        if chunk.data.is_occupied(x, y, z) && y + 1 <= start_y {
+            if chunk.data.can_place_std(x, y + 1, z) {
                 return Some(BuildPos {
                     x,
                     y: y + 1,
@@ -612,17 +580,16 @@ fn search_down_for_build(
 fn build_wedge_preview_mesh() -> Mesh {
     use bevy::mesh::{Indices, PrimitiveTopology};
 
-    let hw = VOXEL_WIDTH * 0.5;
-    let hh = VOXEL_HEIGHT * 0.5;
+    let h = VOXEL_SIZE;
 
     // Wedge: back wall (south/-Z) is tall, slope descends toward north/+Z
     let positions = vec![
-        [-hw, -hh, -hw], // 0: back-left bottom
-        [hw, -hh, -hw],  // 1: back-right bottom
-        [hw, -hh, hw],   // 2: front-right bottom
-        [-hw, -hh, hw],  // 3: front-left bottom
-        [-hw, hh, -hw],  // 4: back-left top
-        [hw, hh, -hw],   // 5: back-right top
+        [-h, -h, -h], // 0: back-left bottom
+        [h, -h, -h],  // 1: back-right bottom
+        [h, -h, h],   // 2: front-right bottom
+        [-h, -h, h],  // 3: front-left bottom
+        [-h, h, -h],  // 4: back-left top
+        [h, h, -h],   // 5: back-right top
     ];
 
     let indices = vec![

@@ -37,9 +37,9 @@ pub struct ChunkMeshResult {
 #[inline]
 fn to_world(v: Vec3, wx: f32, wy: f32, wz: f32) -> Vec3 {
     Vec3::new(
-        wx + v.x * VOXEL_WIDTH,
-        wy + v.y * VOXEL_HEIGHT,
-        wz + v.z * VOXEL_WIDTH,
+        wx + v.x * VOXEL_SIZE,
+        wy + v.y * VOXEL_SIZE,
+        wz + v.z * VOXEL_SIZE,
     )
 }
 
@@ -51,51 +51,116 @@ fn compute_world_normal(world_verts: &[Vec3], triangles: &[[usize; 3]]) -> Vec3 
     -(b - a).cross(c - a).normalize_or_zero()
 }
 
-fn neighbor_occludes(
+/// Check if a face should be culled based on CellCover occlusion.
+///
+/// For each CellCover entry on the face:
+/// - Compute the world cell position (block origin + cell offset)
+/// - Check the neighbor cell in that direction
+/// - Resolve its block and check if it has a CellCover on the opposite side with full=true
+///
+/// Face is occluded only if ALL coverage entries are occluded.
+fn face_is_occluded(
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+    shapes: &ShapeTable,
+    block: &Block,
+    face: &BlockFace,
+    facing: Facing,
+    size: (u8, u8, u8),
+) -> bool {
+    if face.cell_coverage.is_empty() {
+        return false; // diagonal faces are never culled
+    }
+
+    let (ox, oy, oz) = block.origin;
+
+    for cover in &face.cell_coverage {
+        // Rotate the cell offset by the block's facing
+        let rotated_cell = rotate_cell_offset(cover.cell, facing, size);
+        let cell_x = ox as i32 + rotated_cell.0 as i32;
+        let cell_y = oy as i32 + rotated_cell.1 as i32;
+        let cell_z = oz as i32 + rotated_cell.2 as i32;
+
+        // Rotate the face side by the block's facing
+        let world_side = cover.side.rotated_by(facing);
+        let Some((dx, dy, dz)) = world_side.neighbor_offset() else {
+            return false; // FaceSide::None
+        };
+
+        let nx = cell_x + dx;
+        let ny = cell_y + dy;
+        let nz = cell_z + dz;
+
+        if !neighbor_cell_occludes(data, neighbors, shapes, nx, ny, nz, world_side.opposite()) {
+            return false; // at least one coverage entry is not occluded
+        }
+    }
+
+    true // all coverage entries are occluded
+}
+
+/// Check if the block at (nx, ny, nz) has a cell that fully covers `side_facing_us`.
+///
+/// This does per-cell checking: it resolves which specific cell within the neighbor
+/// block is at position (nx, ny, nz) and checks only that cell's coverage.
+fn neighbor_cell_occludes(
     data: &ChunkData,
     neighbors: &ChunkNeighbors,
     shapes: &ShapeTable,
     nx: i32, ny: i32, nz: i32,
     side_facing_us: FaceSide,
 ) -> bool {
-    let neighbor = get_voxel(data, neighbors, nx, ny, nz);
-    if neighbor.is_empty() {
-        return false;
-    }
-    let Some(neighbor_shape) = shapes.get(neighbor.shape_index()) else {
+    let Some((shape_idx, facing, origin)) = resolve_block_info_at(data, neighbors, nx, ny, nz) else {
         return false;
     };
-    neighbor_shape.occlusion.occludes_world_side(side_facing_us, neighbor.facing())
-}
+    let Some(shape) = shapes.get(shape_idx) else {
+        return false;
+    };
 
-fn opposite_side(side: FaceSide) -> FaceSide {
-    match side {
-        FaceSide::Top => FaceSide::Bottom,
-        FaceSide::Bottom => FaceSide::Top,
-        FaceSide::North => FaceSide::South,
-        FaceSide::South => FaceSide::North,
-        FaceSide::East => FaceSide::West,
-        FaceSide::West => FaceSide::East,
-        FaceSide::None => FaceSide::None,
-    }
-}
+    // Compute which cell within the neighbor block this position corresponds to.
+    // resolve_block_info_at returns the origin in the neighbor's local chunk coords.
+    // We need the cell position in the same coord space as the origin.
+    let in_x = nx >= 0 && nx < CHUNK_X as i32;
+    let in_y = ny >= 0 && ny < CHUNK_Y as i32;
+    let in_z = nz >= 0 && nz < CHUNK_Z as i32;
 
-/// Should this face be culled (hidden by neighbor)?
-fn face_is_occluded(
-    data: &ChunkData,
-    neighbors: &ChunkNeighbors,
-    shapes: &ShapeTable,
-    x: usize, y: usize, z: usize,
-    rotated_side: FaceSide,
-) -> bool {
-    if let Some((dx, dy, dz)) = rotated_side.neighbor_offset() {
-        let nx = x as i32 + dx;
-        let ny = y as i32 + dy;
-        let nz = z as i32 + dz;
-        neighbor_occludes(data, neighbors, shapes, nx, ny, nz, opposite_side(rotated_side))
+    let (lx, ly, lz) = if in_x && in_y && in_z {
+        (nx, ny, nz)
     } else {
-        false
+        let dx = if nx < 0 { -1 } else if nx >= CHUNK_X as i32 { 1 } else { 0 };
+        let dy = if ny < 0 { -1 } else if ny >= CHUNK_Y as i32 { 1 } else { 0 };
+        let dz = if nz < 0 { -1 } else if nz >= CHUNK_Z as i32 { 1 } else { 0 };
+        (nx - dx * CHUNK_X as i32, ny - dy * CHUNK_Y as i32, nz - dz * CHUNK_Z as i32)
+    };
+
+    let world_offset = (
+        (lx as u8).wrapping_sub(origin.0),
+        (ly as u8).wrapping_sub(origin.1),
+        (lz as u8).wrapping_sub(origin.2),
+    );
+
+    for face in &shape.faces {
+        for cover in &face.cell_coverage {
+            let rotated_cell = rotate_cell_offset(cover.cell, facing, shape.size);
+            let rotated_side = cover.side.rotated_by(facing);
+            if rotated_cell == world_offset && rotated_side == side_facing_us && cover.full {
+                return true;
+            }
+        }
     }
+    false
+}
+
+/// Rotate a cell offset within a block by the block's facing.
+/// For 1x1x1 blocks this is always (0,0,0) so it's a no-op.
+fn rotate_cell_offset(cell: (u8, u8, u8), facing: Facing, size: (u8, u8, u8)) -> (u8, u8, u8) {
+    if facing == Facing::North {
+        return cell;
+    }
+    // Rotate the center of the cell using the block's rotation
+    let center = Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 0.5, cell.2 as f32 + 0.5);
+    let rotated = facing.rotate_block_point(center, size);
+    (rotated.x.floor() as u8, rotated.y.floor() as u8, rotated.z.floor() as u8)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +202,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 }
 
 // ---------------------------------------------------------------------------
-// LOD mesh (unchanged — simple, no chamfer)
+// LOD mesh (simple, no chamfer)
 // ---------------------------------------------------------------------------
 
 fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> ChunkMeshData {
@@ -146,39 +211,42 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
     let mut uvs = Vec::new();
     let mut indices = Vec::new();
 
-    for y in 0..CHUNK_Y {
-        for z in 0..CHUNK_Z {
-            for x in 0..CHUNK_X {
-                let voxel = data.get(x, y, z);
-                if voxel.is_empty() { continue; }
-                let Some(shape) = shapes.get(voxel.shape_index()) else { continue; };
-                let facing = voxel.facing();
-                let wx = x as f32 * VOXEL_WIDTH;
-                let wy = y as f32 * VOXEL_HEIGHT;
-                let wz = z as f32 * VOXEL_WIDTH;
+    for (block_idx, block) in data.blocks.iter().enumerate() {
+        let Some(shape) = shapes.get(block.shape) else { continue; };
+        let facing = block.facing;
+        let (ox, oy, oz) = block.origin;
+        let wx = ox as f32 * VOXEL_SIZE;
+        let wy = oy as f32 * VOXEL_SIZE;
+        let wz = oz as f32 * VOXEL_SIZE;
 
-                for face in &shape.faces {
-                    let rotated_side = face.side.rotated_by(facing);
-                    if face_is_occluded(data, neighbors, shapes, x, y, z, rotated_side) { continue; }
+        // Verify this block still owns at least one cell (not removed)
+        let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
+            let cx = ox as usize + dx as usize;
+            let cy = oy as usize + dy as usize;
+            let cz = oz as usize + dz as usize;
+            data.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
+        });
+        if !has_cells { continue; }
 
-                    let base_index = positions.len() as u32;
-                    let world_verts: Vec<Vec3> = face.vertices.iter()
-                        .map(|v| to_world(facing.rotate_point(*v), wx, wy, wz))
-                        .collect();
-                    let world_normal = compute_world_normal(&world_verts, &face.triangles);
+        for face in &shape.faces {
+            if face_is_occluded(data, neighbors, shapes, block, face, facing, shape.size) { continue; }
 
-                    for wv in &world_verts {
-                        positions.push(wv.to_array());
-                        normals.push(world_normal.to_array());
-                    }
-                    let uv_map = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-                    for i in 0..face.vertices.len() { uvs.push(uv_map[i % 4]); }
-                    for tri in &face.triangles {
-                        indices.push(base_index + tri[2] as u32);
-                        indices.push(base_index + tri[1] as u32);
-                        indices.push(base_index + tri[0] as u32);
-                    }
-                }
+            let base_index = positions.len() as u32;
+            let world_verts: Vec<Vec3> = face.vertices.iter()
+                .map(|v| to_world(facing.rotate_block_point(*v, shape.size), wx, wy, wz))
+                .collect();
+            let world_normal = compute_world_normal(&world_verts, &face.triangles);
+
+            for wv in &world_verts {
+                positions.push(wv.to_array());
+                normals.push(world_normal.to_array());
+            }
+            let uv_map = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+            for i in 0..face.vertices.len() { uvs.push(uv_map[i % 4]); }
+            for tri in &face.triangles {
+                indices.push(base_index + tri[2] as u32);
+                indices.push(base_index + tri[1] as u32);
+                indices.push(base_index + tri[0] as u32);
             }
         }
     }
@@ -205,7 +273,7 @@ pub struct SolidFace {
     /// Indices into SolidMesh.positions (3 or 4 verts).
     pub verts: Vec<u32>,
     pub normal: Vec3,
-    /// Source voxel position in chunk coords.
+    /// Source block origin position in chunk coords.
     pub voxel: (usize, usize, usize),
 }
 
@@ -238,42 +306,43 @@ pub fn build_solid_mesh_public(data: &ChunkData, neighbors: &ChunkNeighbors, sha
 fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> SolidMesh {
     let mut mesh = SolidMesh::new();
 
-    for y in 0..CHUNK_Y {
-        for z in 0..CHUNK_Z {
-            for x in 0..CHUNK_X {
-                let voxel = data.get(x, y, z);
-                if voxel.is_empty() { continue; }
-                let Some(shape) = shapes.get(voxel.shape_index()) else { continue; };
-                let facing = voxel.facing();
-                let wx = x as f32 * VOXEL_WIDTH;
-                let wy = y as f32 * VOXEL_HEIGHT;
-                let wz = z as f32 * VOXEL_WIDTH;
+    for (block_idx, block) in data.blocks.iter().enumerate() {
+        let Some(shape) = shapes.get(block.shape) else { continue; };
+        let facing = block.facing;
+        let (ox, oy, oz) = block.origin;
+        let wx = ox as f32 * VOXEL_SIZE;
+        let wy = oy as f32 * VOXEL_SIZE;
+        let wz = oz as f32 * VOXEL_SIZE;
 
-                for face in &shape.faces {
-                    let rotated_side = face.side.rotated_by(facing);
-                    if face_is_occluded(data, neighbors, shapes, x, y, z, rotated_side) { continue; }
+        // Verify this block still owns at least one cell
+        let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
+            let cx = ox as usize + dx as usize;
+            let cy = oy as usize + dy as usize;
+            let cz = oz as usize + dz as usize;
+            data.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
+        });
+        if !has_cells { continue; }
 
-                    let world_verts: Vec<Vec3> = face.vertices.iter()
-                        .map(|v| to_world(facing.rotate_point(*v), wx, wy, wz))
-                        .collect();
-                    let normal = compute_world_normal(&world_verts, &face.triangles);
-                    let vert_indices: Vec<u32> = world_verts.iter()
-                        .map(|v| mesh.add_vert(*v))
-                        .collect();
+        for face in &shape.faces {
+            if face_is_occluded(data, neighbors, shapes, block, face, facing, shape.size) { continue; }
 
-                    mesh.faces.push(SolidFace {
-                        verts: vert_indices,
-                        normal,
-                        voxel: (x, y, z),
-                    });
-                }
-            }
+            let world_verts: Vec<Vec3> = face.vertices.iter()
+                .map(|v| to_world(facing.rotate_block_point(*v, shape.size), wx, wy, wz))
+                .collect();
+            let normal = compute_world_normal(&world_verts, &face.triangles);
+            let vert_indices: Vec<u32> = world_verts.iter()
+                .map(|v| mesh.add_vert(*v))
+                .collect();
+
+            mesh.faces.push(SolidFace {
+                verts: vert_indices,
+                normal,
+                voxel: (ox as usize, oy as usize, oz as usize),
+            });
         }
     }
 
-    // Remove back-to-back faces: pairs of faces that share the exact same
-    // vertex set (e.g., adjacent wedge triangles facing opposite directions).
-    // These are internal surfaces hidden by the slope above.
+    // Remove back-to-back faces
     let mut face_groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
     for (fi, face) in mesh.faces.iter().enumerate() {
         let mut key = face.verts.clone();
@@ -306,11 +375,9 @@ fn edge_key(a: u32, b: u32) -> (u32, u32) {
 }
 
 struct EdgeInfo {
-    /// Which faces share this edge (indices into SolidMesh.faces).
     faces: Vec<usize>,
 }
 
-/// Dot-product threshold: edges with adjacent normals below this are "sharp".
 const SHARP_DOT_THRESHOLD: f32 = 0.985;
 
 fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
@@ -327,16 +394,15 @@ fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
 
 fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
     if edge.faces.len() < 2 {
-        return true; // boundary edge — always sharp
+        return true;
     }
     let n0 = mesh.faces[edge.faces[0]].normal;
     let n1 = mesh.faces[edge.faces[1]].normal;
     n0.dot(n1) < SHARP_DOT_THRESHOLD
 }
 
-/// Check if a boundary edge lies on a chunk face where a filled neighbor voxel
-/// would continue the surface. If so, the edge is a seam — not a real boundary —
-/// and should not be chamfered.
+/// Check if a boundary edge lies on a chunk face where a filled neighbor cell
+/// would continue the surface.
 fn is_boundary_edge_at_neighbor_seam(
     ev0: u32,
     ev1: u32,
@@ -349,21 +415,20 @@ fn is_boundary_edge_at_neighbor_seam(
     let p1 = solid.positions[ev1 as usize];
     let (vx, vy, vz) = face.voxel;
 
-    // Check each chunk boundary axis. Both vertices must sit on the same
-    // boundary plane, and the neighbor voxel across that boundary must be filled.
+    let chunk_size = CHUNK_X as f32 * VOXEL_SIZE;
+    let chunk_height = CHUNK_Y as f32 * VOXEL_SIZE;
+
     let checks: [(f32, f32, i32, i32, i32); 6] = [
-        // (coord_of_v0, boundary_value, dx, dy, dz)
-        (p0.x, 0.0,                         -1, 0, 0),  // -X boundary
-        (p0.x, CHUNK_X as f32 * VOXEL_WIDTH,  1, 0, 0),  // +X boundary
-        (p0.y, 0.0,                          0, -1, 0),  // -Y boundary
-        (p0.y, CHUNK_Y as f32 * VOXEL_HEIGHT,  0, 1, 0),  // +Y boundary
-        (p0.z, 0.0,                          0, 0, -1),  // -Z boundary
-        (p0.z, CHUNK_Z as f32 * VOXEL_WIDTH,  0, 0,  1),  // +Z boundary
+        (p0.x, 0.0,          -1, 0, 0),
+        (p0.x, chunk_size,    1, 0, 0),
+        (p0.y, 0.0,           0, -1, 0),
+        (p0.y, chunk_height,  0, 1, 0),
+        (p0.z, 0.0,           0, 0, -1),
+        (p0.z, chunk_size,    0, 0,  1),
     ];
 
     let eps = 1e-4;
     for (_, boundary, dx, dy, dz) in checks {
-        // Pick the right coordinate component for each axis
         let (c0, c1) = match (dx != 0, dy != 0) {
             (true, _)     => (p0.x, p1.x),
             (_, true)     => (p0.y, p1.y),
@@ -373,8 +438,7 @@ fn is_boundary_edge_at_neighbor_seam(
             let nx = vx as i32 + dx;
             let ny = vy as i32 + dy;
             let nz = vz as i32 + dz;
-            let neighbor_voxel = get_voxel(data, neighbors, nx, ny, nz);
-            if neighbor_voxel.is_filled() {
+            if is_cell_occupied(data, neighbors, nx, ny, nz) {
                 return true;
             }
         }
@@ -386,7 +450,6 @@ fn is_boundary_edge_at_neighbor_seam(
 // Sutherland-Hodgman polygon clipping
 // ---------------------------------------------------------------------------
 
-/// Clip a convex polygon against a half-plane. Keeps the side where `plane_normal` points.
 fn clip_polygon_by_plane(polygon: &[Vec3], plane_point: Vec3, plane_normal: Vec3) -> Vec<Vec3> {
     if polygon.len() < 3 { return polygon.to_vec(); }
     let mut output = Vec::new();
@@ -398,15 +461,12 @@ fn clip_polygon_by_plane(polygon: &[Vec3], plane_point: Vec3, plane_normal: Vec3
         let de = (e - plane_point).dot(plane_normal);
 
         if de >= -1e-6 {
-            // E is inside
             if ds < -1e-6 {
-                // S is outside → add intersection
                 let t = ds / (ds - de);
                 output.push(s.lerp(e, t));
             }
             output.push(e);
         } else if ds >= -1e-6 {
-            // E is outside, S is inside → add intersection only
             let t = ds / (ds - de);
             output.push(s.lerp(e, t));
         }
@@ -414,13 +474,10 @@ fn clip_polygon_by_plane(polygon: &[Vec3], plane_point: Vec3, plane_normal: Vec3
     output
 }
 
-/// A clip plane from a chamfer strip, used to trim neighboring faces.
 struct ChamferClipPlane {
     point: Vec3,
     normal: Vec3,
-    /// The two faces forming this chamfer (don't clip these).
     faces: [usize; 2],
-    /// The edge vertices (for lookup).
     verts: [u32; 2],
 }
 
@@ -432,13 +489,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     let solid = build_solid_mesh(data, neighbors, shapes);
     let edge_graph = build_edge_graph(&solid);
 
-    // Classify edges — boundary edges at chunk seams with filled neighbors are NOT sharp
     let sharp_set: HashMap<(u32, u32), &EdgeInfo> = edge_graph.iter()
         .filter(|(key, info)| {
             if !is_sharp(info, &solid) {
                 return false;
             }
-            // Boundary edge: suppress chamfer if it's at a neighbor seam
             if info.faces.len() == 1 {
                 let (ev0, ev1) = **key;
                 let face = &solid.faces[info.faces[0]];
@@ -451,7 +506,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         .map(|(&key, info)| (key, info))
         .collect();
 
-    // Build vertex → faces map for clipping chamfer vertices against adjacent faces
     let mut vertex_faces: Vec<Vec<usize>> = vec![Vec::new(); solid.positions.len()];
     for (fi, face) in solid.faces.iter().enumerate() {
         for &vi in &face.verts {
@@ -493,9 +547,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     // ---------------------------------------------------------------
     // Pass 2b: collect chamfer strip planes per owning voxel
     // ---------------------------------------------------------------
-    // For each interior sharp edge, compute the strip plane and associate
-    // it with the owning voxels. These planes will be used to clip inner
-    // faces of NEIGHBOR voxels.
     struct StripClip {
         point: Vec3,
         normal: Vec3,
@@ -503,7 +554,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         edge_verts: [u32; 2],
         aabb_min: Vec3,
         aabb_max: Vec3,
-        /// Dot product of the two face normals forming this chamfer
         face_normal_dot: f32,
     }
     let mut voxel_strip_clips: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
@@ -529,7 +579,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         let expected_out = (face_a.normal + face_b.normal).normalize_or_zero();
         let strip_normal = if strip_normal.dot(expected_out) < 0.0 { -strip_normal } else { strip_normal };
 
-        // Compute AABB of the strip quad, expanded by a small margin
         let margin = CHAMFER_WIDTH * 0.5;
         let strip_min = a0.min(a1).min(b0).min(b1) - Vec3::splat(margin);
         let strip_max = a0.max(a1).max(b0).max(b1) + Vec3::splat(margin);
@@ -542,13 +591,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             face_normal_dot: face_a.normal.dot(face_b.normal),
         });
 
-        // Associate with owning voxels
         for &v in &owning {
             voxel_strip_clips.entry(v).or_default().push(clip_idx);
         }
     }
 
-    // Build voxel → faces map
     let mut voxel_faces_map: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
     for (fi, face) in solid.faces.iter().enumerate() {
         voxel_faces_map.entry(face.voxel).or_default().push(fi);
@@ -567,10 +614,8 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         let normal_arr = face.normal.to_array();
         let inner = &all_inner[fi];
 
-        // Collect strip clip planes from NEIGHBOR voxels that might cross this face.
-        // For each axis-aligned neighbor of this face's voxel, gather their strip planes.
         let (vx, vy, vz) = face.voxel;
-        let mut clip_planes: Vec<(Vec3, Vec3)> = Vec::new(); // (point, normal)
+        let mut clip_planes: Vec<(Vec3, Vec3)> = Vec::new();
         for &(dx, dy, dz) in &[(-1i32,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)] {
             let nx = vx as i32 + dx;
             let ny = vy as i32 + dy;
@@ -581,15 +626,12 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             if let Some(clip_indices) = voxel_strip_clips.get(&nkey) {
                 for &ci in clip_indices {
                     let sc = &all_strip_clips[ci];
-                    // Only use strips owned by the neighbor (not our own voxel)
                     if sc.owning_voxels.contains(&face.voxel) { continue; }
-                    // Only clip against strips whose geometry extends past their
-                    // owning voxels' bounds (diagonal chamfer strips at corners).
                     let mut owner_min = Vec3::splat(f32::MAX);
                     let mut owner_max = Vec3::splat(f32::MIN);
                     for &(ovx, ovy, ovz) in &sc.owning_voxels {
-                        let lo = Vec3::new(ovx as f32 * VOXEL_WIDTH, ovy as f32 * VOXEL_HEIGHT, ovz as f32 * VOXEL_WIDTH);
-                        let hi = lo + Vec3::new(VOXEL_WIDTH, VOXEL_HEIGHT, VOXEL_WIDTH);
+                        let lo = Vec3::new(ovx as f32 * VOXEL_SIZE, ovy as f32 * VOXEL_SIZE, ovz as f32 * VOXEL_SIZE);
+                        let hi = lo + Vec3::splat(VOXEL_SIZE);
                         owner_min = owner_min.min(lo);
                         owner_max = owner_max.max(hi);
                     }
@@ -601,21 +643,18 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                         || sc.aabb_min.z < owner_min.z - margin
                         || sc.aabb_max.z > owner_max.z + margin;
                     if !extends { continue; }
-                    // Only clip if this face's AABB overlaps the strip's AABB
                     let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
                     let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();
                     let overlaps = face_min.x <= sc.aabb_max.x && face_max.x >= sc.aabb_min.x
                         && face_min.y <= sc.aabb_max.y && face_max.y >= sc.aabb_min.y
                         && face_min.z <= sc.aabb_max.z && face_max.z >= sc.aabb_min.z;
                     if !overlaps { continue; }
-                    // Keep the side AWAY from the chamfer interior
                     clip_planes.push((sc.point, -sc.normal));
                 }
             }
         }
 
         if clip_planes.is_empty() {
-            // No clipping needed
             let n = inner.len();
             let inner_base = positions.len() as u32;
             for i in 0..n {
@@ -630,14 +669,9 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                 indices.push(inner_base);
             }
         } else {
-            // Clip face polygon against neighbor chamfer strip planes.
-            // The strip normal points outward from the chamfer surface.
-            // Keep the side where the strip normal points (exterior).
             let mut polygon: Vec<Vec3> = inner.clone();
 
             for &(plane_point, plane_normal) in &clip_planes {
-                // Only clip if the face actually straddles this plane
-                // (some vertices inside, some outside). If all on keep side, skip.
                 let mut has_inside = false;
                 let mut has_outside = false;
                 for p in &polygon {
@@ -645,10 +679,8 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     if d < -1e-5 { has_outside = true; }
                     else { has_inside = true; }
                 }
-                if !has_outside { continue; } // all on keep side, no clip needed
+                if !has_outside { continue; }
                 if !has_inside {
-                    // All on clip side — entire face removed. This shouldn't happen
-                    // for faces that share a vertex with the strip edge.
                     warn!("Face {} entirely on clip side of strip plane (voxel={:?})", fi, face.voxel);
                     polygon.clear();
                     break;
@@ -658,7 +690,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             }
 
             if polygon.len() >= 3 {
-                // Remove near-duplicate vertices that create degenerate triangles
                 let mut clean_poly: Vec<Vec3> = Vec::new();
                 for &p in &polygon {
                     if clean_poly.last().map_or(true, |prev: &Vec3| (*prev - p).length_squared() > 1e-8) {
@@ -688,13 +719,12 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     }
 
     // ---------------------------------------------------------------
-    // Pass 3: emit chamfer strips per-edge (not per-face)
+    // Pass 3: emit chamfer strips per-edge
     // ---------------------------------------------------------------
     fn find_face_inner_at_vert(face: &SolidFace, inner: &[Vec3], vert: u32) -> Option<Vec3> {
         face.verts.iter().position(|&v| v == vert).map(|i| inner[i])
     }
 
-    /// Collect face indices from axis-aligned neighbor voxels (excluding owning voxels).
     fn collect_neighbor_clip_faces(
         chamfer_voxels: &[(usize, usize, usize)],
         voxel_faces_map: &HashMap<(usize, usize, usize), Vec<usize>>,
@@ -726,7 +756,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         if !sharp_set.contains_key(&edge_key(ev0, ev1)) { continue; }
 
         if info.faces.len() >= 2 {
-            // Interior sharp edge: chamfer strip connects both faces' inner vertices
             let fi_a = info.faces[0];
             let fi_b = info.faces[1];
             let face_a = &solid.faces[fi_a];
@@ -743,17 +772,13 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             let nb = face_b.normal;
             let expected_out = (na + nb).normalize_or_zero();
 
-            // Build strip polygon (quad)
             let tri_normal = (a1 - a0).cross(b0 - a0);
             let flipped = tri_normal.dot(expected_out) > 0.0;
-            let mut strip_poly = if flipped {
+            let strip_poly = if flipped {
                 vec![b0, b1, a1, a0]
             } else {
                 vec![a0, a1, b1, b0]
             };
-
-            // Clip strip against faces of neighboring voxels that the strip
-            // Strips extend past voxel bounds; neighbor faces are clipped to accommodate.
 
             if strip_poly.len() >= 3 {
                 let base = positions.len() as u32;
@@ -761,7 +786,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
                 for (pi, p) in strip_poly.iter().enumerate() {
                     positions.push(p.to_array());
-                    // Smooth fillet: interpolate normals from face A to face B
                     let n = if pi < strip_poly.len() / 2 {
                         n_first.to_array()
                     } else {
@@ -771,7 +795,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     uvs.push([0.0, 0.0]);
                     chamfer_offsets.push([0.0; 3]);
                 }
-                // Fan triangulation
                 for i in 1..strip_poly.len() - 1 {
                     indices.push(base + i as u32 + 1);
                     indices.push(base + i as u32);
@@ -779,7 +802,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                 }
             }
         } else {
-            // Boundary edge: strip from inner to outer (original position)
             let fi_a = info.faces[0];
             let face_a = &solid.faces[fi_a];
             let inner_a = &all_inner[fi_a];
@@ -797,13 +819,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             let expected_out = (na + outward).normalize_or_zero();
             let flipped = tri_normal.dot(expected_out) > 0.0;
 
-            let mut strip_poly = if flipped {
+            let strip_poly = if flipped {
                 vec![outer0, outer1, a1, a0]
             } else {
                 vec![a0, a1, outer1, outer0]
             };
-
-            // Boundary strips extend freely.
 
             if strip_poly.len() >= 3 {
                 let strip_normal = expected_out.to_array();
@@ -829,7 +849,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     for (vi, adj_faces) in vertex_faces.iter().enumerate() {
         if adj_faces.is_empty() { continue; }
 
-        // Count unique sharp edges at this vertex
         let mut sharp_edge_keys: Vec<(u32, u32)> = Vec::new();
         for &fi in adj_faces {
             let face = &solid.faces[fi];
@@ -846,9 +865,8 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
         if sharp_edge_keys.len() < 3 { continue; }
 
-        // Collect unique inner vertex positions + face normals from each adjacent face
         let outer = solid.positions[vi];
-        let mut ring: Vec<(Vec3, Vec3)> = Vec::new(); // (position, face_normal)
+        let mut ring: Vec<(Vec3, Vec3)> = Vec::new();
         for &fi in adj_faces {
             let face = &solid.faces[fi];
             if let Some(inner_pos) = find_face_inner_at_vert(face, &all_inner[fi], vi as u32) {
@@ -863,14 +881,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
         if ring.len() < 3 { continue; }
 
-        // Sort ring by angle around the outer vertex.
-        // Use average face normal as the sort axis.
         let axis = adj_faces.iter()
             .map(|&fi| solid.faces[fi].normal)
             .sum::<Vec3>()
             .normalize_or_zero();
 
-        // Build a stable reference frame perpendicular to axis
         let ref_dir = if axis.x.abs() < 0.9 {
             axis.cross(Vec3::X).normalize_or_zero()
         } else {
@@ -886,26 +901,21 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Triangulate the ring polygon (fan from ring[0])
         let ring_start = positions.len() as u32;
         for (rp, rn) in &ring {
             positions.push(rp.to_array());
-            // Fillet: use per-face normal for smooth interpolation
             normals.push(rn.to_array());
             uvs.push([0.0, 0.0]);
             chamfer_offsets.push([0.0; 3]);
         }
 
-        // Collect ALL adjacent face normals (inner faces + chamfer strips) for overlap check
         let mut adjacent_normals: Vec<Vec3> = Vec::new();
-        // Add normals from inner faces at this vertex
         for &fi in adj_faces {
             let n = solid.faces[fi].normal;
             if !adjacent_normals.iter().any(|an| an.dot(n).abs() > 0.99) {
                 adjacent_normals.push(n);
             }
         }
-        // Add normals from chamfer strips at this vertex
         for &ek in &sharp_edge_keys {
             if let Some(info) = sharp_set.get(&ek) {
                 if info.faces.len() >= 2 {
@@ -919,25 +929,20 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             }
         }
 
-        // Check winding of first triangle against axis
         let tri_normal = (ring[1].0 - ring[0].0).cross(ring[2].0 - ring[0].0);
         let flip = tri_normal.dot(axis) < 0.0;
 
         for i in 1..ring.len() - 1 {
-            // Skip fan triangles that are truly coplanar with an existing face
-            // or chamfer strip (same normal AND all vertices on the same plane).
             let va = ring[0].0;
             let vb = ring[i].0;
             let vc = ring[i + 1].0;
             let fan_normal = (vb - va).cross(vc - va).normalize_or_zero();
 
             let mut skip = false;
-            // Check against inner faces at this vertex
             for &fi in adj_faces {
                 let face = &solid.faces[fi];
                 let fn_normal = face.normal;
                 if fan_normal.dot(fn_normal).abs() < 0.99 { continue; }
-                // Same normal — check if triangle is on the face's plane
                 let face_point = solid.positions[face.verts[0] as usize];
                 let da = (va - face_point).dot(fn_normal).abs();
                 let db = (vb - face_point).dot(fn_normal).abs();

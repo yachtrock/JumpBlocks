@@ -69,8 +69,6 @@ fn quantize_pos(p: &[f32; 3]) -> (i32, i32, i32) {
 }
 
 /// Check edge sharing by POSITION (not vertex index).
-/// This correctly detects overlapping triangles that use separate vertices at the same position.
-/// Returns (boundary_edges, interior_edges, non_manifold_edges).
 fn count_edge_sharing(mesh: &ChunkMeshData) -> (usize, usize, usize) {
     type PosKey = (i32, i32, i32);
     type EdgeKey = (PosKey, PosKey);
@@ -134,67 +132,65 @@ fn make_shapes() -> ShapeTable {
     ShapeTable::default()
 }
 
-/// Place a single voxel at the center of a chunk (away from boundaries).
-fn single_voxel_chunk(voxel: Voxel) -> ChunkData {
+/// Place a single block at the center of a chunk (away from boundaries).
+fn single_block_chunk(shape: u16, facing: Facing, texture: u16) -> ChunkData {
     let mut data = ChunkData::new();
-    data.set(8, 16, 8, voxel);
-    data
-}
-
-/// Place a 2x2x2 block of voxels at the center.
-fn block_2x2x2(voxel: Voxel) -> ChunkData {
-    let mut data = ChunkData::new();
-    for x in 7..9 {
-        for y in 15..17 {
-            for z in 7..9 {
-                data.set(x, y, z, voxel);
-            }
-        }
+    if shape == SHAPE_WEDGE {
+        data.place_wedge(8, 16, 8, facing, texture);
+    } else {
+        data.place_std(8, 16, 8, shape, facing, texture);
     }
     data
 }
 
-/// Build the demo staircase + ramp chunk (same as world.rs).
+/// Place two adjacent cube blocks at the center (4x1x2 cells total).
+fn block_2x2x2() -> ChunkData {
+    let mut data = ChunkData::new();
+    data.place_std(8, 16, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 16, 8, SHAPE_CUBE, Facing::North, 1);
+    data
+}
+
+/// Build a demo chunk with ground, staircase, tower, and wedge ramp.
 fn demo_chunk() -> ChunkData {
     let mut data = ChunkData::new();
-    let smooth_voxel = Voxel::new(SHAPE_CUBE, Facing::North, 1);
-    let wedge_e = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
 
-    // Ground layer
-    for x in 0..10 {
-        for z in 0..10 {
-            data.set_filled(x, 0, z, true);
+    // Ground layer: 10x10 blocks = 20x20 cells = 10x10 world units
+    for bx in 0..10 {
+        for bz in 0..10 {
+            data.place_std(bx * 2, 0, bz * 2, SHAPE_CUBE, Facing::North, 1);
         }
     }
 
-    // Staircase
-    for step in 0..8 {
-        let y_base = 1 + step;
-        for x in 0..3 {
-            for z in 0..3 {
-                data.set(x + step, y_base, z + 3, smooth_voxel);
+    // Staircase: 4 steps, each 1 block tall (1 cell)
+    for step in 0..4usize {
+        let y = 1 + step;
+        for bx in 0..2 {
+            for bz in 0..2 {
+                data.place_std(bx * 2 + step * 4, y, bz * 2 + 6, SHAPE_CUBE, Facing::North, 1);
             }
         }
     }
 
-    // Tower
-    for y in 9..18 {
-        for x in 8..11 {
-            for z in 3..6 {
-                data.set(x, y, z, smooth_voxel);
+    // Tower at the top of staircase
+    for by in 0..4 {
+        for bx in 0..2 {
+            for bz in 0..2 {
+                data.place_std(bx * 2 + 16, 5 + by, bz * 2 + 6, SHAPE_CUBE, Facing::North, 1);
             }
         }
     }
 
-    // Wedge ramp
-    for step in 0..8 {
-        let y_base = 1 + step;
-        for z_off in 0..3 {
-            data.set(step, y_base, 7 + z_off, wedge_e);
+    // Wedge ramp: wedge blocks are 2 cells tall
+    for step in 0..4usize {
+        let y = 1 + step * 2;
+        for bz in 0..2 {
+            data.place_wedge(step * 4, y, bz * 2 + 14, Facing::East, 1);
         }
-        for y in 1..y_base {
-            for z_off in 0..3 {
-                data.set(step, y, 7 + z_off, smooth_voxel);
+        // Fill cubes underneath for steps > 0
+        for fill_y in 1..step * 2 + 1 {
+            for bz in 0..2 {
+                data.place_std(step * 4, fill_y, bz * 2 + 14, SHAPE_CUBE, Facing::North, 1);
             }
         }
     }
@@ -211,7 +207,7 @@ fn halfedge_single_cube_topology() {
     use crate::halfedge_chamfer::generate_halfedge_chamfer;
 
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::filled());
+    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
 
     assert_mesh_valid(&result, "he_cube");
@@ -221,27 +217,15 @@ fn halfedge_single_cube_topology() {
 
     eprintln!("halfedge cube: {} verts, {} tris", vert_count, tri_count);
 
-    // A single cube has 6 faces, 12 sharp edges, 8 corners.
-    // After chamfer:
-    //   6 inset face quads (each becomes smaller) = 6 faces
-    //   12 bevel faces (one per sharp edge, hexagons with A,B still present) = 12 faces
-    //   8 corner caps (one per corner, triangles) = 8 faces
-    //   Total faces = 26
-    //
-    // Without chamfer: 6 faces × 2 tris = 12 tris
-    // With chamfer: should be significantly more.
     assert!(tri_count > 12,
         "chamfered cube should have more than 12 tris, got {}", tri_count);
 
-    // Check no degenerate triangles
     assert_no_degenerate_triangles(&result, "he_cube");
 
-    // Check boundary edges (should be 0 for a closed mesh)
     let (boundary, interior, non_manifold) = count_edge_sharing(&result);
     eprintln!("halfedge cube edges: boundary={}, interior={}, non_manifold={}", boundary, interior, non_manifold);
     assert!(non_manifold == 0,
         "halfedge cube should have no non-manifold edges, got {}", non_manifold);
-    // Boundary edges indicate holes — ideally 0 for a floating cube
     if boundary > 0 {
         eprintln!("WARNING: halfedge cube has {} boundary edges (holes)", boundary);
         dump_boundary_edges(&result, "he_cube");
@@ -253,7 +237,7 @@ fn halfedge_single_cube_no_boundary() {
     use crate::halfedge_chamfer::generate_halfedge_chamfer;
 
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::filled());
+    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
 
     let (boundary, _, _) = count_edge_sharing(&result);
@@ -266,7 +250,7 @@ fn halfedge_single_wedge_topology() {
     use crate::halfedge_chamfer::generate_halfedge_chamfer;
 
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+    let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
     let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
 
     assert_mesh_valid(&result, "he_wedge");
@@ -288,8 +272,8 @@ fn halfedge_wedge_on_cube_topology() {
 
     let shapes = make_shapes();
     let mut data = ChunkData::new();
-    data.set(8, 15, 8, Voxel::new(SHAPE_CUBE, Facing::North, 1));
-    data.set(8, 16, 8, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_wedge(8, 15, 8, Facing::East, 1);
     let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
 
     assert_mesh_valid(&result, "he_woc");
@@ -310,7 +294,7 @@ fn halfedge_wedge_on_cube_topology() {
 #[test]
 fn single_cube_mesh_valid() {
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::filled());
+    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     assert_mesh_valid(&result.full_res, "cube full_res");
@@ -320,11 +304,10 @@ fn single_cube_mesh_valid() {
 #[test]
 fn single_cube_watertight() {
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::filled());
+    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     let (boundary, _interior, non_manifold) = count_edge_sharing(&result.full_res);
-    // Report but don't fail yet — watertight is aspirational for now
     if boundary > 0 || non_manifold > 0 {
         eprintln!("single_cube_watertight: {} boundary edges, {} non-manifold edges",
             boundary, non_manifold);
@@ -334,7 +317,7 @@ fn single_cube_watertight() {
 #[test]
 fn single_wedge_mesh_valid() {
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+    let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     assert_mesh_valid(&result.full_res, "wedge full_res");
@@ -345,7 +328,7 @@ fn single_wedge_mesh_valid() {
 fn single_wedge_all_facings_valid() {
     let shapes = make_shapes();
     for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
-        let data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, facing, 1));
+        let data = single_block_chunk(SHAPE_WEDGE, facing, 1);
         let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
         let label = format!("wedge_{:?}", facing);
 
@@ -357,7 +340,7 @@ fn single_wedge_all_facings_valid() {
 #[test]
 fn adjacent_cubes_mesh_valid() {
     let shapes = make_shapes();
-    let data = block_2x2x2(Voxel::filled());
+    let data = block_2x2x2();
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     assert_mesh_valid(&result.full_res, "2x2x2 cubes full_res");
@@ -368,19 +351,16 @@ fn adjacent_cubes_mesh_valid() {
 fn adjacent_cubes_no_internal_faces() {
     let shapes = make_shapes();
 
-    // Single cube should have more faces than 2 adjacent cubes (internal faces culled)
-    let single = single_voxel_chunk(Voxel::filled());
+    let single = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let single_result = generate_chunk_mesh(&single, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
     let single_tris = single_result.lod.indices.len() / 3;
 
     let mut double = ChunkData::new();
-    double.set(8, 16, 8, Voxel::filled());
-    double.set(9, 16, 8, Voxel::filled());
+    double.place_std(8, 16, 8, SHAPE_CUBE, Facing::North, 1);
+    double.place_std(10, 16, 8, SHAPE_CUBE, Facing::North, 1);
     let double_result = generate_chunk_mesh(&double, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
     let double_tris = double_result.lod.indices.len() / 3;
 
-    // Two adjacent cubes: 12 faces each = 24 total, minus 2 shared = 20 faces = 10 tris... wait
-    // Actually: each cube has 6 faces = 12 tris. Two cubes share 1 face each side = 10 faces = 20 tris
     assert!(double_tris < single_tris * 2,
         "adjacent cubes should have fewer tris than 2x single: {} vs {}",
         double_tris, single_tris * 2);
@@ -390,11 +370,9 @@ fn adjacent_cubes_no_internal_faces() {
 fn adjacent_wedges_same_facing_valid() {
     let shapes = make_shapes();
     let mut data = ChunkData::new();
-    let wedge = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
-    // Three wedges in a row (like the ramp)
-    data.set(8, 16, 7, wedge);
-    data.set(8, 16, 8, wedge);
-    data.set(8, 16, 9, wedge);
+    data.place_wedge(8, 16, 6, Facing::East, 1);
+    data.place_wedge(8, 16, 8, Facing::East, 1);
+    data.place_wedge(8, 16, 10, Facing::East, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     assert_mesh_valid(&result.full_res, "3 wedges full_res");
@@ -405,11 +383,8 @@ fn adjacent_wedges_same_facing_valid() {
 fn wedge_on_cube_valid() {
     let shapes = make_shapes();
     let mut data = ChunkData::new();
-    let cube = Voxel::new(SHAPE_CUBE, Facing::North, 1);
-    let wedge = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
-    // Cube with wedge on top (like ramp step)
-    data.set(8, 15, 8, cube);
-    data.set(8, 16, 8, wedge);
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_wedge(8, 15, 8, Facing::East, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     assert_mesh_valid(&result.full_res, "wedge_on_cube full_res");
@@ -425,7 +400,6 @@ fn demo_staircase_ramp_valid() {
     assert_mesh_valid(&result.full_res, "demo full_res");
     assert_mesh_valid(&result.lod, "demo lod");
 
-    // Sanity: should have a reasonable number of triangles
     let full_tris = result.full_res.indices.len() / 3;
     let lod_tris = result.lod.indices.len() / 3;
     assert!(full_tris > 100, "demo full_res should have >100 tris, got {}", full_tris);
@@ -439,7 +413,6 @@ fn collider_mesh_valid() {
     let data = demo_chunk();
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
-    // Collider should have vertices and valid triangle indices
     assert!(!result.collider_data.vertices.is_empty(), "collider has no vertices");
     assert!(!result.collider_data.indices.is_empty(), "collider has no indices");
     let n = result.collider_data.vertices.len() as u32;
@@ -464,32 +437,25 @@ fn chamfered_mesh_has_at_least_as_many_tris_as_lod() {
 
 #[test]
 fn chamfered_mesh_no_extra_holes() {
-    // The full_res mesh boundary edge count should be reasonable.
-    // Compare against a single floating cube (known good, fully closed = 0 boundary).
-    // For the demo chunk, boundary edges come from the chunk perimeter — clipping
-    // should not significantly increase them.
     let shapes = make_shapes();
 
-    // Single floating cube: should have 0 boundary edges (fully closed)
-    let cube_data = single_voxel_chunk(Voxel::filled());
+    let cube_data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let cube_result = generate_chunk_mesh(&cube_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
     let (cube_boundary, _, _) = count_edge_sharing(&cube_result.full_res);
     eprintln!("single cube boundary edges: {}", cube_boundary);
     assert!(cube_boundary == 0,
         "single floating cube should have 0 boundary edges, got {}", cube_boundary);
 
-    // Single floating wedge: should also be closed
-    let wedge_data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+    let wedge_data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
     let wedge_result = generate_chunk_mesh(&wedge_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
     let (wedge_boundary, _, _) = count_edge_sharing(&wedge_result.full_res);
     eprintln!("single wedge boundary edges: {}", wedge_boundary);
     assert!(wedge_boundary == 0,
         "single floating wedge should have 0 boundary edges, got {}", wedge_boundary);
 
-    // Wedge on cube: should be closed
     let mut woc_data = ChunkData::new();
-    woc_data.set(8, 15, 8, Voxel::new(SHAPE_CUBE, Facing::North, 1));
-    woc_data.set(8, 16, 8, Voxel::new(SHAPE_WEDGE, Facing::East, 1));
+    woc_data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    woc_data.place_wedge(8, 15, 8, Facing::East, 1);
     let woc_result = generate_chunk_mesh(&woc_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
     let (woc_boundary, _, _) = count_edge_sharing(&woc_result.full_res);
     eprintln!("wedge_on_cube boundary edges: {}", woc_boundary);
@@ -513,7 +479,7 @@ fn empty_chunk_produces_empty_mesh() {
 #[test]
 fn no_degenerate_triangles_single_cube() {
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::filled());
+    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     assert_no_degenerate_triangles(&result.full_res, "cube full_res");
@@ -533,13 +499,12 @@ fn no_degenerate_triangles_demo() {
 #[test]
 fn single_cube_edge_sharing() {
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::filled());
+    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
     eprintln!("single cube edges: boundary={}, interior={}, non_manifold={}",
         boundary, interior, non_manifold);
-    // Non-manifold edges are always bad
     assert!(non_manifold == 0,
         "single cube should have no non-manifold edges, got {}", non_manifold);
 }
@@ -601,7 +566,6 @@ fn dump_non_manifold_edges(mesh: &ChunkMeshData, label: &str) {
         [k.0 as f32 / 10000.0, k.1 as f32 / 10000.0, k.2 as f32 / 10000.0]
     }
 
-    // Collect edges → list of (triangle_index, triangle vertices)
     let mut edge_tris: HashMap<EdgeKey, Vec<(usize, [u32; 3])>> = HashMap::new();
     for i in (0..mesh.indices.len()).step_by(3) {
         let tri = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
@@ -633,8 +597,6 @@ fn dump_non_manifold_edges(mesh: &ChunkMeshData, label: &str) {
     }
 }
 
-/// Count triangles that overlap: same plane, shared edge, overlapping area.
-/// These cause z-fighting.
 fn count_coplanar_overlapping_tris(mesh: &ChunkMeshData) -> usize {
     use bevy::math::Vec3;
 
@@ -645,7 +607,6 @@ fn count_coplanar_overlapping_tris(mesh: &ChunkMeshData) -> usize {
         if a <= b { (a, b) } else { (b, a) }
     }
 
-    // Group triangles by their shared spatial edges
     let mut edge_tris: HashMap<EdgeKey, Vec<usize>> = HashMap::new();
     for i in (0..mesh.indices.len()).step_by(3) {
         let tri_idx = i / 3;
@@ -660,11 +621,9 @@ fn count_coplanar_overlapping_tris(mesh: &ChunkMeshData) -> usize {
 
     let mut overlapping = 0;
 
-    // For each edge with 3+ triangles, check for coplanar pairs
     for tris in edge_tris.values() {
         if tris.len() <= 2 { continue; }
 
-        // Compare all pairs for coplanarity
         for i in 0..tris.len() {
             for j in (i + 1)..tris.len() {
                 let ti = tris[i] * 3;
@@ -680,9 +639,7 @@ fn count_coplanar_overlapping_tris(mesh: &ChunkMeshData) -> usize {
                 let f = Vec3::from_array(mesh.positions[mesh.indices[tj + 2] as usize]);
                 let nj = (e - d).cross(f - d).normalize_or_zero();
 
-                // Coplanar: same normal direction AND all vertices on the same plane
                 if ni.dot(nj).abs() > 0.99 {
-                    // Check if all vertices of triangle j lie on triangle i's plane
                     let plane_dist_d = (d - a).dot(ni).abs();
                     let plane_dist_e = (e - a).dot(ni).abs();
                     let plane_dist_f = (f - a).dot(ni).abs();
@@ -697,14 +654,11 @@ fn count_coplanar_overlapping_tris(mesh: &ChunkMeshData) -> usize {
     overlapping
 }
 
-/// Check for triangle-triangle intersections (the actual cause of z-fighting).
-/// Only checks triangles that share at least one vertex position (for performance).
 fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
     use bevy::math::Vec3;
 
     type PosKey = (i32, i32, i32);
 
-    // Build vertex position → list of triangle indices
     let mut pos_tris: HashMap<PosKey, Vec<usize>> = HashMap::new();
     for i in (0..mesh.indices.len()).step_by(3) {
         let tri_idx = i / 3;
@@ -714,7 +668,6 @@ fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
         }
     }
 
-    // Collect candidate pairs (triangles sharing at least one vertex position)
     let mut checked: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let mut intersecting = 0;
 
@@ -725,7 +678,6 @@ fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
                 let pair = if ti < tj { (ti, tj) } else { (tj, ti) };
                 if !checked.insert(pair) { continue; }
 
-                // Get triangle vertices
                 let ai = ti * 3;
                 let aj = tj * 3;
                 let a0 = Vec3::from_array(mesh.positions[mesh.indices[ai] as usize]);
@@ -735,16 +687,11 @@ fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
                 let b1 = Vec3::from_array(mesh.positions[mesh.indices[aj + 1] as usize]);
                 let b2 = Vec3::from_array(mesh.positions[mesh.indices[aj + 2] as usize]);
 
-                // Skip if triangles share all vertices (same triangle, different winding)
                 let a_set: Vec<PosKey> = [a0, a1, a2].iter().map(|v| quantize_pos(&v.to_array())).collect();
                 let b_set: Vec<PosKey> = [b0, b1, b2].iter().map(|v| quantize_pos(&v.to_array())).collect();
                 let shared_verts = a_set.iter().filter(|v| b_set.contains(v)).count();
-                if shared_verts >= 3 { continue; } // identical triangle
-
-                // Triangles that share an edge (2 verts) are expected neighbors — skip
                 if shared_verts >= 2 { continue; }
 
-                // Check if triangles are coplanar and overlapping
                 let na = (a1 - a0).cross(a2 - a0);
                 let na_len = na.length();
                 if na_len < 1e-8 { continue; }
@@ -755,21 +702,16 @@ fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
                 if nb_len < 1e-8 { continue; }
                 let nb = nb / nb_len;
 
-                // Must be coplanar (parallel normals)
                 if na.dot(nb).abs() < 0.99 { continue; }
-
-                // Must be on the same plane
                 if (b0 - a0).dot(na).abs() > 0.001 { continue; }
 
-                // Project both triangles to 2D and check overlap
-                // Use the dominant axis for projection
                 let abs_n = na.abs();
                 let (u_axis, v_axis) = if abs_n.x >= abs_n.y && abs_n.x >= abs_n.z {
-                    (1, 2) // project onto YZ
+                    (1, 2)
                 } else if abs_n.y >= abs_n.z {
-                    (0, 2) // project onto XZ
+                    (0, 2)
                 } else {
-                    (0, 1) // project onto XY
+                    (0, 1)
                 };
 
                 let project = |v: Vec3| -> (f32, f32) {
@@ -779,7 +721,6 @@ fn count_intersecting_triangle_pairs(mesh: &ChunkMeshData) -> usize {
                 let pa = [project(a0), project(a1), project(a2)];
                 let pb = [project(b0), project(b1), project(b2)];
 
-                // Check if any vertex of B is inside triangle A (or vice versa)
                 if point_in_tri_2d(pb[0], pa) || point_in_tri_2d(pb[1], pa) || point_in_tri_2d(pb[2], pa)
                 || point_in_tri_2d(pa[0], pb) || point_in_tri_2d(pa[1], pb) || point_in_tri_2d(pa[2], pb)
                 {
@@ -807,7 +748,6 @@ fn point_in_tri_2d(p: (f32, f32), tri: [(f32, f32); 3]) -> bool {
     let d3 = sign_2d(px, py, tri[2].0, tri[2].1, tri[0].0, tri[0].1);
     let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
     let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-    // Strictly inside (not on edge — edge sharing is OK)
     !(has_neg && has_pos) && d1.abs() > 1e-4 && d2.abs() > 1e-4 && d3.abs() > 1e-4
 }
 
@@ -819,10 +759,8 @@ fn sign_2d(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
 fn wedge_on_cube_edge_sharing() {
     let shapes = make_shapes();
     let mut data = ChunkData::new();
-    let cube = Voxel::new(SHAPE_CUBE, Facing::North, 1);
-    let wedge = Voxel::new(SHAPE_WEDGE, Facing::East, 1);
-    data.set(8, 15, 8, cube);
-    data.set(8, 16, 8, wedge);
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_wedge(8, 15, 8, Facing::East, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
@@ -865,7 +803,7 @@ fn demo_edge_sharing() {
 #[test]
 fn single_wedge_edge_sharing() {
     let shapes = make_shapes();
-    let data = single_voxel_chunk(Voxel::new(SHAPE_WEDGE, Facing::North, 1));
+    let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
 
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
