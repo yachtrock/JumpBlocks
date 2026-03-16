@@ -148,6 +148,36 @@ impl ChunkData {
         self.is_filled(x as usize, y as usize, z as usize)
     }
 
+    /// Check whether a block can be placed at `(x, y, z)`.
+    ///
+    /// Rules:
+    /// - The target position must be empty.
+    /// - At least one orthogonal neighbor (±x, ±y, ±z) must be filled.
+    ///
+    /// Currently only checks within this chunk's bounds; out-of-bounds neighbors
+    /// are treated as empty. Once cross-chunk neighbor lookups exist, this method
+    /// should be extended to query adjacent chunks.
+    pub fn can_build_at(&self, x: usize, y: usize, z: usize) -> bool {
+        if x >= CHUNK_X || y >= CHUNK_Y || z >= CHUNK_Z {
+            return false;
+        }
+        if self.get(x, y, z).is_filled() {
+            return false;
+        }
+
+        let ix = x as i32;
+        let iy = y as i32;
+        let iz = z as i32;
+
+        // At least one orthogonal neighbor must be filled
+        self.is_neighbor_filled(ix - 1, iy, iz)
+            || self.is_neighbor_filled(ix + 1, iy, iz)
+            || self.is_neighbor_filled(ix, iy - 1, iz)
+            || self.is_neighbor_filled(ix, iy + 1, iz)
+            || self.is_neighbor_filled(ix, iy, iz - 1)
+            || self.is_neighbor_filled(ix, iy, iz + 1)
+    }
+
     /// Get voxel at signed coordinates. Out-of-bounds returns EMPTY.
     pub fn get_signed(&self, x: i32, y: i32, z: i32) -> Voxel {
         if x < 0 || y < 0 || z < 0 {
@@ -252,6 +282,15 @@ pub fn get_voxel(data: &ChunkData, neighbors: &ChunkNeighbors, x: i32, y: i32, z
     }
 }
 
+/// A pending voxel modification to be incorporated into a chunk.
+#[derive(Debug, Clone)]
+pub struct VoxelModification {
+    pub x: usize,
+    pub y: usize,
+    pub z: usize,
+    pub voxel: Voxel,
+}
+
 // ---------------------------------------------------------------------------
 // ECS component
 // ---------------------------------------------------------------------------
@@ -264,6 +303,10 @@ pub struct Chunk {
     pub state: ChunkState,
     pub world_aligned: bool,
     pub dynamic: bool,
+    /// Queue of voxel modifications waiting to be incorporated into the mesh.
+    /// The building system pushes modifications here; the chunk meshing pipeline
+    /// drains them and triggers a re-mesh.
+    pub pending_modifications: Vec<VoxelModification>,
 }
 
 impl Chunk {
@@ -274,6 +317,7 @@ impl Chunk {
             state: ChunkState::Loaded,
             world_aligned: true,
             dynamic: false,
+            pending_modifications: Vec::new(),
         }
     }
 

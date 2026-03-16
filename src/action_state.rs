@@ -85,6 +85,11 @@ pub struct ButtonHint {
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ButtonHints(pub Vec<ButtonHint>);
 
+/// Events emitted by action state scripts this frame.
+/// Filled by `action_state_update`, consumed by gameplay systems (e.g. building).
+#[derive(Resource, Clone, Debug, Default)]
+pub struct ActionStateEmits(pub Vec<String>);
+
 /// Last input source: keyboard or gamepad. Updated each frame based on
 /// which source produced input ("last-input-wins").
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
@@ -100,7 +105,7 @@ pub enum InputMode {
 
 /// Per-frame snapshot of all gamepad/keyboard inputs as string names.
 #[derive(Resource, Default)]
-struct ActionStateInput {
+pub struct ActionStateInput {
     buttons_just_pressed: HashSet<String>,
     buttons_pressed: HashSet<String>,
     /// Whether any gamepad input was detected this frame.
@@ -160,6 +165,12 @@ pub struct ActionStateEngine {
 }
 
 impl ActionStateEngine {
+    /// Access the underlying Rhai engine for registering additional API functions.
+    /// Use this in startup systems to extend the scripting API (e.g. building, combat).
+    pub fn rhai_engine_mut(&mut self) -> &mut Engine {
+        &mut self.engine
+    }
+
     pub fn new(script_dir: impl Into<PathBuf>) -> Self {
         let shared = Arc::new(Mutex::new(Shared::new()));
         let script_dir = script_dir.into();
@@ -636,12 +647,13 @@ fn action_state_input_snapshot(
 }
 
 /// Runs the active state's on_update(), handles enter/exit transitions.
-fn action_state_update(
+pub fn action_state_update(
     mut commands: Commands,
     mut engine: ResMut<ActionStateEngine>,
     input: Res<ActionStateInput>,
     mut enter_queue: ResMut<EnterActionStateQueue>,
     mut button_hints: ResMut<ButtonHints>,
+    mut action_emits: ResMut<ActionStateEmits>,
     mut player_query: Query<
         (Entity, &mut ActionState, &mut ConsumedInputs, Option<&ActionStateVars>),
         With<Player>,
@@ -700,10 +712,8 @@ fn action_state_update(
             }
         }
 
-        // Process emits
-        for emit_name in &emits {
-            info!("[action_state] Event emitted: {emit_name}");
-        }
+        // Store emits for gameplay systems to consume
+        action_emits.0 = emits;
 
         // Copy button hints from shared → resource
         {
@@ -752,6 +762,7 @@ impl Plugin for ActionStatePlugin {
         app.insert_resource(ActionStateEngine::new("assets/action_states"));
         app.insert_resource(EnterActionStateQueue::default());
         app.insert_resource(ButtonHints::default());
+        app.insert_resource(ActionStateEmits::default());
         app.insert_resource(InputMode::default());
 
         app.add_systems(

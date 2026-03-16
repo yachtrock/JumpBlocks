@@ -79,7 +79,20 @@ pub fn stub_action_state_engine() -> Engine {
     engine.register_fn("input_pressed", |_name: &str| -> bool { false });
     engine.register_fn("log", |_msg: &str| {});
     engine.register_fn("set_button_hint", |_label: &str, _keyboard: &str, _gamepad: &str| {});
+    engine.register_fn(
+        "set_button_hint_pair",
+        |_label: &str, _kb1: &str, _kb2: &str, _gp1: &str, _gp2: &str| {},
+    );
     engine.register_fn("clear_button_hints", || {});
+
+    // Building API
+    engine.register_fn("build_position", || -> Dynamic { Dynamic::UNIT });
+    engine.register_fn("show_preview", |_facing: INT| {});
+    engine.register_fn("show_preview_in_hand", |_facing: INT| {});
+    engine.register_fn("hide_preview", || {});
+    engine.register_fn("place_block", |_shape: INT, _facing: INT, _texture: INT| {});
+    engine.register_fn("rotate_facing_right", |facing: INT| -> INT { (facing + 1) % 4 });
+    engine.register_fn("rotate_facing_left", |facing: INT| -> INT { (facing + 3) % 4 });
 
     engine
 }
@@ -157,16 +170,22 @@ mod tests {
                     .call_fn::<Dynamic>(&mut scope, &ast, "on_enter", (Dynamic::from(ctx),))
                     .unwrap_or_else(|e| panic!("{name}: on_enter() failed: {e}"));
 
-                // Verify on_update can be called with state data
-                let mut scope = Scope::new();
-                let mut state = rhai::Map::new();
-                state.insert("item_name".into(), Dynamic::from("Test Item"));
+                // Verify on_update can be called with state data from on_enter
+                let mut scope2 = Scope::new();
+                let mut ctx2 = rhai::Map::new();
+                ctx2.insert("item_name".into(), Dynamic::from("Test Item"));
+                ctx2.insert("selected_slot".into(), Dynamic::from(0_i64));
+                let state_data = engine
+                    .call_fn::<Dynamic>(&mut scope2, &ast, "on_enter", (Dynamic::from(ctx2),))
+                    .unwrap_or_else(|e| panic!("{name}: on_enter() for update test failed: {e}"));
+
+                let mut scope3 = Scope::new();
                 let _ = engine
                     .call_fn::<Dynamic>(
-                        &mut scope,
+                        &mut scope3,
                         &ast,
                         "on_update",
-                        (Dynamic::from(state), Dynamic::UNIT),
+                        (state_data, Dynamic::UNIT),
                     )
                     .unwrap_or_else(|e| panic!("{name}: on_update() failed: {e}"));
 
