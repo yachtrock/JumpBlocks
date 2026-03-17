@@ -57,20 +57,34 @@ fn triangulate_convex_polygon(
 ) {
     if n < 3 { return; }
     if n == 3 {
-        indices.extend_from_slice(&[base + 2, base + 1, base]);
+        let p0 = Vec3::from_array(positions[base as usize]);
+        let p1 = Vec3::from_array(positions[base as usize + 1]);
+        let p2 = Vec3::from_array(positions[base as usize + 2]);
+        if (p1 - p0).cross(p2 - p0).length() > 1e-8 {
+            indices.extend_from_slice(&[base + 2, base + 1, base]);
+        }
         return;
     }
     if n == 4 {
         // Two possible splits — pick the one with better minimum angle
+        // Skip degenerate triangles from boundary pinning
         let p: Vec<Vec3> = (0..4).map(|i| Vec3::from_array(positions[(base as usize) + i])).collect();
         let min_a = min_angle_3d(p[0], p[1], p[2]).min(min_angle_3d(p[0], p[2], p[3]));
         let min_b = min_angle_3d(p[0], p[1], p[3]).min(min_angle_3d(p[1], p[2], p[3]));
         if min_a >= min_b {
-            indices.extend_from_slice(&[base + 2, base + 1, base]);
-            indices.extend_from_slice(&[base + 3, base + 2, base]);
+            if (p[1] - p[0]).cross(p[2] - p[0]).length() > 1e-8 {
+                indices.extend_from_slice(&[base + 2, base + 1, base]);
+            }
+            if (p[2] - p[0]).cross(p[3] - p[0]).length() > 1e-8 {
+                indices.extend_from_slice(&[base + 3, base + 2, base]);
+            }
         } else {
-            indices.extend_from_slice(&[base + 3, base + 1, base]);
-            indices.extend_from_slice(&[base + 3, base + 2, base + 1]);
+            if (p[1] - p[0]).cross(p[3] - p[0]).length() > 1e-8 {
+                indices.extend_from_slice(&[base + 3, base + 1, base]);
+            }
+            if (p[2] - p[1]).cross(p[3] - p[1]).length() > 1e-8 {
+                indices.extend_from_slice(&[base + 3, base + 2, base + 1]);
+            }
         }
         return;
     }
@@ -83,6 +97,7 @@ fn triangulate_convex_polygon(
         let m = remaining.len();
         let mut best_ear = 0;
         let mut best_min_angle = -1.0f32;
+        let mut found_nondegenerate = false;
 
         for i in 0..m {
             let pi = remaining[(i + m - 1) % m] as usize;
@@ -91,8 +106,19 @@ fn triangulate_convex_polygon(
             let pp = Vec3::from_array(positions[pi]);
             let pc = Vec3::from_array(positions[ci]);
             let pn = Vec3::from_array(positions[ni]);
+            // Skip degenerate ears (collinear/coincident from boundary pinning)
+            let area = (pc - pp).cross(pn - pp).length() * 0.5;
+            if area < 1e-10 {
+                // Still allow removing degenerate ears to reduce the polygon
+                if !found_nondegenerate && best_min_angle < 0.0 {
+                    best_ear = i;
+                    best_min_angle = 0.0;
+                }
+                continue;
+            }
+            found_nondegenerate = true;
             let angle = min_angle_3d(pp, pc, pn);
-            if angle > best_min_angle {
+            if angle > best_min_angle || !found_nondegenerate {
                 best_min_angle = angle;
                 best_ear = i;
             }
@@ -102,13 +128,28 @@ fn triangulate_convex_polygon(
         let prev = remaining[(best_ear + m - 1) % m];
         let curr = remaining[best_ear];
         let next = remaining[(best_ear + 1) % m];
-        // Reversed winding for Bevy
-        indices.extend_from_slice(&[next, curr, prev]);
+
+        // Only emit non-degenerate triangles
+        let pp = Vec3::from_array(positions[prev as usize]);
+        let pc = Vec3::from_array(positions[curr as usize]);
+        let pn = Vec3::from_array(positions[next as usize]);
+        let area = (pc - pp).cross(pn - pp).length() * 0.5;
+        if area > 1e-10 {
+            indices.extend_from_slice(&[next, curr, prev]);
+        }
         remaining.remove(best_ear);
     }
 
-    // Last triangle
-    indices.extend_from_slice(&[remaining[2], remaining[1], remaining[0]]);
+    // Last triangle — skip if degenerate
+    if remaining.len() == 3 {
+        let pp = Vec3::from_array(positions[remaining[0] as usize]);
+        let pc = Vec3::from_array(positions[remaining[1] as usize]);
+        let pn = Vec3::from_array(positions[remaining[2] as usize]);
+        let area = (pc - pp).cross(pn - pp).length() * 0.5;
+        if area > 1e-10 {
+            indices.extend_from_slice(&[remaining[2], remaining[1], remaining[0]]);
+        }
+    }
 }
 
 /// Minimum angle (in radians) of a triangle defined by three 3D points.
@@ -822,6 +863,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             // so the shape's triangle indices map directly.
             if face.orig_triangles.len() >= n - 2 {
                 for tri in &face.orig_triangles {
+                    // Skip degenerate triangles from boundary-pinned vertices
+                    let pa = inner[tri[0]];
+                    let pb = inner[tri[1]];
+                    let pc = inner[tri[2]];
+                    if (pb - pa).cross(pc - pa).length() < 1e-8 { continue; }
                     indices.push(inner_base + tri[2] as u32);
                     indices.push(inner_base + tri[1] as u32);
                     indices.push(inner_base + tri[0] as u32);
@@ -1086,7 +1132,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             let va = ring[0].0;
             let vb = ring[i].0;
             let vc = ring[i + 1].0;
-            let fan_normal = (vb - va).cross(vc - va).normalize_or_zero();
+
+            // Skip degenerate triangles (from boundary-pinned coincident vertices)
+            let cross = (vb - va).cross(vc - va);
+            if cross.length() < 1e-8 { continue; }
+            let fan_normal = cross.normalize_or_zero();
 
             let mut skip = false;
             for &fi in adj_faces {
