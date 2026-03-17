@@ -997,6 +997,69 @@ fn corner_chamfer_clips_adjacent_face() {
 }
 
 #[test]
+fn vertical_corner_chamfer_clips_side_face() {
+    // Vertical L-shape (side view, Y up, X right):
+    //  X-top        X-top at (10,17,8)
+    // YX-bot        Y at (8,16,8), X-bot at (10,16,8)
+    //
+    // Y is the inner-corner block. X-top and Y share an edge but not a
+    // face (diagonal neighbors). The chamfer strip between Y's top face
+    // and X-top's west face must clip Y's north/south faces at the corner.
+    // Before the fix, the strip was skipped because Y owned it.
+    use bevy::math::Vec3;
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    data.place_std(8, 16, 8, SHAPE_CUBE, Facing::North, 1);   // Y (inner corner)
+    data.place_std(10, 16, 8, SHAPE_CUBE, Facing::North, 1);  // X-bot (east of Y)
+    data.place_std(10, 17, 8, SHAPE_CUBE, Facing::North, 1);  // X-top (above X-bot)
+
+    let result = generate_chunk_mesh(
+        &data, &ChunkNeighbors::empty(), &shapes,
+        crate::PresentationMode::EdgeGraphChamfer,
+    );
+    let mesh = &result.full_res;
+    assert_no_nans(mesh, "vert_corner_chamfer");
+    assert_indices_valid(mesh, "vert_corner_chamfer");
+
+    // Y occupies x=[4.0,5.0], y=[8.0,8.5], z=[4.0,5.0].
+    // The diagonal corner is at (5.0, 8.5) on the side faces (z=4.0 and z=5.0).
+    // Y's north face at z=5.0 should be clipped at the (x=5.0, y=8.5) corner
+    // by the chamfer between Y's top and X-top's west.
+    let chamfer_w = crate::shape::CHAMFER_WIDTH;
+    let corner_x = 5.0;
+    let corner_y = 8.5;
+
+    let mut unclipped_corner_tris = 0;
+    for chunk in mesh.indices.chunks(3) {
+        let vs: Vec<Vec3> = chunk.iter()
+            .map(|&idx| Vec3::from_array(mesh.positions[idx as usize]))
+            .collect();
+        // Look at Y's side faces (z ≈ 5.0 or z ≈ 4.0, normal ≈ ±Z)
+        let on_side = vs.iter().all(|v| (v.z - 5.0).abs() < 0.01 || (v.z - 4.0).abs() < 0.01);
+        let in_y_range = vs.iter().all(|v| v.x >= 3.99 && v.x <= 5.01 && v.y >= 7.99 && v.y <= 8.51);
+        if !on_side || !in_y_range { continue; }
+
+        for v in &vs {
+            let dx = v.x - (corner_x - chamfer_w);
+            let dy = v.y - (corner_y - chamfer_w);
+            if dx > 0.01 && dy > 0.01 {
+                unclipped_corner_tris += 1;
+                break;
+            }
+        }
+    }
+
+    eprintln!("vert_corner_chamfer: unclipped corner triangles = {}", unclipped_corner_tris);
+    assert!(unclipped_corner_tris == 0,
+        "Y's side face should be clipped at the vertical corner, but {} triangles extend past the chamfer",
+        unclipped_corner_tris);
+
+    let intersecting = count_intersecting_triangle_pairs(mesh);
+    assert!(intersecting == 0,
+        "vert_corner_chamfer should have no intersecting triangles, got {}", intersecting);
+}
+
+#[test]
 fn single_wedge_edge_sharing() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);

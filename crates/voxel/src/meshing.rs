@@ -819,6 +819,8 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         normal: Vec3,
         owning_voxels: [(usize, usize, usize); 2],
         owning_sizes: [(u8, u8, u8); 2],
+        forming_faces: [usize; 2],
+        owners_share_face: bool,
         edge_verts: [u32; 2],
         aabb_min: Vec3,
         aabb_max: Vec3,
@@ -854,9 +856,24 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         let clip_idx = all_strip_clips.len();
         let owning = [face_a.voxel, face_b.voxel];
         let sizes = [face_a.block_size, face_b.block_size];
+        // Detect whether the two owning blocks share a face (same block,
+        // or touch in exactly one axis while overlapping in the other two).
+        let owners_share_face = face_a.voxel == face_b.voxel || {
+            let (v1, s1, v2, s2) = (face_a.voxel, face_a.block_size, face_b.voxel, face_b.block_size);
+            let check = |a: usize, sa: u8, b: usize, sb: u8| -> (bool, bool) {
+                let a_end = a + sa as usize;
+                let b_end = b + sb as usize;
+                (a_end == b || b_end == a, a < b_end && b < a_end)
+            };
+            let (tx, ox) = check(v1.0, s1.0, v2.0, s2.0);
+            let (ty, oy) = check(v1.1, s1.1, v2.1, s2.1);
+            let (tz, oz) = check(v1.2, s1.2, v2.2, s2.2);
+            (tx && oy && oz) || (ty && ox && oz) || (tz && ox && oy)
+        };
         all_strip_clips.push(StripClip {
             point: a0, normal: strip_normal, owning_voxels: owning,
-            owning_sizes: sizes,
+            owning_sizes: sizes, forming_faces: [fi_a, fi_b],
+            owners_share_face,
             edge_verts: [ev0, ev1], aabb_min: strip_min, aabb_max: strip_max,
             face_normal_dot: face_a.normal.dot(face_b.normal),
         });
@@ -894,6 +911,28 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             (0, -1, 0), (0, sy as i32, 0),
             (0, 0, -1), (0, 0, sz as i32),
         ];
+        // Check the current voxel's own strips: a chamfer between this
+        // block's face and a *diagonal* neighbor's face can clip a
+        // different face of the same block (e.g. vertical L-shape).
+        // Only consider strips where the co-owner is diagonal (not
+        // face-adjacent), since face-adjacent/same-block strips are
+        // internal and should never clip other faces of this block.
+        if let Some(clip_indices) = voxel_strip_clips.get(&face.voxel) {
+            for &ci in clip_indices {
+                if !seen_clips.insert(ci) { continue; }
+                let sc = &all_strip_clips[ci];
+                if fi == sc.forming_faces[0] || fi == sc.forming_faces[1] { continue; }
+                if sc.owners_share_face { continue; }
+                let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
+                let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();
+                let overlaps = face_min.x <= sc.aabb_max.x && face_max.x >= sc.aabb_min.x
+                    && face_min.y <= sc.aabb_max.y && face_max.y >= sc.aabb_min.y
+                    && face_min.z <= sc.aabb_max.z && face_max.z >= sc.aabb_min.z;
+                if !overlaps { continue; }
+                clip_planes.push((sc.point, -sc.normal));
+            }
+        }
+        // Check face-adjacent neighbor voxels for strips from other blocks.
         for &(dx, dy, dz) in &neighbor_offsets {
             let nx = vx as i32 + dx;
             let ny = vy as i32 + dy;
@@ -906,29 +945,29 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     if !seen_clips.insert(ci) { continue; }
                     let sc = &all_strip_clips[ci];
                     if sc.owning_voxels.contains(&face.voxel) { continue; }
-                    // Check if strip extends beyond ANY individual owner's AABB.
-                    // Using the combined AABB of all owners would miss strips at
-                    // diagonal-neighbor corners (two blocks sharing an edge, not a
-                    // face) whose combined box is large enough to fully contain
-                    // the strip even though it protrudes into a third block's face.
-                    let margin = CHAMFER_WIDTH * 0.5;
-                    let mut extends = false;
-                    for (i, &(ovx, ovy, ovz)) in sc.owning_voxels.iter().enumerate() {
-                        let osz = sc.owning_sizes[i];
-                        let lo = Vec3::new(ovx as f32 * VOXEL_SIZE, ovy as f32 * VOXEL_SIZE, ovz as f32 * VOXEL_SIZE);
-                        let hi = lo + Vec3::new(osz.0 as f32 * VOXEL_SIZE, osz.1 as f32 * VOXEL_SIZE, osz.2 as f32 * VOXEL_SIZE);
-                        if sc.aabb_min.x < lo.x - margin
-                            || sc.aabb_max.x > hi.x + margin
-                            || sc.aabb_min.y < lo.y - margin
-                            || sc.aabb_max.y > hi.y + margin
-                            || sc.aabb_min.z < lo.z - margin
-                            || sc.aabb_max.z > hi.z + margin
-                        {
-                            extends = true;
-                            break;
+                    // For diagonal-neighbor owners, the strip always protrudes
+                    // into the concave pocket—skip the AABB check.
+                    // For face-adjacent owners, use the combined AABB to filter
+                    // out internal strips (prevents holes in staircases).
+                    if sc.owners_share_face {
+                        let margin = CHAMFER_WIDTH * 0.5;
+                        let mut owner_min = Vec3::splat(f32::MAX);
+                        let mut owner_max = Vec3::splat(f32::MIN);
+                        for (i, &(ovx, ovy, ovz)) in sc.owning_voxels.iter().enumerate() {
+                            let osz = sc.owning_sizes[i];
+                            let lo = Vec3::new(ovx as f32 * VOXEL_SIZE, ovy as f32 * VOXEL_SIZE, ovz as f32 * VOXEL_SIZE);
+                            let hi = lo + Vec3::new(osz.0 as f32 * VOXEL_SIZE, osz.1 as f32 * VOXEL_SIZE, osz.2 as f32 * VOXEL_SIZE);
+                            owner_min = owner_min.min(lo);
+                            owner_max = owner_max.max(hi);
                         }
+                        let extends = sc.aabb_min.x < owner_min.x - margin
+                            || sc.aabb_max.x > owner_max.x + margin
+                            || sc.aabb_min.y < owner_min.y - margin
+                            || sc.aabb_max.y > owner_max.y + margin
+                            || sc.aabb_min.z < owner_min.z - margin
+                            || sc.aabb_max.z > owner_max.z + margin;
+                        if !extends { continue; }
                     }
-                    if !extends { continue; }
                     let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
                     let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();
                     let overlaps = face_min.x <= sc.aabb_max.x && face_max.x >= sc.aabb_min.x
