@@ -516,17 +516,13 @@ const SHARP_DOT_THRESHOLD: f32 = 0.985;
 /// Compute the fillet push: how far to push the center-line outward from the
 /// flat chamfer midpoint toward the edge, to approximate a circular arc.
 /// Returns the push vector along avg_normal.
-fn fillet_push(na: Vec3, nb: Vec3, chamfer_width: f32) -> Vec3 {
-    let sum = na + nb;
-    let k = sum.length();
-    if k < 0.01 { return Vec3::ZERO; }
-    let avg_n = sum / k;
-    // For a circular arc of radius R = chamfer_width between two face planes:
-    // push = R * (1 - cos(half_angle)) where half_angle is half the arc sweep.
-    // cos(half_angle) = k/2, so push = R * (1 - k/2).
+/// Compute the fillet push amount for a circular arc between two face planes.
+fn fillet_push_amount(na: Vec3, nb: Vec3, chamfer_width: f32) -> f32 {
+    let k = (na + nb).length();
+    // For a circular arc of radius R = chamfer_width:
+    // push = R * (1 - cos(half_angle)) where cos(half_angle) = k/2.
     // Clamp to [0, R/2] for numerical safety.
-    let push = (chamfer_width * (1.0 - k / 2.0)).clamp(0.0, chamfer_width * 0.5);
-    avg_n * push
+    (chamfer_width * (1.0 - k / 2.0)).clamp(0.0, chamfer_width * 0.5)
 }
 
 fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
@@ -665,7 +661,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     // ---------------------------------------------------------------
     // Pass 1: compute inner vertices for every face
     // ---------------------------------------------------------------
-    let all_inner: Vec<Vec<Vec3>> = solid.faces.iter().map(|face| {
+    let all_inner_both: Vec<Vec<(Vec3, Vec3)>> = solid.faces.iter().map(|face| {
         let n = face.verts.len();
         let normal = face.normal;
 
@@ -721,12 +717,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             // wall. This keeps chamfer edges aligned at block seams without
             // affecting floating blocks or exposed edges.
             let pos = solid.positions[face.verts[vi] as usize];
-            let mut inner = pos + offset;
+            let inner_unprojected = pos + offset;
+            let mut inner = inner_unprojected;
             let eps = 1e-4;
             let (bx, by, bz) = face.voxel;
             let (bsx, bsy, bsz) = face.block_size;
-            // Check each axis: is the vertex on a block boundary AND
-            // is there an adjacent block on the other side?
             let boundary_checks: [(usize, f32, f32, i32, i32, i32); 6] = [
                 (0, block_min[0], block_min[0], bx as i32 - 1, by as i32, bz as i32),
                 (0, block_max[0], block_max[0], bx as i32 + bsx as i32, by as i32, bz as i32),
@@ -737,15 +732,19 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             ];
             for &(axis, boundary_val, pin_val, nx, ny, nz) in &boundary_checks {
                 if (pos[axis] - boundary_val).abs() < eps {
-                    // Only pin if there's a filled neighbor on the other side
                     if is_cell_occupied(data, neighbors, nx, ny, nz) {
                         inner[axis] = pin_val;
                     }
                 }
             }
-            inner
-        }).collect()
-    }).collect();
+            (inner, inner_unprojected)
+        }).collect::<Vec<_>>()
+    }).collect::<Vec<_>>();
+
+    let all_inner_unprojected: Vec<Vec<Vec3>> = all_inner_both.iter()
+        .map(|face| face.iter().map(|&(_, u)| u).collect()).collect();
+    let all_inner: Vec<Vec<Vec3>> = all_inner_both.iter()
+        .map(|face| face.iter().map(|&(p, _)| p).collect()).collect();
 
     // ---------------------------------------------------------------
     // Pass 2b: collect chamfer strip planes per owning voxel
@@ -982,61 +981,80 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         if !sharp_set.contains_key(&edge_key(ev0, ev1)) { continue; }
 
         if info.faces.len() >= 2 {
-            let fi_a = info.faces[0];
-            let fi_b = info.faces[1];
-            let face_a = &solid.faces[fi_a];
-            let face_b = &solid.faces[fi_b];
-            let inner_a = &all_inner[fi_a];
-            let inner_b = &all_inner[fi_b];
+            let edge0 = solid.positions[ev0 as usize];
+            let edge1 = solid.positions[ev1 as usize];
+            let edge_dir = (edge1 - edge0).normalize_or_zero();
 
-            let a0 = find_face_inner_at_vert(face_a, inner_a, ev0).unwrap();
-            let a1 = find_face_inner_at_vert(face_a, inner_a, ev1).unwrap();
-            let b0 = find_face_inner_at_vert(face_b, inner_b, ev0).unwrap();
-            let b1 = find_face_inner_at_vert(face_b, inner_b, ev1).unwrap();
-
-            let na = face_a.normal;
-            let nb = face_b.normal;
-            let expected_out = (na + nb).normalize_or_zero();
-
-            // Check if face inner vertices coincide (happens at internal merge vertices).
-            // If so, fall back to single quad to avoid overlapping half-quads.
-            let inners_coincide = (a0 - b0).length_squared() < 1e-6
-                && (a1 - b1).length_squared() < 1e-6;
-
-            if inners_coincide {
-                // Original single-quad emission (no center-line split needed)
-                let tri_normal = (a1 - a0).cross(b0 - a0);
-                let flipped = tri_normal.dot(expected_out) > 0.0;
-                let strip_poly = if flipped {
-                    vec![b0, b1, a1, a0]
+            // Sort faces by angle around the edge so we can emit strips
+            // between each consecutive pair (handles 4-face concave edges)
+            let mut sorted_faces: Vec<usize> = info.faces.clone();
+            if sorted_faces.len() > 2 {
+                // Build a reference frame perpendicular to the edge
+                let ref_n = if edge_dir.x.abs() < 0.9 {
+                    edge_dir.cross(Vec3::X).normalize_or_zero()
                 } else {
-                    vec![a0, a1, b1, b0]
+                    edge_dir.cross(Vec3::Y).normalize_or_zero()
                 };
+                let ref_t = edge_dir.cross(ref_n).normalize_or_zero();
+                sorted_faces.sort_by(|&a, &b| {
+                    let na = solid.faces[a].normal;
+                    let nb = solid.faces[b].normal;
+                    let angle_a = na.dot(ref_t).atan2(na.dot(ref_n));
+                    let angle_b = nb.dot(ref_t).atan2(nb.dot(ref_n));
+                    angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
 
-                if strip_poly.len() >= 3 {
-                    let base = positions.len() as u32;
-                    let (n_first, n_second) = if flipped { (nb, na) } else { (na, nb) };
+            // Emit a strip between each consecutive pair of faces around the edge.
+            // For 2-face edges, just one strip. For 3+, wrap around the full ring.
+            let n_faces = sorted_faces.len();
+            let n_pairs = if n_faces <= 2 { n_faces - 1 } else { n_faces };
+            for pair_idx in 0..n_pairs {
+                let fi_a = sorted_faces[pair_idx];
+                let fi_b = sorted_faces[(pair_idx + 1) % n_faces];
+                let face_a = &solid.faces[fi_a];
+                let face_b = &solid.faces[fi_b];
+                let na = face_a.normal;
+                let nb = face_b.normal;
 
-                    for (pi, p) in strip_poly.iter().enumerate() {
-                        positions.push(p.to_array());
-                        let n = if pi < strip_poly.len() / 2 {
-                            n_first.to_array()
-                        } else {
-                            n_second.to_array()
-                        };
-                        normals.push(n);
-                        uvs.push([0.0, 0.0]);
-                        chamfer_offsets.push([0.0; 3]);
-                    }
-                    triangulate_convex_polygon(&positions, base, strip_poly.len(), &mut indices);
-                }
-            } else {
+                // Skip non-sharp pairs
+                if na.dot(nb) >= SHARP_DOT_THRESHOLD { continue; }
+
+                // Detect concavity using UNPROJECTED inners (projected ones collapse
+                // to the wall at concave edges, giving sign ≈ 0)
+                let a0_unproj = find_face_inner_at_vert(face_a, &all_inner_unprojected[fi_a], ev0).unwrap();
+                let b0_unproj = find_face_inner_at_vert(face_b, &all_inner_unprojected[fi_b], ev0).unwrap();
+                let avg_n = (na + nb).normalize_or_zero();
+                let mid0_unproj = (a0_unproj + b0_unproj) * 0.5;
+                let sign0 = (mid0_unproj - edge0).dot(avg_n);
+                let is_concave = sign0 > 1e-4;
+
+                // For concave edges, use unprojected inners (with full chamfer inset)
+                // so the strip has visible width. For convex, use projected.
+                let inner_src_a = if is_concave { &all_inner_unprojected[fi_a] } else { &all_inner[fi_a] };
+                let inner_src_b = if is_concave { &all_inner_unprojected[fi_b] } else { &all_inner[fi_b] };
+                let a0 = find_face_inner_at_vert(face_a, inner_src_a, ev0).unwrap();
+                let a1 = find_face_inner_at_vert(face_a, inner_src_a, ev1).unwrap();
+                let b0 = find_face_inner_at_vert(face_b, inner_src_b, ev0).unwrap();
+                let b1 = find_face_inner_at_vert(face_b, inner_src_b, ev1).unwrap();
+
+                let expected_out = (na + nb).normalize_or_zero();
+
                 // Center-line split: two half-quads with fillet curvature
                 centerline_edges.insert(edge_key(ev0, ev1));
-                let avg_n = (na + nb).normalize_or_zero();
-                let fp = fillet_push(na, nb, CHAMFER_WIDTH);
-                let c0 = (a0 + b0) * 0.5 + fp;
-                let c1 = (a1 + b1) * 0.5 + fp;
+                let k = (na + nb).length();
+                let push_amount = fillet_push_amount(na, nb, CHAMFER_WIDTH);
+                let mid0 = (a0 + b0) * 0.5;
+                let mid1 = (a1 + b1) * 0.5;
+
+                // Push center-line from inner midpoint toward the edge.
+                // Works for both convex and concave — for concave, the unprojected
+                // inners provide the full chamfer width, and the push creates a
+                // smooth inward curve toward the edge.
+                let to_edge0 = (edge0 - mid0).normalize_or_zero();
+                let to_edge1 = (edge1 - mid1).normalize_or_zero();
+                let (c0, c1) = (mid0 + to_edge0 * push_amount,
+                                mid1 + to_edge1 * push_amount);
                 let cn = avg_n.to_array();
 
                 let tri_normal = (a1 - a0).cross(c0 - a0);
@@ -1144,29 +1162,63 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         for &fi in adj_faces {
             let face = &solid.faces[fi];
             if let Some(inner_pos) = find_face_inner_at_vert(face, &all_inner[fi], vi as u32) {
-                if (inner_pos - outer).length_squared() > 1e-8 {
-                    let dup = ring.iter().any(|(r, _, _)| (*r - inner_pos).length_squared() < 1e-6);
-                    if !dup {
-                        ring.push((inner_pos, face.normal, false));
-                    }
+                let dup = ring.iter().any(|(r, _, _)| (*r - inner_pos).length_squared() < 1e-6);
+                if !dup {
+                    ring.push((inner_pos, face.normal, false));
                 }
             }
         }
 
         for &ek in &sharp_edge_keys {
-            // Only add center-line vertex if this edge actually used center-line split
             if !centerline_edges.contains(&ek) { continue; }
             if let Some(info) = edge_graph.get(&ek) {
-                if info.faces.len() >= 2 {
-                    let na = solid.faces[info.faces[0]].normal;
-                    let nb = solid.faces[info.faces[1]].normal;
+                if info.faces.len() < 2 { continue; }
+
+                // For multi-face edges, sort faces and add center-line for each pair
+                let mut sorted_fi: Vec<usize> = info.faces.clone();
+                if sorted_fi.len() > 2 {
+                    let (ev0_k, ev1_k) = ek;
+                    let edge_dir = (solid.positions[ev1_k as usize] - solid.positions[ev0_k as usize]).normalize_or_zero();
+                    let ref_n = if edge_dir.x.abs() < 0.9 {
+                        edge_dir.cross(Vec3::X).normalize_or_zero()
+                    } else {
+                        edge_dir.cross(Vec3::Y).normalize_or_zero()
+                    };
+                    let ref_t = edge_dir.cross(ref_n).normalize_or_zero();
+                    sorted_fi.sort_by(|&a, &b| {
+                        let na = solid.faces[a].normal;
+                        let nb = solid.faces[b].normal;
+                        na.dot(ref_t).atan2(na.dot(ref_n))
+                            .partial_cmp(&nb.dot(ref_t).atan2(nb.dot(ref_n)))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                let n_fi = sorted_fi.len();
+                let n_pairs = if n_fi <= 2 { n_fi - 1 } else { n_fi };
+                for pi in 0..n_pairs {
+                    let fia_idx = sorted_fi[pi];
+                    let fib_idx = sorted_fi[(pi + 1) % n_fi];
+                    let na = solid.faces[fia_idx].normal;
+                    let nb = solid.faces[fib_idx].normal;
+                    if na.dot(nb) >= SHARP_DOT_THRESHOLD { continue; }
                     let avg_n = (na + nb).normalize_or_zero();
-                    // Compute center-line from midpoint of face inner vertices
-                    let fi_a = find_face_inner_at_vert(&solid.faces[info.faces[0]], &all_inner[info.faces[0]], vi as u32);
-                    let fi_b = find_face_inner_at_vert(&solid.faces[info.faces[1]], &all_inner[info.faces[1]], vi as u32);
-                    if let (Some(fia), Some(fib)) = (fi_a, fi_b) {
-                        let fp = fillet_push(na, nb, CHAMFER_WIDTH);
-                        let center_pos = (fia + fib) * 0.5 + fp;
+                    // Use unprojected inners to detect concavity and pick inner source
+                    let fi_a_unproj = find_face_inner_at_vert(&solid.faces[fia_idx], &all_inner_unprojected[fia_idx], vi as u32);
+                    let fi_b_unproj = find_face_inner_at_vert(&solid.faces[fib_idx], &all_inner_unprojected[fib_idx], vi as u32);
+                    if let (Some(fia_u), Some(fib_u)) = (fi_a_unproj, fi_b_unproj) {
+                        let mid_u = (fia_u + fib_u) * 0.5;
+                        let is_concave_cap = (mid_u - outer).dot(avg_n) > 1e-4;
+                        let (fia, fib) = if is_concave_cap {
+                            (fia_u, fib_u)
+                        } else {
+                            let fa = find_face_inner_at_vert(&solid.faces[fia_idx], &all_inner[fia_idx], vi as u32);
+                            let fb = find_face_inner_at_vert(&solid.faces[fib_idx], &all_inner[fib_idx], vi as u32);
+                            match (fa, fb) { (Some(a), Some(b)) => (a, b), _ => continue }
+                        };
+                        let mid = (fia + fib) * 0.5;
+                        let push_amount = fillet_push_amount(na, nb, CHAMFER_WIDTH);
+                        let to_edge = (outer - mid).normalize_or_zero();
+                        let center_pos = mid + to_edge * push_amount;
                         let dup = ring.iter().any(|(r, _, _)| (*r - center_pos).length_squared() < 1e-6);
                         if !dup {
                             ring.push((center_pos, avg_n, true));

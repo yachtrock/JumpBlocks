@@ -277,6 +277,12 @@ fn setup_world(
         test_data.place_std(22, 4, 4, SHAPE_CUBE, Facing::North, 1);
         test_data.place_std(24, 4, 4, SHAPE_CUBE, Facing::North, 1);
 
+        // Staircase (concave fillet test):  [B]
+        //                                 [A][C]
+        test_data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);  // A: bottom-left
+        test_data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1); // C: bottom-right
+        test_data.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1); // B: top-right
+
         let test_errors = test_data.validate(&shapes);
         for e in &test_errors {
             error!("[world] test: {}", e);
