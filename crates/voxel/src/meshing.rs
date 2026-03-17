@@ -886,6 +886,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
         let (vx, vy, vz) = face.voxel;
         let mut clip_planes: Vec<(Vec3, Vec3)> = Vec::new();
+        let mut seen_clips: HashSet<usize> = HashSet::new();
         let (sx, sy, sz) = face.block_size;
         // Check neighbors at the block's outer boundary, not just ±1 from origin
         let neighbor_offsets: [(i32, i32, i32); 6] = [
@@ -902,24 +903,31 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             if nkey == face.voxel { continue; }
             if let Some(clip_indices) = voxel_strip_clips.get(&nkey) {
                 for &ci in clip_indices {
+                    if !seen_clips.insert(ci) { continue; }
                     let sc = &all_strip_clips[ci];
                     if sc.owning_voxels.contains(&face.voxel) { continue; }
-                    let mut owner_min = Vec3::splat(f32::MAX);
-                    let mut owner_max = Vec3::splat(f32::MIN);
-                    for (i, &(ovx, ovy, ovz)) in sc.owning_voxels.iter().enumerate() {
-                        let sz = sc.owning_sizes[i];
-                        let lo = Vec3::new(ovx as f32 * VOXEL_SIZE, ovy as f32 * VOXEL_SIZE, ovz as f32 * VOXEL_SIZE);
-                        let hi = lo + Vec3::new(sz.0 as f32 * VOXEL_SIZE, sz.1 as f32 * VOXEL_SIZE, sz.2 as f32 * VOXEL_SIZE);
-                        owner_min = owner_min.min(lo);
-                        owner_max = owner_max.max(hi);
-                    }
+                    // Check if strip extends beyond ANY individual owner's AABB.
+                    // Using the combined AABB of all owners would miss strips at
+                    // diagonal-neighbor corners (two blocks sharing an edge, not a
+                    // face) whose combined box is large enough to fully contain
+                    // the strip even though it protrudes into a third block's face.
                     let margin = CHAMFER_WIDTH * 0.5;
-                    let extends = sc.aabb_min.x < owner_min.x - margin
-                        || sc.aabb_max.x > owner_max.x + margin
-                        || sc.aabb_min.y < owner_min.y - margin
-                        || sc.aabb_max.y > owner_max.y + margin
-                        || sc.aabb_min.z < owner_min.z - margin
-                        || sc.aabb_max.z > owner_max.z + margin;
+                    let mut extends = false;
+                    for (i, &(ovx, ovy, ovz)) in sc.owning_voxels.iter().enumerate() {
+                        let osz = sc.owning_sizes[i];
+                        let lo = Vec3::new(ovx as f32 * VOXEL_SIZE, ovy as f32 * VOXEL_SIZE, ovz as f32 * VOXEL_SIZE);
+                        let hi = lo + Vec3::new(osz.0 as f32 * VOXEL_SIZE, osz.1 as f32 * VOXEL_SIZE, osz.2 as f32 * VOXEL_SIZE);
+                        if sc.aabb_min.x < lo.x - margin
+                            || sc.aabb_max.x > hi.x + margin
+                            || sc.aabb_min.y < lo.y - margin
+                            || sc.aabb_max.y > hi.y + margin
+                            || sc.aabb_min.z < lo.z - margin
+                            || sc.aabb_max.z > hi.z + margin
+                        {
+                            extends = true;
+                            break;
+                        }
+                    }
                     if !extends { continue; }
                     let face_min = inner.iter().copied().reduce(|a, b| a.min(b)).unwrap();
                     let face_max = inner.iter().copied().reduce(|a, b| a.max(b)).unwrap();

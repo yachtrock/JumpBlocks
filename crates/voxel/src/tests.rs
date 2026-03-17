@@ -922,6 +922,81 @@ fn debug_concave_l_shape() {
 }
 
 #[test]
+fn corner_chamfer_clips_adjacent_face() {
+    // L-shape arrangement (top-down view, Y is up):
+    //   B          B at (8,16,10)
+    //  AC          A at (8,16,8), C at (10,16,8)
+    //
+    // A is the inner-corner block. The chamfer strip between B's east face
+    // and C's north face (meeting at the diagonal corner) must clip A's top
+    // face. Before the fix, the combined-owner AABB check incorrectly
+    // skipped this strip because B+C's union box fully contained it.
+    use bevy::math::Vec3;
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    data.place_std(8, 16, 8, SHAPE_CUBE, Facing::North, 1);   // A
+    data.place_std(10, 16, 8, SHAPE_CUBE, Facing::North, 1);  // C (east of A)
+    data.place_std(8, 16, 10, SHAPE_CUBE, Facing::North, 1);  // B (north of A)
+
+    let result = generate_chunk_mesh(
+        &data, &ChunkNeighbors::empty(), &shapes,
+        crate::PresentationMode::EdgeGraphChamfer,
+    );
+    let mesh = &result.full_res;
+    assert_no_nans(mesh, "corner_chamfer");
+    assert_indices_valid(mesh, "corner_chamfer");
+
+    // A's top face is at y = 9.0 (origin 16 cells * 0.5 + size 2 cells * 0.5),
+    // spanning x=[4.0,5.0], z=[4.0,5.0].
+    // The diagonal corner is at (5.0, 9.0, 5.0).
+    // The chamfer strip between B's east face and C's north face produces a
+    // clip plane near that corner. A's top face should be clipped there so
+    // no triangle extends past the chamfer into the corner pocket.
+    //
+    // Check: no triangle on A's top face (normal ≈ +Y, y ≈ 9.0) should have
+    // a vertex beyond both x > 5.0 - CHAMFER_WIDTH and z > 5.0 - CHAMFER_WIDTH
+    // simultaneously, because the chamfer strip cuts diagonally there.
+    let chamfer_w = crate::shape::CHAMFER_WIDTH;
+    let corner_x = 5.0;
+    let corner_z = 5.0;
+
+    let mut unclipped_corner_tris = 0;
+    for chunk in mesh.indices.chunks(3) {
+        let vs: Vec<Vec3> = chunk.iter()
+            .map(|&idx| Vec3::from_array(mesh.positions[idx as usize]))
+            .collect();
+        // Only look at top-face triangles of block A (y ≈ 9.0, normal roughly +Y)
+        let on_top = vs.iter().all(|v| (v.y - 9.0).abs() < 0.01);
+        let in_a_range = vs.iter().all(|v| v.x >= 3.99 && v.x <= 5.01 && v.z >= 3.99 && v.z <= 5.01);
+        if !on_top || !in_a_range { continue; }
+
+        // A vertex is "past the chamfer corner" if it's close to or beyond
+        // (corner_x - chamfer_w, corner_z - chamfer_w) in both axes at once.
+        // The chamfer diagonal cuts from (corner_x, corner_z - chamfer_w) to
+        // (corner_x - chamfer_w, corner_z), so any vertex beyond this line
+        // on the top face means clipping didn't happen.
+        for v in &vs {
+            let dx = v.x - (corner_x - chamfer_w);
+            let dz = v.z - (corner_z - chamfer_w);
+            if dx > 0.01 && dz > 0.01 {
+                unclipped_corner_tris += 1;
+                break;
+            }
+        }
+    }
+
+    eprintln!("corner_chamfer: unclipped corner triangles = {}", unclipped_corner_tris);
+    assert!(unclipped_corner_tris == 0,
+        "A's top face should be clipped at the diagonal corner, but {} triangles extend past the chamfer",
+        unclipped_corner_tris);
+
+    // Also verify no intersecting triangles in the whole mesh
+    let intersecting = count_intersecting_triangle_pairs(mesh);
+    assert!(intersecting == 0,
+        "corner_chamfer should have no intersecting triangles, got {}", intersecting);
+}
+
+#[test]
 fn single_wedge_edge_sharing() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
