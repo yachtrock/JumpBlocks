@@ -509,7 +509,25 @@ struct EdgeInfo {
 }
 
 const SHARP_DOT_THRESHOLD: f32 = 0.985;
-const FILLET_FACTOR: f32 = 0.35;
+
+/// Compute fillet offset for the center-line vertex of a chamfer strip.
+/// Places the vertex on a circular arc of radius CHAMFER_WIDTH that is
+/// tangent to both face planes at the chamfer inner vertices.
+/// Compute the fillet push: how far to push the center-line outward from the
+/// flat chamfer midpoint toward the edge, to approximate a circular arc.
+/// Returns the push vector along avg_normal.
+fn fillet_push(na: Vec3, nb: Vec3, chamfer_width: f32) -> Vec3 {
+    let sum = na + nb;
+    let k = sum.length();
+    if k < 0.01 { return Vec3::ZERO; }
+    let avg_n = sum / k;
+    // For a circular arc of radius R = chamfer_width between two face planes:
+    // push = R * (1 - cos(half_angle)) where half_angle is half the arc sweep.
+    // cos(half_angle) = k/2, so push = R * (1 - k/2).
+    // Clamp to [0, R/2] for numerical safety.
+    let push = (chamfer_width * (1.0 - k / 2.0)).clamp(0.0, chamfer_width * 0.5);
+    avg_n * push
+}
 
 fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
     let mut edges: HashMap<(u32, u32), EdgeInfo> = HashMap::new();
@@ -1016,13 +1034,9 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                 // Center-line split: two half-quads with fillet curvature
                 centerline_edges.insert(edge_key(ev0, ev1));
                 let avg_n = (na + nb).normalize_or_zero();
-                let fillet_offset = if avg_n.length_squared() > 0.01 {
-                    avg_n * CHAMFER_WIDTH * FILLET_FACTOR
-                } else {
-                    Vec3::ZERO
-                };
-                let c0 = solid.positions[ev0 as usize] + fillet_offset;
-                let c1 = solid.positions[ev1 as usize] + fillet_offset;
+                let fp = fillet_push(na, nb, CHAMFER_WIDTH);
+                let c0 = (a0 + b0) * 0.5 + fp;
+                let c1 = (a1 + b1) * 0.5 + fp;
                 let cn = avg_n.to_array();
 
                 let tri_normal = (a1 - a0).cross(c0 - a0);
@@ -1147,8 +1161,12 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     let na = solid.faces[info.faces[0]].normal;
                     let nb = solid.faces[info.faces[1]].normal;
                     let avg_n = (na + nb).normalize_or_zero();
-                    if avg_n.length_squared() > 0.01 {
-                        let center_pos = outer + avg_n * CHAMFER_WIDTH * FILLET_FACTOR;
+                    // Compute center-line from midpoint of face inner vertices
+                    let fi_a = find_face_inner_at_vert(&solid.faces[info.faces[0]], &all_inner[info.faces[0]], vi as u32);
+                    let fi_b = find_face_inner_at_vert(&solid.faces[info.faces[1]], &all_inner[info.faces[1]], vi as u32);
+                    if let (Some(fia), Some(fib)) = (fi_a, fi_b) {
+                        let fp = fillet_push(na, nb, CHAMFER_WIDTH);
+                        let center_pos = (fia + fib) * 0.5 + fp;
                         let dup = ring.iter().any(|(r, _, _)| (*r - center_pos).length_squared() < 1e-6);
                         if !dup {
                             ring.push((center_pos, avg_n, true));
