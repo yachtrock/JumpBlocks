@@ -655,8 +655,35 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     offset += edge_inward_dirs[vi] * CHAMFER_WIDTH;
                 }
             }
-            let inner = solid.positions[face.verts[vi] as usize] + offset;
-            inner.clamp(block_min, block_max)
+            // Boundary projection: if the original vertex sits on a block
+            // boundary wall AND there is an adjacent occupied cell on the
+            // other side of that wall, pin the inner vertex to stay on the
+            // wall. This keeps chamfer edges aligned at block seams without
+            // affecting floating blocks or exposed edges.
+            let pos = solid.positions[face.verts[vi] as usize];
+            let mut inner = pos + offset;
+            let eps = 1e-4;
+            let (bx, by, bz) = face.voxel;
+            let (bsx, bsy, bsz) = face.block_size;
+            // Check each axis: is the vertex on a block boundary AND
+            // is there an adjacent block on the other side?
+            let boundary_checks: [(usize, f32, f32, i32, i32, i32); 6] = [
+                (0, block_min[0], block_min[0], bx as i32 - 1, by as i32, bz as i32),
+                (0, block_max[0], block_max[0], bx as i32 + bsx as i32, by as i32, bz as i32),
+                (1, block_min[1], block_min[1], bx as i32, by as i32 - 1, bz as i32),
+                (1, block_max[1], block_max[1], bx as i32, by as i32 + bsy as i32, bz as i32),
+                (2, block_min[2], block_min[2], bx as i32, by as i32, bz as i32 - 1),
+                (2, block_max[2], block_max[2], bx as i32, by as i32, bz as i32 + bsz as i32),
+            ];
+            for &(axis, boundary_val, pin_val, nx, ny, nz) in &boundary_checks {
+                if (pos[axis] - boundary_val).abs() < eps {
+                    // Only pin if there's a filled neighbor on the other side
+                    if is_cell_occupied(data, neighbors, nx, ny, nz) {
+                        inner[axis] = pin_val;
+                    }
+                }
+            }
+            inner
         }).collect()
     }).collect();
 
