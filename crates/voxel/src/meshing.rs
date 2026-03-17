@@ -755,7 +755,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         if !sharp_set.contains_key(&edge_key(ev0, ev1)) { continue; }
         if info.faces.len() < 2 { continue; }
 
-        // Sort faces for multi-face edges (same as strip emission)
         let edge0 = solid.positions[ev0 as usize];
         let edge_dir = (solid.positions[ev1 as usize] - edge0).normalize_or_zero();
         let mut sorted_faces: Vec<usize> = info.faces.clone();
@@ -794,7 +793,6 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     let edge_pos = solid.positions[ev as usize];
                     let is_concave = (mid_u - edge_pos).dot(avg_n) > 1e-4;
                     if is_concave {
-                        // Replace projected inners with unprojected for both faces at this vertex
                         let face_a = &solid.faces[fi_a];
                         for (vi_idx, &v) in face_a.verts.iter().enumerate() {
                             if v == ev {
@@ -1115,13 +1113,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                 let mid1 = (a1 + b1) * 0.5;
 
                 // Push center-line from inner midpoint toward the edge.
-                // Works for both convex and concave — for concave, the unprojected
-                // inners provide the full chamfer width, and the push creates a
-                // smooth inward curve toward the edge.
                 let to_edge0 = (edge0 - mid0).normalize_or_zero();
                 let to_edge1 = (edge1 - mid1).normalize_or_zero();
                 let (c0, c1) = (mid0 + to_edge0 * push_amount,
                                 mid1 + to_edge1 * push_amount);
+
                 let cn = avg_n.to_array();
 
                 let tri_normal = (a1 - a0).cross(c0 - a0);
@@ -1219,6 +1215,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             }
         }
 
+
         if sharp_edge_keys.len() < 3 { continue; }
 
         let outer = solid.positions[vi];
@@ -1229,6 +1226,15 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         for &fi in adj_faces {
             let face = &solid.faces[fi];
             if let Some(inner_pos) = find_face_inner_at_vert(face, &all_inner[fi], vi as u32) {
+                // Skip face inners at the outer vertex only if the UNPROJECTED
+                // inner is also at the outer (truly zero chamfer inset).
+                // Keep boundary-projected ones (unprojected differs from outer).
+                if (inner_pos - outer).length_squared() < 1e-8 {
+                    let unproj = find_face_inner_at_vert(face, &all_inner_unprojected[fi], vi as u32);
+                    if unproj.map_or(true, |u| (u - outer).length_squared() < 1e-8) {
+                        continue; // Truly zero chamfer, skip
+                    }
+                }
                 let dup = ring.iter().any(|(r, _, _)| (*r - inner_pos).length_squared() < 1e-6);
                 if !dup {
                     ring.push((inner_pos, face.normal, false));
