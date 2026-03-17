@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use bevy::prelude::*;
@@ -509,6 +509,7 @@ struct EdgeInfo {
 }
 
 const SHARP_DOT_THRESHOLD: f32 = 0.985;
+const FILLET_FACTOR: f32 = 0.35;
 
 fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
     let mut edges: HashMap<(u32, u32), EdgeInfo> = HashMap::new();
@@ -956,6 +957,9 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         result
     }
 
+    // Track which edges used center-line split (vs single-quad fallback)
+    let mut centerline_edges: HashSet<(u32, u32)> = HashSet::new();
+
     for (&(ev0, ev1), info) in &edge_graph {
         if !sharp_set.contains_key(&edge_key(ev0, ev1)) { continue; }
 
@@ -976,30 +980,87 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             let nb = face_b.normal;
             let expected_out = (na + nb).normalize_or_zero();
 
-            let tri_normal = (a1 - a0).cross(b0 - a0);
-            let flipped = tri_normal.dot(expected_out) > 0.0;
-            let strip_poly = if flipped {
-                vec![b0, b1, a1, a0]
-            } else {
-                vec![a0, a1, b1, b0]
-            };
+            // Check if face inner vertices coincide (happens at internal merge vertices).
+            // If so, fall back to single quad to avoid overlapping half-quads.
+            let inners_coincide = (a0 - b0).length_squared() < 1e-6
+                && (a1 - b1).length_squared() < 1e-6;
 
-            if strip_poly.len() >= 3 {
-                let base = positions.len() as u32;
-                let (n_first, n_second) = if flipped { (nb, na) } else { (na, nb) };
+            if inners_coincide {
+                // Original single-quad emission (no center-line split needed)
+                let tri_normal = (a1 - a0).cross(b0 - a0);
+                let flipped = tri_normal.dot(expected_out) > 0.0;
+                let strip_poly = if flipped {
+                    vec![b0, b1, a1, a0]
+                } else {
+                    vec![a0, a1, b1, b0]
+                };
 
-                for (pi, p) in strip_poly.iter().enumerate() {
-                    positions.push(p.to_array());
-                    let n = if pi < strip_poly.len() / 2 {
-                        n_first.to_array()
-                    } else {
-                        n_second.to_array()
-                    };
-                    normals.push(n);
-                    uvs.push([0.0, 0.0]);
-                    chamfer_offsets.push([0.0; 3]);
+                if strip_poly.len() >= 3 {
+                    let base = positions.len() as u32;
+                    let (n_first, n_second) = if flipped { (nb, na) } else { (na, nb) };
+
+                    for (pi, p) in strip_poly.iter().enumerate() {
+                        positions.push(p.to_array());
+                        let n = if pi < strip_poly.len() / 2 {
+                            n_first.to_array()
+                        } else {
+                            n_second.to_array()
+                        };
+                        normals.push(n);
+                        uvs.push([0.0, 0.0]);
+                        chamfer_offsets.push([0.0; 3]);
+                    }
+                    triangulate_convex_polygon(&positions, base, strip_poly.len(), &mut indices);
                 }
-                triangulate_convex_polygon(&positions, base, strip_poly.len(), &mut indices);
+            } else {
+                // Center-line split: two half-quads with fillet curvature
+                centerline_edges.insert(edge_key(ev0, ev1));
+                let avg_n = (na + nb).normalize_or_zero();
+                let fillet_offset = if avg_n.length_squared() > 0.01 {
+                    avg_n * CHAMFER_WIDTH * FILLET_FACTOR
+                } else {
+                    Vec3::ZERO
+                };
+                let c0 = solid.positions[ev0 as usize] + fillet_offset;
+                let c1 = solid.positions[ev1 as usize] + fillet_offset;
+                let cn = avg_n.to_array();
+
+                let tri_normal = (a1 - a0).cross(c0 - a0);
+                let flipped = tri_normal.dot(expected_out) > 0.0;
+
+                // Half A: face A inner to center line
+                {
+                    let half_a = if flipped {
+                        vec![(c0, cn), (c1, cn), (a1, na.to_array()), (a0, na.to_array())]
+                    } else {
+                        vec![(a0, na.to_array()), (a1, na.to_array()), (c1, cn), (c0, cn)]
+                    };
+                    let base = positions.len() as u32;
+                    for (p, n) in &half_a {
+                        positions.push(p.to_array());
+                        normals.push(*n);
+                        uvs.push([0.0, 0.0]);
+                        chamfer_offsets.push([0.0; 3]);
+                    }
+                    triangulate_convex_polygon(&positions, base, half_a.len(), &mut indices);
+                }
+
+                // Half B: center line to face B inner
+                {
+                    let half_b = if flipped {
+                        vec![(b0, nb.to_array()), (b1, nb.to_array()), (c1, cn), (c0, cn)]
+                    } else {
+                        vec![(c0, cn), (c1, cn), (b1, nb.to_array()), (b0, nb.to_array())]
+                    };
+                    let base = positions.len() as u32;
+                    for (p, n) in &half_b {
+                        positions.push(p.to_array());
+                        normals.push(*n);
+                        uvs.push([0.0, 0.0]);
+                        chamfer_offsets.push([0.0; 3]);
+                    }
+                    triangulate_convex_polygon(&positions, base, half_b.len(), &mut indices);
+                }
             }
         } else {
             let fi_a = info.faces[0];
@@ -1062,14 +1123,36 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         if sharp_edge_keys.len() < 3 { continue; }
 
         let outer = solid.positions[vi];
-        let mut ring: Vec<(Vec3, Vec3)> = Vec::new();
+
+        // Build separate lists: face inner vertices and center-line vertices
+        // tagged=false for face inner, tagged=true for center-line
+        let mut ring: Vec<(Vec3, Vec3, bool)> = Vec::new();
         for &fi in adj_faces {
             let face = &solid.faces[fi];
             if let Some(inner_pos) = find_face_inner_at_vert(face, &all_inner[fi], vi as u32) {
                 if (inner_pos - outer).length_squared() > 1e-8 {
-                    let dup = ring.iter().any(|(r, _)| (*r - inner_pos).length_squared() < 1e-6);
+                    let dup = ring.iter().any(|(r, _, _)| (*r - inner_pos).length_squared() < 1e-6);
                     if !dup {
-                        ring.push((inner_pos, face.normal));
+                        ring.push((inner_pos, face.normal, false));
+                    }
+                }
+            }
+        }
+
+        for &ek in &sharp_edge_keys {
+            // Only add center-line vertex if this edge actually used center-line split
+            if !centerline_edges.contains(&ek) { continue; }
+            if let Some(info) = edge_graph.get(&ek) {
+                if info.faces.len() >= 2 {
+                    let na = solid.faces[info.faces[0]].normal;
+                    let nb = solid.faces[info.faces[1]].normal;
+                    let avg_n = (na + nb).normalize_or_zero();
+                    if avg_n.length_squared() > 0.01 {
+                        let center_pos = outer + avg_n * CHAMFER_WIDTH * FILLET_FACTOR;
+                        let dup = ring.iter().any(|(r, _, _)| (*r - center_pos).length_squared() < 1e-6);
+                        if !dup {
+                            ring.push((center_pos, avg_n, true));
+                        }
                     }
                 }
             }
@@ -1097,70 +1180,105 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // Add all ring vertices to the mesh
         let ring_start = positions.len() as u32;
-        for (rp, rn) in &ring {
+        for (rp, rn, _) in &ring {
             positions.push(rp.to_array());
             normals.push(rn.to_array());
             uvs.push([0.0, 0.0]);
             chamfer_offsets.push([0.0; 3]);
         }
 
-        let mut adjacent_normals: Vec<Vec3> = Vec::new();
-        for &fi in adj_faces {
-            let n = solid.faces[fi].normal;
-            if !adjacent_normals.iter().any(|an| an.dot(n).abs() > 0.99) {
-                adjacent_normals.push(n);
+        // Helper: emit a cap triangle with per-triangle winding check
+        let mut emit_cap_tri = |positions: &Vec<[f32; 3]>, indices: &mut Vec<u32>, a: u32, b: u32, c: u32, axis: Vec3| {
+            let va = Vec3::from_array(positions[a as usize]);
+            let vb = Vec3::from_array(positions[b as usize]);
+            let vc = Vec3::from_array(positions[c as usize]);
+            let cross = (vb - va).cross(vc - va);
+            if cross.length() < 1e-8 { return; }
+            if cross.dot(axis) > 0.0 {
+                indices.extend_from_slice(&[a, b, c]);
+            } else {
+                indices.extend_from_slice(&[a, c, b]);
             }
-        }
-        for &ek in &sharp_edge_keys {
-            if let Some(info) = sharp_set.get(&ek) {
-                if info.faces.len() >= 2 {
-                    let na = solid.faces[info.faces[0]].normal;
-                    let nb = solid.faces[info.faces[1]].normal;
-                    let sn = (na + nb).normalize_or_zero();
-                    if !adjacent_normals.iter().any(|an| an.dot(sn).abs() > 0.95) {
-                        adjacent_normals.push(sn);
+        };
+
+        // Structured triangulation of the interleaved ring:
+        // 1. For each face-inner vertex, emit triangle connecting it to its
+        //    adjacent center-line neighbors in the ring
+        // 2. Fan-triangulate the inner polygon of center-line vertices
+        let cl_indices: Vec<usize> = ring.iter().enumerate()
+            .filter(|(_, (_, _, is_cl))| *is_cl)
+            .map(|(i, _)| i)
+            .collect();
+
+        if cl_indices.len() >= 3 {
+            // Outer triangles: each face-inner vertex connects to adjacent center-line vertices
+            for (ri, (_, _, is_cl)) in ring.iter().enumerate() {
+                if *is_cl { continue; }
+                let n = ring.len();
+                let mut prev_cl = None;
+                let mut next_cl = None;
+                for step in 1..n {
+                    let prev_idx = (ri + n - step) % n;
+                    if ring[prev_idx].2 { prev_cl = Some(prev_idx); break; }
+                }
+                for step in 1..n {
+                    let next_idx = (ri + step) % n;
+                    if ring[next_idx].2 { next_cl = Some(next_idx); break; }
+                }
+                let (Some(prev_cl), Some(next_cl)) = (prev_cl, next_cl) else { continue };
+                if prev_cl == next_cl { continue; }
+
+                emit_cap_tri(&positions, &mut indices,
+                    ring_start + ri as u32,
+                    ring_start + next_cl as u32,
+                    ring_start + prev_cl as u32,
+                    axis);
+            }
+
+            // Inner polygon: fan-triangulate the center-line vertices
+            if cl_indices.len() >= 3 {
+                for i in 1..cl_indices.len() - 1 {
+                    emit_cap_tri(&positions, &mut indices,
+                        ring_start + cl_indices[0] as u32,
+                        ring_start + cl_indices[i] as u32,
+                        ring_start + cl_indices[i + 1] as u32,
+                        axis);
+                }
+            }
+        } else {
+            // Fallback: no center-line vertices (all boundary edges), use simple fan
+            for i in 1..ring.len() - 1 {
+                let va = ring[0].0;
+                let vb = ring[i].0;
+                let vc = ring[i + 1].0;
+
+                let cross = (vb - va).cross(vc - va);
+                if cross.length() < 1e-8 { continue; }
+                let fan_normal = cross.normalize_or_zero();
+
+                let mut skip = false;
+                for &fi in adj_faces {
+                    let face = &solid.faces[fi];
+                    let fn_normal = face.normal;
+                    if fan_normal.dot(fn_normal).abs() < 0.99 { continue; }
+                    let face_point = solid.positions[face.verts[0] as usize];
+                    let da = (va - face_point).dot(fn_normal).abs();
+                    let db = (vb - face_point).dot(fn_normal).abs();
+                    let dc = (vc - face_point).dot(fn_normal).abs();
+                    if da < 0.001 && db < 0.001 && dc < 0.001 {
+                        skip = true;
+                        break;
                     }
                 }
-            }
-        }
+                if skip { continue; }
 
-        let tri_normal = (ring[1].0 - ring[0].0).cross(ring[2].0 - ring[0].0);
-        let flip = tri_normal.dot(axis) < 0.0;
-
-        for i in 1..ring.len() - 1 {
-            let va = ring[0].0;
-            let vb = ring[i].0;
-            let vc = ring[i + 1].0;
-
-            // Skip degenerate triangles (from boundary-pinned coincident vertices)
-            let cross = (vb - va).cross(vc - va);
-            if cross.length() < 1e-8 { continue; }
-            let fan_normal = cross.normalize_or_zero();
-
-            let mut skip = false;
-            for &fi in adj_faces {
-                let face = &solid.faces[fi];
-                let fn_normal = face.normal;
-                if fan_normal.dot(fn_normal).abs() < 0.99 { continue; }
-                let face_point = solid.positions[face.verts[0] as usize];
-                let da = (va - face_point).dot(fn_normal).abs();
-                let db = (vb - face_point).dot(fn_normal).abs();
-                let dc = (vc - face_point).dot(fn_normal).abs();
-                if da < 0.001 && db < 0.001 && dc < 0.001 {
-                    skip = true;
-                    break;
-                }
-            }
-            if skip { continue; }
-
-            let a = ring_start;
-            let b = ring_start + i as u32;
-            let c = ring_start + i as u32 + 1;
-            if flip {
-                indices.extend_from_slice(&[a, c, b]);
-            } else {
-                indices.extend_from_slice(&[a, b, c]);
+                emit_cap_tri(&positions, &mut indices,
+                    ring_start,
+                    ring_start + i as u32,
+                    ring_start + i as u32 + 1,
+                    axis);
             }
         }
     }
