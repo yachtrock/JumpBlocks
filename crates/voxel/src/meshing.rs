@@ -743,8 +743,75 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
     let all_inner_unprojected: Vec<Vec<Vec3>> = all_inner_both.iter()
         .map(|face| face.iter().map(|&(_, u)| u).collect()).collect();
-    let all_inner: Vec<Vec<Vec3>> = all_inner_both.iter()
+    let mut all_inner: Vec<Vec<Vec3>> = all_inner_both.iter()
         .map(|face| face.iter().map(|&(p, _)| p).collect()).collect();
+
+    // ---------------------------------------------------------------
+    // Concave edge fixup: for face vertices at concave edges, replace
+    // projected inners with unprojected ones so the face polygon has
+    // the chamfer inset and leaves room for the concave fillet strip.
+    // ---------------------------------------------------------------
+    for (&(ev0, ev1), info) in &edge_graph {
+        if !sharp_set.contains_key(&edge_key(ev0, ev1)) { continue; }
+        if info.faces.len() < 2 { continue; }
+
+        // Sort faces for multi-face edges (same as strip emission)
+        let edge0 = solid.positions[ev0 as usize];
+        let edge_dir = (solid.positions[ev1 as usize] - edge0).normalize_or_zero();
+        let mut sorted_faces: Vec<usize> = info.faces.clone();
+        if sorted_faces.len() > 2 {
+            let ref_n = if edge_dir.x.abs() < 0.9 {
+                edge_dir.cross(Vec3::X).normalize_or_zero()
+            } else {
+                edge_dir.cross(Vec3::Y).normalize_or_zero()
+            };
+            let ref_t = edge_dir.cross(ref_n).normalize_or_zero();
+            sorted_faces.sort_by(|&a, &b| {
+                let na = solid.faces[a].normal;
+                let nb = solid.faces[b].normal;
+                na.dot(ref_t).atan2(na.dot(ref_n))
+                    .partial_cmp(&nb.dot(ref_t).atan2(nb.dot(ref_n)))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        let n_faces = sorted_faces.len();
+        let n_pairs = if n_faces <= 2 { n_faces - 1 } else { n_faces };
+        for pair_idx in 0..n_pairs {
+            let fi_a = sorted_faces[pair_idx];
+            let fi_b = sorted_faces[(pair_idx + 1) % n_faces];
+            let na = solid.faces[fi_a].normal;
+            let nb = solid.faces[fi_b].normal;
+            if na.dot(nb) >= SHARP_DOT_THRESHOLD { continue; }
+
+            let avg_n = (na + nb).normalize_or_zero();
+
+            for &ev in &[ev0, ev1] {
+                let a_unproj = find_face_inner_at_vert(&solid.faces[fi_a], &all_inner_unprojected[fi_a], ev);
+                let b_unproj = find_face_inner_at_vert(&solid.faces[fi_b], &all_inner_unprojected[fi_b], ev);
+                if let (Some(au), Some(bu)) = (a_unproj, b_unproj) {
+                    let mid_u = (au + bu) * 0.5;
+                    let edge_pos = solid.positions[ev as usize];
+                    let is_concave = (mid_u - edge_pos).dot(avg_n) > 1e-4;
+                    if is_concave {
+                        // Replace projected inners with unprojected for both faces at this vertex
+                        let face_a = &solid.faces[fi_a];
+                        for (vi_idx, &v) in face_a.verts.iter().enumerate() {
+                            if v == ev {
+                                all_inner[fi_a][vi_idx] = all_inner_unprojected[fi_a][vi_idx];
+                            }
+                        }
+                        let face_b = &solid.faces[fi_b];
+                        for (vi_idx, &v) in face_b.verts.iter().enumerate() {
+                            if v == ev {
+                                all_inner[fi_b][vi_idx] = all_inner_unprojected[fi_b][vi_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // ---------------------------------------------------------------
     // Pass 2b: collect chamfer strip planes per owning voxel
