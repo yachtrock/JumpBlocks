@@ -28,6 +28,10 @@ pub struct ChunkMeshResult {
     pub full_res: ChunkMeshData,
     pub lod: ChunkMeshData,
     pub collider_data: ChunkColliderData,
+    /// Debug overlay mesh highlighting faces with "impacted corner" vertices
+    /// (vertices that share a position with a chamfered edge but whose own
+    /// edges at that vertex are not sharp).
+    pub debug_overlay: Option<ChunkMeshData>,
 }
 
 // ---------------------------------------------------------------------------
@@ -292,10 +296,10 @@ fn rotate_cell_offset(cell: (u8, u8, u8), facing: Facing, size: (u8, u8, u8)) ->
 
 pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable, mode: crate::PresentationMode) -> ChunkMeshResult {
     let t0 = Instant::now();
-    let full_res = match mode {
-        crate::PresentationMode::Flat => generate_lod_mesh(data, neighbors, shapes),
+    let (full_res, debug_overlay) = match mode {
+        crate::PresentationMode::Flat => (generate_lod_mesh(data, neighbors, shapes), None),
         crate::PresentationMode::EdgeGraphChamfer => generate_chamfered_mesh(data, neighbors, shapes),
-        crate::PresentationMode::HalfEdgeChamfer => crate::halfedge_chamfer::generate_halfedge_chamfer(data, neighbors, shapes),
+        crate::PresentationMode::HalfEdgeChamfer => (crate::halfedge_chamfer::generate_halfedge_chamfer(data, neighbors, shapes), None),
     };
     let t1 = Instant::now();
     let lod = generate_lod_mesh(data, neighbors, shapes);
@@ -321,6 +325,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             vertices: collider_vertices,
             indices: collider_indices,
         },
+        debug_overlay,
     }
 }
 
@@ -630,7 +635,7 @@ struct ChamferClipPlane {
 // Chamfered mesh generation (edge-graph post-process)
 // ---------------------------------------------------------------------------
 
-fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> ChunkMeshData {
+fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> (ChunkMeshData, Option<ChunkMeshData>) {
     let solid = build_solid_mesh(data, neighbors, shapes);
     let edge_graph = build_edge_graph(&solid);
 
@@ -656,6 +661,16 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         for &vi in &face.verts {
             vertex_faces[vi as usize].push(fi);
         }
+    }
+
+    // Build set of vertices that are endpoints of any sharp edge.
+    // Faces that share these vertices (but have no sharp edges of their own
+    // at that vertex) still need a corner inset — they are diagonal to the
+    // chamfered edge and must participate in the corner cap.
+    let mut chamfered_verts: HashSet<u32> = HashSet::new();
+    for &(ev0, ev1) in sharp_set.keys() {
+        chamfered_verts.insert(ev0);
+        chamfered_verts.insert(ev1);
     }
 
     // ---------------------------------------------------------------
@@ -877,6 +892,11 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     let mut chamfer_offsets: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
+    // Debug overlay: faces with "impacted corner" vertices
+    let mut dbg_positions: Vec<[f32; 3]> = Vec::new();
+    let mut dbg_normals: Vec<[f32; 3]> = Vec::new();
+    let mut dbg_indices: Vec<u32> = Vec::new();
+
     // ---------------------------------------------------------------
     // Pass 3: emit inner faces, clipped against chamfer strips from neighbors
     // ---------------------------------------------------------------
@@ -1001,6 +1021,58 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                     }
                     triangulate_convex_polygon(&positions, inner_base, clean_poly.len(), &mut indices);
                 }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Debug: detect faces with "impacted corner" vertices and emit
+    // them into the debug overlay mesh.  A vertex is an impacted
+    // corner when it appears as an endpoint of a sharp edge (from
+    // another block) but none of THIS face's edges at that vertex
+    // are sharp — meaning the face doesn't participate in the
+    // chamfer and leaves a gap at the corner.
+    // ---------------------------------------------------------------
+    let mut impacted_verts: HashSet<u32> = HashSet::new();
+    for (fi, face) in solid.faces.iter().enumerate() {
+        let n = face.verts.len();
+        let mut has_impacted = false;
+        for vi in 0..n {
+            if !chamfered_verts.contains(&face.verts[vi]) {
+                continue;
+            }
+            let prev = (vi + n - 1) % n;
+            let prev_edge = edge_key(face.verts[prev], face.verts[vi]);
+            let next_edge = edge_key(face.verts[vi], face.verts[(vi + 1) % n]);
+            let prev_sharp = sharp_set.contains_key(&prev_edge);
+            let next_sharp = sharp_set.contains_key(&next_edge);
+            if !prev_sharp && !next_sharp {
+                has_impacted = true;
+                impacted_verts.insert(face.verts[vi]);
+            }
+        }
+        if has_impacted {
+            let inner = &all_inner[fi];
+            let normal_arr = face.normal.to_array();
+            let base = dbg_positions.len() as u32;
+            for i in 0..n {
+                // Slight offset along normal to avoid z-fighting
+                let p = inner[i] + face.normal * 0.002;
+                dbg_positions.push(p.to_array());
+                dbg_normals.push(normal_arr);
+            }
+            if face.orig_triangles.len() >= n - 2 {
+                for tri in &face.orig_triangles {
+                    let pa = inner[tri[0]];
+                    let pb = inner[tri[1]];
+                    let pc = inner[tri[2]];
+                    if (pb - pa).cross(pc - pa).length() < 1e-8 { continue; }
+                    dbg_indices.push(base + tri[2] as u32);
+                    dbg_indices.push(base + tri[1] as u32);
+                    dbg_indices.push(base + tri[0] as u32);
+                }
+            } else {
+                triangulate_convex_polygon(&dbg_positions, base, n, &mut dbg_indices);
             }
         }
     }
@@ -1216,6 +1288,20 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         }
 
 
+        let is_impacted = impacted_verts.contains(&(vi as u32));
+
+        if is_impacted {
+            let pos = solid.positions[vi];
+            let face_normals: Vec<Vec3> = adj_faces.iter().map(|&fi| solid.faces[fi].normal).collect();
+            let face_voxels: Vec<(usize,usize,usize)> = adj_faces.iter().map(|&fi| solid.faces[fi].voxel).collect();
+            warn!(
+                "IMPACTED VERTEX {} at ({:.3},{:.3},{:.3}): {} sharp edges, {} adj faces, voxels={:?}, normals={:?}",
+                vi, pos.x, pos.y, pos.z,
+                sharp_edge_keys.len(), adj_faces.len(),
+                face_voxels, face_normals,
+            );
+        }
+
         if sharp_edge_keys.len() < 3 { continue; }
 
         let outer = solid.positions[vi];
@@ -1298,6 +1384,22 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
                         }
                     }
                 }
+            }
+        }
+
+        if is_impacted {
+            warn!(
+                "  IMPACTED VERTEX {} ring has {} entries (face_inners={}, center_lines={})",
+                vi, ring.len(),
+                ring.iter().filter(|(_, _, cl)| !cl).count(),
+                ring.iter().filter(|(_, _, cl)| *cl).count(),
+            );
+            for (i, (rp, rn, is_cl)) in ring.iter().enumerate() {
+                let kind = if *is_cl { "center-line" } else { "face-inner" };
+                warn!(
+                    "    ring[{}]: {} ({:.4},{:.4},{:.4}) normal=({:.2},{:.2},{:.2})",
+                    i, kind, rp.x, rp.y, rp.z, rn.x, rn.y, rn.z,
+                );
             }
         }
 
@@ -1426,7 +1528,20 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         }
     }
 
-    ChunkMeshData { positions, normals, uvs, chamfer_offsets, indices }
+    let debug_overlay = if dbg_positions.is_empty() {
+        None
+    } else {
+        let n = dbg_positions.len();
+        Some(ChunkMeshData {
+            positions: dbg_positions,
+            normals: dbg_normals,
+            uvs: vec![[0.0, 0.0]; n],
+            chamfer_offsets: vec![[0.0; 3]; n],
+            indices: dbg_indices,
+        })
+    };
+
+    (ChunkMeshData { positions, normals, uvs, chamfer_offsets, indices }, debug_overlay)
 }
 
 // ---------------------------------------------------------------------------

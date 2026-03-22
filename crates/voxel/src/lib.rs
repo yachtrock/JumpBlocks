@@ -63,6 +63,10 @@ impl Plugin for VoxelPlugin {
 #[derive(Component)]
 struct ChunkMeshTask(Task<ChunkMeshResult>);
 
+/// Marker for debug overlay child entities (so we can despawn them on remesh).
+#[derive(Component)]
+struct DebugOverlay;
+
 /// System that promotes Loaded chunks to Dirty once all their neighbors are
 /// either absent (None) or have data loaded. Currently neighbors are stored as
 /// `Option<ChunkData>` so they're always ready if present — this gate will
@@ -108,11 +112,18 @@ fn handle_chunk_mesh_results(
     mut commands: Commands,
     mut query: Query<(Entity, &mut Chunk, &mut ChunkMeshTask)>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    debug_overlays: Query<Entity, With<DebugOverlay>>,
 ) {
     for (entity, mut chunk, mut task) in query.iter_mut() {
         let Some(result) = block_on(poll_once(&mut task.0)) else {
             continue;
         };
+
+        // Despawn old debug overlays that are children of this chunk
+        for dbg_entity in debug_overlays.iter() {
+            commands.entity(dbg_entity).try_despawn();
+        }
 
         // Skip if mesh is empty (no filled voxels)
         if result.full_res.positions.is_empty() {
@@ -133,6 +144,25 @@ fn handle_chunk_mesh_results(
             .entity(entity)
             .insert((Mesh3d(mesh_handle), collider, RigidBody::Static))
             .remove::<ChunkMeshTask>();
+
+        // Spawn debug overlay as child entity with red material
+        if let Some(debug_data) = result.debug_overlay {
+            if !debug_data.positions.is_empty() {
+                let dbg_mesh = build_lod_mesh(&debug_data);
+                let dbg_mesh_handle = meshes.add(dbg_mesh);
+                let dbg_material = materials.add(StandardMaterial {
+                    base_color: Color::srgba(1.0, 0.0, 0.0, 0.8),
+                    alpha_mode: AlphaMode::Blend,
+                    unlit: true,
+                    ..default()
+                });
+                commands.entity(entity).with_child((
+                    DebugOverlay,
+                    Mesh3d(dbg_mesh_handle),
+                    MeshMaterial3d(dbg_material),
+                ));
+            }
+        }
 
         chunk.state = ChunkState::Ready;
     }
