@@ -161,10 +161,10 @@ fn setup_world(
         }
         // A column at the boundary edge (x=30)
         for by in 0..2 {
-            chunk_data.place_std(30, 2 + by, 8, SHAPE_CUBE, Facing::North, 1);
+            chunk_data.place_std(30, 1 + by, 8, SHAPE_CUBE, Facing::North, 1);
         }
         // Wedge at boundary top
-        chunk_data.place_wedge(30, 6, 8, Facing::West, 1);
+        chunk_data.place_wedge(30, 3, 8, Facing::West, 1);
 
         // Row of cubes along boundary at ground level
         for bz in 0..3 {
@@ -193,10 +193,10 @@ fn setup_world(
         }
         // Matching column on this side
         for by in 0..2 {
-            neighbor_data.place_std(0, 2 + by, 8, SHAPE_CUBE, Facing::North, 1);
+            neighbor_data.place_std(0, 1 + by, 8, SHAPE_CUBE, Facing::North, 1);
         }
         // Wedge pointing back
-        neighbor_data.place_wedge(0, 6, 8, Facing::East, 1);
+        neighbor_data.place_wedge(0, 3, 8, Facing::East, 1);
 
         // Matching row of cubes along boundary
         for bz in 0..3 {
@@ -211,7 +211,7 @@ fn setup_world(
         }
         // Wedge ramp on top
         for bz in 0..3 {
-            neighbor_data.place_wedge(6, 2, 14 + bz * 2, Facing::West, 1);
+            neighbor_data.place_wedge(6, 1, 14 + bz * 2, Facing::West, 1);
         }
 
         // Wire up neighbor references
