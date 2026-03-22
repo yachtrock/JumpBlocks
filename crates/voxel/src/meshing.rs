@@ -756,7 +756,7 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         }).collect::<Vec<_>>()
     }).collect::<Vec<_>>();
 
-    let all_inner_unprojected: Vec<Vec<Vec3>> = all_inner_both.iter()
+    let mut all_inner_unprojected: Vec<Vec<Vec3>> = all_inner_both.iter()
         .map(|face| face.iter().map(|&(_, u)| u).collect()).collect();
     let mut all_inner: Vec<Vec<Vec3>> = all_inner_both.iter()
         .map(|face| face.iter().map(|&(p, _)| p).collect()).collect();
@@ -898,7 +898,31 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     let mut dbg_indices: Vec<u32> = Vec::new();
 
     // ---------------------------------------------------------------
-    // Pass 3: emit inner faces, clipped against chamfer strips from neighbors
+    // Pass 2c: detect impacted corners (for debug overlay).
+    // A vertex is an "impacted corner" when it's an endpoint of a
+    // sharp edge (from other blocks) but none of THIS face's edges
+    // at that vertex are sharp.
+    // ---------------------------------------------------------------
+    let mut impacted_verts: HashSet<u32> = HashSet::new();
+    for (_fi, face) in solid.faces.iter().enumerate() {
+        let n = face.verts.len();
+        for vi in 0..n {
+            if !chamfered_verts.contains(&face.verts[vi]) {
+                continue;
+            }
+            let prev = (vi + n - 1) % n;
+            let prev_edge = edge_key(face.verts[prev], face.verts[vi]);
+            let next_edge = edge_key(face.verts[vi], face.verts[(vi + 1) % n]);
+            let prev_sharp = sharp_set.contains_key(&prev_edge);
+            let next_sharp = sharp_set.contains_key(&next_edge);
+            if !prev_sharp && !next_sharp {
+                impacted_verts.insert(face.verts[vi]);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Emit inner faces, clipped against chamfer strips from neighbors
     // ---------------------------------------------------------------
     for (fi, face) in solid.faces.iter().enumerate() {
         let normal_arr = face.normal.to_array();
@@ -907,11 +931,25 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         let (vx, vy, vz) = face.voxel;
         let mut clip_planes: Vec<(Vec3, Vec3)> = Vec::new();
         let (sx, sy, sz) = face.block_size;
-        // Check neighbors at the block's outer boundary, not just ±1 from origin
-        let neighbor_offsets: [(i32, i32, i32); 6] = [
-            (-1, 0, 0), (sx as i32, 0, 0),
-            (0, -1, 0), (0, sy as i32, 0),
-            (0, 0, -1), (0, 0, sz as i32),
+        // Check all 26 neighbors at the block's outer boundary: face-adjacent
+        // (6), edge-adjacent (12), and corner-adjacent (8). Diagonal neighbors
+        // are needed so faces diagonal to a chamfered edge get clipped by the
+        // chamfer strip planes.
+        let sxi = sx as i32;
+        let syi = sy as i32;
+        let szi = sz as i32;
+        let neighbor_offsets: [(i32, i32, i32); 26] = [
+            // 6 face-adjacent
+            (-1, 0, 0), (sxi, 0, 0),
+            (0, -1, 0), (0, syi, 0),
+            (0, 0, -1), (0, 0, szi),
+            // 12 edge-adjacent diagonals
+            (-1, -1, 0), (-1, syi, 0), (sxi, -1, 0), (sxi, syi, 0),
+            (-1, 0, -1), (-1, 0, szi), (sxi, 0, -1), (sxi, 0, szi),
+            (0, -1, -1), (0, -1, szi), (0, syi, -1), (0, syi, szi),
+            // 8 corner-adjacent diagonals
+            (-1, -1, -1), (-1, -1, szi), (-1, syi, -1), (-1, syi, szi),
+            (sxi, -1, -1), (sxi, -1, szi), (sxi, syi, -1), (sxi, syi, szi),
         ];
         for &(dx, dy, dz) in &neighbor_offsets {
             let nx = vx as i32 + dx;
@@ -1026,31 +1064,17 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     }
 
     // ---------------------------------------------------------------
-    // Debug: detect faces with "impacted corner" vertices and emit
-    // them into the debug overlay mesh.  A vertex is an impacted
-    // corner when it appears as an endpoint of a sharp edge (from
-    // another block) but none of THIS face's edges at that vertex
-    // are sharp — meaning the face doesn't participate in the
-    // chamfer and leaves a gap at the corner.
+    // Debug: emit impacted corner faces into the debug overlay mesh.
     // ---------------------------------------------------------------
-    let mut impacted_verts: HashSet<u32> = HashSet::new();
     for (fi, face) in solid.faces.iter().enumerate() {
         let n = face.verts.len();
-        let mut has_impacted = false;
-        for vi in 0..n {
-            if !chamfered_verts.contains(&face.verts[vi]) {
-                continue;
-            }
+        let has_impacted = (0..n).any(|vi| {
+            if !impacted_verts.contains(&face.verts[vi]) { return false; }
             let prev = (vi + n - 1) % n;
             let prev_edge = edge_key(face.verts[prev], face.verts[vi]);
             let next_edge = edge_key(face.verts[vi], face.verts[(vi + 1) % n]);
-            let prev_sharp = sharp_set.contains_key(&prev_edge);
-            let next_sharp = sharp_set.contains_key(&next_edge);
-            if !prev_sharp && !next_sharp {
-                has_impacted = true;
-                impacted_verts.insert(face.verts[vi]);
-            }
-        }
+            !sharp_set.contains_key(&prev_edge) && !sharp_set.contains_key(&next_edge)
+        });
         if has_impacted {
             let inner = &all_inner[fi];
             let normal_arr = face.normal.to_array();
@@ -1405,10 +1429,18 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
 
         if ring.len() < 3 { continue; }
 
-        let axis = adj_faces.iter()
-            .map(|&fi| solid.faces[fi].normal)
-            .sum::<Vec3>()
-            .normalize_or_zero();
+        // Compute the corner axis from unique face normals. Using one
+        // representative per normal direction prevents coplanar faces
+        // (e.g. 3 Y+ faces) from biasing the axis and breaking the
+        // angular sort that interleaves face-inners with center-lines.
+        let mut unique_normals: Vec<Vec3> = Vec::new();
+        for &fi in adj_faces {
+            let n = solid.faces[fi].normal;
+            if !unique_normals.iter().any(|u| u.dot(n) > 0.99) {
+                unique_normals.push(n);
+            }
+        }
+        let axis = unique_normals.iter().copied().sum::<Vec3>().normalize_or_zero();
 
         let ref_dir = if axis.x.abs() < 0.9 {
             axis.cross(Vec3::X).normalize_or_zero()
@@ -1424,6 +1456,14 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             let angle_b = db.dot(tangent).atan2(db.dot(ref_dir));
             angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        if is_impacted {
+            warn!("  SORTED ring for vertex {}:", vi);
+            for (i, (rp, rn, is_cl)) in ring.iter().enumerate() {
+                let kind = if *is_cl { "center-line" } else { "face-inner" };
+                warn!("    sorted[{}]: {} ({:.4},{:.4},{:.4})", i, kind, rp.x, rp.y, rp.z);
+            }
+        }
 
         // Add all ring vertices to the mesh
         let ring_start = positions.len() as u32;
@@ -1448,49 +1488,52 @@ fn generate_chamfered_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
             }
         };
 
-        // Structured triangulation of the interleaved ring:
-        // 1. For each face-inner vertex, emit triangle connecting it to its
-        //    adjacent center-line neighbors in the ring
-        // 2. Fan-triangulate the inner polygon of center-line vertices
+        // Run-based triangulation: divide the sorted ring into "runs"
+        // of consecutive face-inners bounded by center-lines. Fan each
+        // run from its starting center-line, then fan the center-line
+        // inner polygon. This handles both the standard interleaved
+        // case (each run has 1 face-inner) and the impacted diagonal
+        // case (a run has multiple adjacent face-inners).
         let cl_indices: Vec<usize> = ring.iter().enumerate()
             .filter(|(_, (_, _, is_cl))| *is_cl)
             .map(|(i, _)| i)
             .collect();
 
         if cl_indices.len() >= 3 {
-            // Outer triangles: each face-inner vertex connects to adjacent center-line vertices
-            for (ri, (_, _, is_cl)) in ring.iter().enumerate() {
-                if *is_cl { continue; }
-                let n = ring.len();
-                let mut prev_cl = None;
-                let mut next_cl = None;
-                for step in 1..n {
-                    let prev_idx = (ri + n - step) % n;
-                    if ring[prev_idx].2 { prev_cl = Some(prev_idx); break; }
-                }
-                for step in 1..n {
-                    let next_idx = (ri + step) % n;
-                    if ring[next_idx].2 { next_cl = Some(next_idx); break; }
-                }
-                let (Some(prev_cl), Some(next_cl)) = (prev_cl, next_cl) else { continue };
-                if prev_cl == next_cl { continue; }
+            let n = ring.len();
+            for (ci, &cl_start) in cl_indices.iter().enumerate() {
+                let cl_end = cl_indices[(ci + 1) % cl_indices.len()];
 
+                // Collect face-inner indices walking from cl_start+1 to cl_end
+                let mut fi_run: Vec<usize> = Vec::new();
+                let mut cursor = (cl_start + 1) % n;
+                while cursor != cl_end {
+                    fi_run.push(cursor);
+                    cursor = (cursor + 1) % n;
+                }
+                if fi_run.is_empty() { continue; }
+
+                // Fan-triangulate [cl_start, fi_0, ..., fi_k, cl_end] from cl_start
+                let mut prev = ring_start + fi_run[0] as u32;
+                for &fi_idx in fi_run.iter().skip(1) {
+                    let curr = ring_start + fi_idx as u32;
+                    emit_cap_tri(&positions, &mut indices,
+                        ring_start + cl_start as u32, prev, curr, axis);
+                    prev = curr;
+                }
+                // Final triangle connecting last face-inner to cl_end
                 emit_cap_tri(&positions, &mut indices,
-                    ring_start + ri as u32,
-                    ring_start + next_cl as u32,
-                    ring_start + prev_cl as u32,
-                    axis);
+                    ring_start + cl_start as u32, prev,
+                    ring_start + cl_end as u32, axis);
             }
 
             // Inner polygon: fan-triangulate the center-line vertices
-            if cl_indices.len() >= 3 {
-                for i in 1..cl_indices.len() - 1 {
-                    emit_cap_tri(&positions, &mut indices,
-                        ring_start + cl_indices[0] as u32,
-                        ring_start + cl_indices[i] as u32,
-                        ring_start + cl_indices[i + 1] as u32,
-                        axis);
-                }
+            for i in 1..cl_indices.len() - 1 {
+                emit_cap_tri(&positions, &mut indices,
+                    ring_start + cl_indices[0] as u32,
+                    ring_start + cl_indices[i] as u32,
+                    ring_start + cl_indices[i + 1] as u32,
+                    axis);
             }
         } else {
             // Fallback: no center-line vertices (all boundary edges), use simple fan
