@@ -21,11 +21,11 @@ pub enum PresentationMode {
     /// LOD mesh — no chamfer, no shared verts.
     Flat,
     /// Edge-graph chamfer post-process.
-    #[default]
     EdgeGraphChamfer,
     /// Half-edge mesh chamfer using procedural_modelling crate.
     HalfEdgeChamfer,
     /// Cut-and-offset chamfer: insert edge loops then offset original verts.
+    #[default]
     CutAndOffset,
 }
 

@@ -35,7 +35,9 @@ fn intersect_lines_in_plane(
 
 /// Emit a quad as two triangles.  The `expected_normal` is used to determine
 /// correct winding — the triangle normal is computed from the vertices, and
-/// if it disagrees with `expected_normal` the winding is flipped.
+/// if it disagrees with `expected_normal` the winding is flipped.  Also
+/// detects "bowtie" quads (vertices not in cyclic order) and switches to
+/// the v1–v3 diagonal when needed.
 fn emit_quad(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
@@ -53,16 +55,31 @@ fn emit_quad(
     normals.extend_from_slice(&[n, n, n, n]);
     uvs.extend_from_slice(&[[0.0; 2]; 4]);
 
-    // Compute actual triangle normal from first three verts to detect winding.
-    let computed = (v1 - v0).cross(v2 - v0);
-    if computed.dot(expected_normal) >= 0.0 {
-        // CCW already matches expected outward normal
-        indices.extend_from_slice(&[base, base + 1, base + 2]);
-        indices.extend_from_slice(&[base, base + 2, base + 3]);
+    // Check if the v0–v2 diagonal produces two triangles with consistent
+    // winding.  If not, the vertices form a bowtie and we need the v1–v3
+    // diagonal instead.
+    let n02_a = (v1 - v0).cross(v2 - v0);
+    let n02_b = (v2 - v0).cross(v3 - v0);
+
+    if n02_a.dot(n02_b) >= 0.0 {
+        // v0–v2 diagonal is valid.  Check winding against expected normal.
+        if n02_a.dot(expected_normal) >= 0.0 {
+            indices.extend_from_slice(&[base, base + 1, base + 2]);
+            indices.extend_from_slice(&[base, base + 2, base + 3]);
+        } else {
+            indices.extend_from_slice(&[base + 2, base + 1, base]);
+            indices.extend_from_slice(&[base, base + 3, base + 2]);
+        }
     } else {
-        // Flip to CCW
-        indices.extend_from_slice(&[base + 2, base + 1, base]);
-        indices.extend_from_slice(&[base, base + 3, base + 2]);
+        // Bowtie — use v1–v3 diagonal instead.
+        let n13 = (v0 - v1).cross(v3 - v1);
+        if n13.dot(expected_normal) >= 0.0 {
+            indices.extend_from_slice(&[base + 1, base + 2, base + 3]);
+            indices.extend_from_slice(&[base + 1, base + 3, base]);
+        } else {
+            indices.extend_from_slice(&[base + 3, base + 2, base + 1]);
+            indices.extend_from_slice(&[base, base + 3, base + 1]);
+        }
     }
 }
 
@@ -388,23 +405,71 @@ pub fn generate_cut_offset_chamfer(
 
         // -- Emit inner polygon ----------------------------------------------
         let any_sharp = prev_sharp.iter().any(|&s| s) || next_sharp.iter().any(|&s| s);
-        let inner_base = positions.len() as u32;
-        for i in 0..n {
-            positions.push(inner[i].into());
-            normals.push(fn_.into());
-            uvs.push([0.0, 0.0]);
-        }
-        if !face.orig_triangles.is_empty() {
+
+        // Helper: detect collinear midpoint vertex.
+        let is_collinear_midpoint = |i: usize| -> bool {
+            if !prev_sharp[i] || !next_sharp[i] {
+                return false;
+            }
+            let ip = (i + n - 1) % n;
+            let j = (i + 1) % n;
+            let prev_dir = (orig[i] - orig[ip]).normalize_or_zero();
+            let next_dir = (orig[j] - orig[i]).normalize_or_zero();
+            prev_dir.dot(next_dir).abs() > 0.99
+        };
+
+        // Determine which vertices will get corner patches.
+        let needs_patch: Vec<bool> = (0..n)
+            .map(|i| {
+                let vi = face.verts[i];
+                chamfered_verts.contains(&vi)
+                    && !is_collinear_midpoint(i)
+                    && ((prev_sharp[i] && next_sharp[i]) || has_external_chamfer(i))
+            })
+            .collect();
+
+        // Triangulate the inner polygon using emit_quad/emit_tri which
+        // handle non-convex polygons and auto-correct winding.
+        // The full intersection offset can make the polygon non-convex,
+        // so we can't use triangulate_convex_polygon.
+        let any_chamfered = (0..n).any(|i| chamfered_verts.contains(&face.verts[i]));
+
+        if n == 3 {
+            emit_tri(
+                &mut positions, &mut normals, &mut uvs, &mut indices,
+                inner[0], inner[1], inner[2], fn_,
+            );
+        } else if n == 4 {
+            emit_quad(
+                &mut positions, &mut normals, &mut uvs, &mut indices,
+                inner[0], inner[1], inner[2], inner[3], fn_,
+            );
+        } else if !face.orig_triangles.is_empty() && !any_chamfered {
+            // No vertices moved — safe to reuse original triangulation.
+            let inner_base = positions.len() as u32;
+            for i in 0..n {
+                positions.push(inner[i].into());
+                normals.push(fn_.into());
+                uvs.push([0.0, 0.0]);
+            }
             for tri in &face.orig_triangles {
                 indices.push(inner_base + tri[2] as u32);
                 indices.push(inner_base + tri[1] as u32);
                 indices.push(inner_base + tri[0] as u32);
             }
         } else {
-            triangulate_convex_polygon(&positions, inner_base, n, &mut indices);
+            // 5+ vertices with chamfered verts — fan from vertex 0 using
+            // emit_tri for winding correction.
+            for k in 1..n - 1 {
+                emit_tri(
+                    &mut positions, &mut normals, &mut uvs, &mut indices,
+                    inner[0], inner[k], inner[k + 1], fn_,
+                );
+            }
         }
 
-        if !any_sharp {
+        let any_patch = needs_patch.iter().any(|&p| p);
+        if !any_sharp && !any_patch {
             continue; // nothing else to emit for this face
         }
 
@@ -419,19 +484,6 @@ pub fn generate_cut_offset_chamfer(
         // line intersection).  Otherwise, outer is the original vertex and
         // inner is the split vertex (which equals the inner-polygon vertex).
 
-        // Helper: detect collinear midpoint vertex (both adjacent edges are
-        // sharp and effectively the same line).
-        let is_collinear_midpoint = |i: usize| -> bool {
-            if !prev_sharp[i] || !next_sharp[i] {
-                return false;
-            }
-            let ip = (i + n - 1) % n;
-            let j = (i + 1) % n;
-            let prev_dir = (orig[i] - orig[ip]).normalize_or_zero();
-            let next_dir = (orig[j] - orig[i]).normalize_or_zero();
-            prev_dir.dot(next_dir).abs() > 0.99
-        };
-
         for i in 0..n {
             let j = (i + 1) % n;
             if cuts[i].is_none() {
@@ -445,11 +497,9 @@ pub fn generate_cut_offset_chamfer(
             // Truncate if vi has a corner patch.  A corner patch exists when:
             //   - both edges sharp (non-collinear), OR
             //   - vertex has external chamfering (sharp edges from other faces)
-            let vi_needs_patch = !is_collinear_midpoint(i)
-                && ((prev_sharp[i] && next_sharp[i]) || has_external_chamfer(i));
-            let (outer_i, inner_i) = if vi_needs_patch {
-                let ip = (i + n - 1) % n;
+            let (outer_i, inner_i) = if needs_patch[i] {
                 let trunc = if prev_sharp[i] {
+                    let ip = (i + n - 1) % n;
                     cuts[ip].as_ref().map_or(split_toward(i, j), |c| c.split_j)
                 } else {
                     split_toward(i, j)
@@ -460,9 +510,7 @@ pub fn generate_cut_offset_chamfer(
             };
 
             // --- vj end ---
-            let vj_needs_patch = !is_collinear_midpoint(j)
-                && ((prev_sharp[j] && next_sharp[j]) || has_external_chamfer(j));
-            let (outer_j, inner_j) = if vj_needs_patch {
+            let (outer_j, inner_j) = if needs_patch[j] {
                 let trunc = if next_sharp[j] {
                     cuts[j].as_ref().map_or(split_toward(j, i), |c| c.split_i)
                 } else {
@@ -487,32 +535,16 @@ pub fn generate_cut_offset_chamfer(
             );
         }
 
-        // -- Emit corner patches ---------------------------------------------
-        // A corner patch is emitted when:
-        //   - Both adjacent edges are sharp (non-collinear), OR
-        //   - The vertex has external chamfering (sharp edges from other faces).
-        // Gap triangles fill along non-sharp edges at these vertices.
+        // -- Emit corner patches + gap triangles --------------------------------
 
         for i in 0..n {
-            let vi = face.verts[i];
-            if !chamfered_verts.contains(&vi) {
-                continue;
-            }
-            if is_collinear_midpoint(i) {
-                continue;
-            }
-            let both_sharp = prev_sharp[i] && next_sharp[i];
-            if !both_sharp && !has_external_chamfer(i) {
+            if !needs_patch[i] {
                 continue;
             }
 
             let ip = (i + n - 1) % n;
             let j = (i + 1) % n;
 
-            // Split points on the adjacent edges at CHAMFER_WIDTH from orig[i].
-            // "on_next_edge" = where prev's cut line exits onto the next edge.
-            // "on_prev_edge" = where next's cut line exits onto the prev edge.
-            // Use real cut line splits when available (handles collinearity).
             let split_on_next_edge = if prev_sharp[i] {
                 cuts[ip].as_ref().map_or(split_toward(i, j), |c| c.split_j)
             } else {
@@ -538,32 +570,17 @@ pub fn generate_cut_offset_chamfer(
                 fn_,
             );
 
-            // Gap triangles on non-sharp edges to fill between the corner
-            // patch and the inner polygon.
+            // Gap triangles on non-sharp edges.
             if !prev_sharp[i] {
-                // Gap along prev edge: inner[prev] → split_on_prev → inner[i]
                 emit_tri(
-                    &mut positions,
-                    &mut normals,
-                    &mut uvs,
-                    &mut indices,
-                    inner[ip],
-                    split_on_prev_edge,
-                    inner[i],
-                    fn_,
+                    &mut positions, &mut normals, &mut uvs, &mut indices,
+                    inner[ip], split_on_prev_edge, inner[i], fn_,
                 );
             }
             if !next_sharp[i] {
-                // Gap along next edge: inner[i] → split_on_next → inner[next]
                 emit_tri(
-                    &mut positions,
-                    &mut normals,
-                    &mut uvs,
-                    &mut indices,
-                    inner[i],
-                    split_on_next_edge,
-                    inner[j],
-                    fn_,
+                    &mut positions, &mut normals, &mut uvs, &mut indices,
+                    inner[i], split_on_next_edge, inner[j], fn_,
                 );
             }
         }
