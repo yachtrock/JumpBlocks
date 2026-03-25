@@ -122,8 +122,8 @@ pub fn generate_cut_offset_chamfer(
     let mut indices: Vec<u32> = Vec::new();
 
     // Per (edge_key, face_index) → (inner_v_at_a, inner_v_at_b) in edge-key
-    // order, for cross-face strip emission later.
-    let mut edge_face_inners: HashMap<((u32, u32), usize), (Vec3, Vec3)> = HashMap::new();
+    // order.  Will be used for cross-face strip emission in future phases.
+    let mut _edge_face_inners: HashMap<((u32, u32), usize), (Vec3, Vec3)> = HashMap::new();
 
     // -----------------------------------------------------------------------
     // Per-face: subdivide via vertex splits
@@ -304,7 +304,7 @@ pub fn generate_cut_offset_chamfer(
             } else {
                 (inner[j], inner[i])
             };
-            edge_face_inners.insert((ek, fi), (a, b));
+            _edge_face_inners.insert((ek, fi), (a, b));
         }
 
         // -- Emit inner polygon ----------------------------------------------
@@ -426,68 +426,15 @@ pub fn generate_cut_offset_chamfer(
     }
 
     // -----------------------------------------------------------------------
-    // Cross-face chamfer strips
+    // TODO: Cross-face chamfer strips & vertex offset (fillet shaping)
     // -----------------------------------------------------------------------
-    // For each sharp edge shared by two faces, bridge the gap between the two
-    // faces' inner edges with a fillet-profile strip (two half-quads with a
-    // pushed center-line).
-
-    for &ek in &sharp_edges {
-        let Some(info) = edge_graph.get(&ek) else {
-            continue;
-        };
-        if info.faces.len() < 2 {
-            continue;
-        }
-
-        for pair in info.faces.windows(2) {
-            let fi_a = pair[0];
-            let fi_b = pair[1];
-            let na = solid.faces[fi_a].normal;
-            let nb = solid.faces[fi_b].normal;
-
-            let Some(&(inner_a0, inner_a1)) = edge_face_inners.get(&(ek, fi_a)) else {
-                continue;
-            };
-            let Some(&(inner_b0, inner_b1)) = edge_face_inners.get(&(ek, fi_b)) else {
-                continue;
-            };
-
-            let avg_n = (na + nb).normalize_or_zero();
-            let push = fillet_push_amount(na, nb, CHAMFER_WIDTH);
-
-            let mid0 = (inner_a0 + inner_b0) * 0.5 + avg_n * push;
-            let mid1 = (inner_a1 + inner_b1) * 0.5 + avg_n * push;
-
-            // Half-quad: face A inner → center-line
-            // CW from outside: inner_a0, inner_a1, mid1, mid0
-            emit_quad(
-                &mut positions,
-                &mut normals,
-                &mut uvs,
-                &mut indices,
-                inner_a0,
-                inner_a1,
-                mid1,
-                mid0,
-                (na + avg_n).normalize_or_zero(),
-            );
-
-            // Half-quad: center-line → face B inner
-            // CW from outside: mid0, mid1, inner_b1, inner_b0
-            emit_quad(
-                &mut positions,
-                &mut normals,
-                &mut uvs,
-                &mut indices,
-                mid0,
-                mid1,
-                inner_b1,
-                inner_b0,
-                (nb + avg_n).normalize_or_zero(),
-            );
-        }
-    }
+    // Future phases:
+    // 1. Offset the outer vertices (on original sharp edges) inward along
+    //    the bisector of adjacent face normals.
+    // 2. Bridge the gap between adjacent faces' on-face strips with fillet
+    //    surface quads.
+    // 3. Smooth normals across the chamfer bands.
+    // 4. Corner caps where 3+ chamfer strips converge.
 
     let chamfer_offsets = vec![[0.0; 3]; positions.len()];
     ChunkMeshData {
