@@ -66,6 +66,36 @@ fn emit_quad(
     }
 }
 
+/// Emit a single triangle with automatic winding correction.
+fn emit_tri(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+    expected_normal: Vec3,
+) {
+    // Skip degenerate triangles.
+    let area = (v1 - v0).cross(v2 - v0).length();
+    if area < 1e-8 {
+        return;
+    }
+    let base = positions.len() as u32;
+    positions.extend_from_slice(&[v0.into(), v1.into(), v2.into()]);
+    let n: [f32; 3] = expected_normal.into();
+    normals.extend_from_slice(&[n, n, n]);
+    uvs.extend_from_slice(&[[0.0; 2]; 3]);
+
+    let computed = (v1 - v0).cross(v2 - v0);
+    if computed.dot(expected_normal) >= 0.0 {
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    } else {
+        indices.extend_from_slice(&[base + 2, base + 1, base]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -113,6 +143,12 @@ pub fn generate_cut_offset_chamfer(
             true
         })
         .map(|(&key, _)| key)
+        .collect();
+
+    // -- Chamfered vertices: any vertex on a sharp edge ------------------------
+    let chamfered_verts: HashSet<u32> = sharp_edges
+        .iter()
+        .flat_map(|&(a, b)| [a, b])
         .collect();
 
     // -- Output buffers ------------------------------------------------------
@@ -231,7 +267,32 @@ pub fn generate_cut_offset_chamfer(
             let ip = (i + n - 1) % n; // face-edge index of prev edge
             let j = (i + 1) % n;
 
+            let vi = face.verts[i];
+            let is_chamfered = chamfered_verts.contains(&vi);
+
             match (prev_sharp[i], next_sharp[i]) {
+                (false, false) if is_chamfered => {
+                    // Vertex is on a sharp edge from another face, but has
+                    // no sharp edges on THIS face.  We still need to cut
+                    // because the vertex will be offset later.
+                    // Compute inner via virtual cut lines along both adjacent
+                    // edges, intersected in the face plane.
+                    let d_prev = (orig[i] - orig[ip]).normalize_or_zero();
+                    let d_next = (orig[j] - orig[i]).normalize_or_zero();
+                    let sp = split_toward(i, ip); // on prev edge
+                    let sn = split_toward(i, j); // on next edge
+                    // Virtual cut for prev edge: through sn, direction d_prev
+                    // Virtual cut for next edge: through sp, direction d_next
+                    if let Some(pt) =
+                        intersect_lines_in_plane(sn, d_prev, sp, d_next, fn_)
+                    {
+                        inner.push(pt);
+                    } else {
+                        // Parallel — perpendicular fallback
+                        let inward = d_prev.cross(fn_).normalize_or_zero();
+                        inner.push(orig[i] + inward * CHAMFER_WIDTH);
+                    }
+                }
                 (false, false) => {
                     inner.push(orig[i]);
                 }
@@ -393,24 +454,50 @@ pub fn generate_cut_offset_chamfer(
         }
 
         // -- Emit corner patches ---------------------------------------------
-        // At each vertex where both adjacent edges are sharp AND non-collinear,
-        // a small quad fills the gap between the two truncated strips.
-        // Collinear midpoint vertices get no corner patch — the strip passes
-        // straight through them.
+        // At each vertex where the inner position differs from the original,
+        // a corner patch fills the gap.  This covers:
+        //   a) Both adjacent edges sharp (non-collinear) — gap between two
+        //      truncated strips.
+        //   b) Chamfered vertex with no sharp edges on this face — gap between
+        //      inner polygon and original face boundary.
+        // Collinear midpoint vertices are skipped (strip passes through).
 
         for i in 0..n {
-            if !prev_sharp[i] || !next_sharp[i] {
-                continue;
-            }
-            if is_collinear_midpoint(i) {
-                continue;
-            }
+            let vi = face.verts[i];
             let ip = (i + n - 1) % n;
+            let j = (i + 1) % n;
+            let is_chamfered = chamfered_verts.contains(&vi);
 
-            let trunc_prev = cuts[ip].as_ref().map_or(orig[i], |c| c.split_j);
-            let trunc_next = cuts[i].as_ref().map_or(orig[i], |c| c.split_i);
+            let both_sharp = prev_sharp[i] && next_sharp[i];
+            let no_sharp_but_chamfered =
+                !prev_sharp[i] && !next_sharp[i] && is_chamfered;
 
-            // CW from outside: orig → trunc_next → inner → trunc_prev
+            if !both_sharp && !no_sharp_but_chamfered {
+                continue;
+            }
+            if both_sharp && is_collinear_midpoint(i) {
+                continue;
+            }
+
+            // Compute the two split points (on the adjacent edges, at
+            // CHAMFER_WIDTH from orig[i]).
+            let sp = split_toward(i, ip); // on prev edge
+            let sn = split_toward(i, j); // on next edge
+
+            // For the both-sharp case, use the cut line split vertices
+            // (which account for collinearity etc.).
+            let trunc_prev = if both_sharp {
+                cuts[ip].as_ref().map_or(sp, |c| c.split_j)
+            } else {
+                sp
+            };
+            let trunc_next = if both_sharp {
+                cuts[i].as_ref().map_or(sn, |c| c.split_i)
+            } else {
+                sn
+            };
+
+            // Corner patch quad: orig → trunc_next → inner → trunc_prev
             emit_quad(
                 &mut positions,
                 &mut normals,
@@ -422,6 +509,34 @@ pub fn generate_cut_offset_chamfer(
                 trunc_prev,
                 fn_,
             );
+
+            // For chamfered-but-no-sharp-edges vertices, emit gap triangles
+            // along each adjacent edge to fill between the corner patch and
+            // the inner polygon.
+            if no_sharp_but_chamfered {
+                // Gap on prev side: inner[prev] → split_prev → inner[i]
+                emit_tri(
+                    &mut positions,
+                    &mut normals,
+                    &mut uvs,
+                    &mut indices,
+                    inner[ip],
+                    trunc_prev,
+                    inner[i],
+                    fn_,
+                );
+                // Gap on next side: inner[i] → split_next → inner[next]
+                emit_tri(
+                    &mut positions,
+                    &mut normals,
+                    &mut uvs,
+                    &mut indices,
+                    inner[i],
+                    trunc_next,
+                    inner[j],
+                    fn_,
+                );
+            }
         }
     }
 
