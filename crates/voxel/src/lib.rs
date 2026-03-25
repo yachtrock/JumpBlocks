@@ -1,4 +1,5 @@
 pub mod chunk;
+pub mod cut_offset_chamfer;
 pub mod halfedge_chamfer;
 pub mod meshing;
 pub mod shape;
@@ -24,6 +25,8 @@ pub enum PresentationMode {
     EdgeGraphChamfer,
     /// Half-edge mesh chamfer using procedural_modelling crate.
     HalfEdgeChamfer,
+    /// Cut-and-offset chamfer: insert edge loops then offset original verts.
+    CutAndOffset,
 }
 
 impl PresentationMode {
@@ -31,7 +34,8 @@ impl PresentationMode {
         match self {
             Self::Flat => Self::EdgeGraphChamfer,
             Self::EdgeGraphChamfer => Self::HalfEdgeChamfer,
-            Self::HalfEdgeChamfer => Self::Flat,
+            Self::HalfEdgeChamfer => Self::CutAndOffset,
+            Self::CutAndOffset => Self::Flat,
         }
     }
 
@@ -40,6 +44,7 @@ impl PresentationMode {
             Self::Flat => "Flat (no chamfer)",
             Self::EdgeGraphChamfer => "Edge-Graph Chamfer",
             Self::HalfEdgeChamfer => "Half-Edge Chamfer",
+            Self::CutAndOffset => "Cut & Offset Chamfer",
         }
     }
 }

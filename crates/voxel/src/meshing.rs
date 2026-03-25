@@ -53,7 +53,7 @@ fn to_world(v: Vec3, wx: f32, wy: f32, wz: f32) -> Vec3 {
 ///
 /// Emits triangle indices into `indices` with the reversed winding order
 /// that the chamfer code expects: `[i+1, i, base]` style.
-fn triangulate_convex_polygon(
+pub fn triangulate_convex_polygon(
     positions: &[[f32; 3]],
     base: u32,
     n: usize,
@@ -300,6 +300,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
         crate::PresentationMode::Flat => (generate_lod_mesh(data, neighbors, shapes), None),
         crate::PresentationMode::EdgeGraphChamfer => generate_chamfered_mesh(data, neighbors, shapes),
         crate::PresentationMode::HalfEdgeChamfer => (crate::halfedge_chamfer::generate_halfedge_chamfer(data, neighbors, shapes), None),
+        crate::PresentationMode::CutAndOffset => (crate::cut_offset_chamfer::generate_cut_offset_chamfer(data, neighbors, shapes), None),
     };
     let t1 = Instant::now();
     let lod = generate_lod_mesh(data, neighbors, shapes);
@@ -309,7 +310,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     let lod_ms = (t2 - t1).as_secs_f64() * 1000.0;
     info!(
         "Chunk meshed [{}]: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
-        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::EdgeGraphChamfer => "edge-graph", crate::PresentationMode::HalfEdgeChamfer => "half-edge" },
+        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::EdgeGraphChamfer => "edge-graph", crate::PresentationMode::HalfEdgeChamfer => "half-edge", crate::PresentationMode::CutAndOffset => "cut-offset" },
         full_ms, lod_ms, full_ms + lod_ms,
         full_res.positions.len(), full_res.indices.len() / 3,
         lod.positions.len(), lod.indices.len() / 3,
@@ -505,15 +506,15 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
 // Edge graph
 // ---------------------------------------------------------------------------
 
-fn edge_key(a: u32, b: u32) -> (u32, u32) {
+pub fn edge_key(a: u32, b: u32) -> (u32, u32) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-struct EdgeInfo {
-    faces: Vec<usize>,
+pub struct EdgeInfo {
+    pub faces: Vec<usize>,
 }
 
-const SHARP_DOT_THRESHOLD: f32 = 0.985;
+pub const SHARP_DOT_THRESHOLD: f32 = 0.985;
 
 /// Compute fillet offset for the center-line vertex of a chamfer strip.
 /// Places the vertex on a circular arc of radius CHAMFER_WIDTH that is
@@ -522,7 +523,7 @@ const SHARP_DOT_THRESHOLD: f32 = 0.985;
 /// flat chamfer midpoint toward the edge, to approximate a circular arc.
 /// Returns the push vector along avg_normal.
 /// Compute the fillet push amount for a circular arc between two face planes.
-fn fillet_push_amount(na: Vec3, nb: Vec3, chamfer_width: f32) -> f32 {
+pub fn fillet_push_amount(na: Vec3, nb: Vec3, chamfer_width: f32) -> f32 {
     let k = (na + nb).length();
     // For a circular arc of radius R = chamfer_width:
     // push = R * (1 - cos(half_angle)) where cos(half_angle) = k/2.
@@ -530,7 +531,7 @@ fn fillet_push_amount(na: Vec3, nb: Vec3, chamfer_width: f32) -> f32 {
     (chamfer_width * (1.0 - k / 2.0)).clamp(0.0, chamfer_width * 0.5)
 }
 
-fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
+pub fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
     let mut edges: HashMap<(u32, u32), EdgeInfo> = HashMap::new();
     for (fi, face) in mesh.faces.iter().enumerate() {
         let n = face.verts.len();
@@ -542,7 +543,7 @@ fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
     edges
 }
 
-fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
+pub fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
     if edge.faces.len() < 2 {
         return true;
     }
@@ -553,7 +554,7 @@ fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
 
 /// Check if a boundary edge lies on a chunk face where a filled neighbor cell
 /// would continue the surface.
-fn is_boundary_edge_at_neighbor_seam(
+pub fn is_boundary_edge_at_neighbor_seam(
     ev0: u32,
     ev1: u32,
     face: &SolidFace,
