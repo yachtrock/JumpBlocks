@@ -510,53 +510,58 @@ pub fn generate_cut_offset_chamfer(
             let j = (i + 1) % n;
 
             // Split points on the adjacent edges at CHAMFER_WIDTH from orig[i].
+            // "on_next_edge" = where prev's cut line exits onto the next edge.
+            // "on_prev_edge" = where next's cut line exits onto the prev edge.
             // Use real cut line splits when available (handles collinearity).
-            let trunc_prev = if prev_sharp[i] {
-                cuts[ip].as_ref().map_or(split_toward(i, ip), |c| c.split_j)
-            } else {
-                split_toward(i, ip)
-            };
-            let trunc_next = if next_sharp[i] {
-                cuts[i].as_ref().map_or(split_toward(i, j), |c| c.split_i)
+            let split_on_next_edge = if prev_sharp[i] {
+                cuts[ip].as_ref().map_or(split_toward(i, j), |c| c.split_j)
             } else {
                 split_toward(i, j)
             };
+            let split_on_prev_edge = if next_sharp[i] {
+                cuts[i].as_ref().map_or(split_toward(i, ip), |c| c.split_i)
+            } else {
+                split_toward(i, ip)
+            };
 
-            // Corner patch quad: orig → trunc_next → inner → trunc_prev
+            // Corner patch quad:
+            //   orig → split_on_prev_edge → inner → split_on_next_edge
             emit_quad(
                 &mut positions,
                 &mut normals,
                 &mut uvs,
                 &mut indices,
                 orig[i],
-                trunc_next,
+                split_on_prev_edge,
                 inner[i],
-                trunc_prev,
+                split_on_next_edge,
                 fn_,
             );
 
             // Gap triangles on non-sharp edges to fill between the corner
             // patch and the inner polygon.
             if !prev_sharp[i] {
+                // Gap along prev edge: inner[prev] → split_on_prev → inner[i]
                 emit_tri(
                     &mut positions,
                     &mut normals,
                     &mut uvs,
                     &mut indices,
                     inner[ip],
-                    trunc_prev,
+                    split_on_prev_edge,
                     inner[i],
                     fn_,
                 );
             }
             if !next_sharp[i] {
+                // Gap along next edge: inner[i] → split_on_next → inner[next]
                 emit_tri(
                     &mut positions,
                     &mut normals,
                     &mut uvs,
                     &mut indices,
                     inner[i],
-                    trunc_next,
+                    split_on_next_edge,
                     inner[j],
                     fn_,
                 );
