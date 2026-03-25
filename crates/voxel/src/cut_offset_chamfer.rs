@@ -33,9 +33,9 @@ fn intersect_lines_in_plane(
     Some(p1 + t * d1)
 }
 
-/// Emit a quad as two triangles.  Vertices must be in CW order when viewed
-/// from outside (i.e. looking against the outward normal).  The function
-/// reverses them to CCW for the engine.
+/// Emit a quad as two triangles.  The `expected_normal` is used to determine
+/// correct winding — the triangle normal is computed from the vertices, and
+/// if it disagrees with `expected_normal` the winding is flipped.
 fn emit_quad(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
@@ -45,16 +45,25 @@ fn emit_quad(
     v1: Vec3,
     v2: Vec3,
     v3: Vec3,
-    normal: Vec3,
+    expected_normal: Vec3,
 ) {
     let base = positions.len() as u32;
     positions.extend_from_slice(&[v0.into(), v1.into(), v2.into(), v3.into()]);
-    let n: [f32; 3] = normal.into();
+    let n: [f32; 3] = expected_normal.into();
     normals.extend_from_slice(&[n, n, n, n]);
     uvs.extend_from_slice(&[[0.0; 2]; 4]);
-    // Reverse CW → CCW
-    indices.extend_from_slice(&[base + 2, base + 1, base]);
-    indices.extend_from_slice(&[base, base + 3, base + 2]);
+
+    // Compute actual triangle normal from first three verts to detect winding.
+    let computed = (v1 - v0).cross(v2 - v0);
+    if computed.dot(expected_normal) >= 0.0 {
+        // CCW already matches expected outward normal
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+        indices.extend_from_slice(&[base, base + 2, base + 3]);
+    } else {
+        // Flip to CCW
+        indices.extend_from_slice(&[base + 2, base + 1, base]);
+        indices.extend_from_slice(&[base, base + 3, base + 2]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -143,25 +152,37 @@ pub fn generate_cut_offset_chamfer(
         }
 
         // Split vertex: slide vi along an adjacent edge by CHAMFER_WIDTH.
-        // `split_toward(i, target_idx)` returns the split position.
+        // Split vertex vi by sliding toward target along the adjacent edge.
+        // Returns the split position.
         let split_toward = |i: usize, target_idx: usize| -> Vec3 {
             let dir = (orig[target_idx] - orig[i]).normalize_or_zero();
             orig[i] + dir * CHAMFER_WIDTH
         };
 
-        // -- Per sharp-edge: compute the two split vertices (one per end) ----
-        // Also compute the cut-line direction for intersection later.
+        // Perpendicular offset of vertex i from the sharp edge i→j (or ip→i),
+        // used when the adjacent edge is collinear with the sharp edge (midpoint
+        // vertex) so there is no non-parallel edge to split along.
+        let perp_offset = |i: usize, edge_start: usize, edge_end: usize| -> Vec3 {
+            let edge_dir = (orig[edge_end] - orig[edge_start]).normalize_or_zero();
+            let inward = edge_dir.cross(fn_).normalize_or_zero();
+            orig[i] + inward * CHAMFER_WIDTH
+        };
 
-        // For each face-edge index `i` (edge from vert i to vert i+1):
-        //   split_i  = vi  split toward the *other* edge at vi  (i.e. toward v_{i-1})
-        //   split_j  = vj  split toward the *other* edge at vj  (i.e. toward v_{j+1})
-        //   cut_dir  = split_j - split_i  (direction of the cut line)
+        // Check if the adjacent edge at vertex i (toward target_idx) is
+        // collinear with the sharp edge (from edge_a to edge_b).
+        let is_collinear = |i: usize, target_idx: usize, edge_a: usize, edge_b: usize| -> bool {
+            let adj_dir = (orig[target_idx] - orig[i]).normalize_or_zero();
+            let edge_dir = (orig[edge_b] - orig[edge_a]).normalize_or_zero();
+            adj_dir.dot(edge_dir).abs() > 0.99
+        };
+
+        // -- Per sharp-edge: compute the two split vertices (one per end) ----
 
         #[derive(Clone)]
         struct CutLine {
-            split_i: Vec3, // split of vi toward v_{i-1}
-            split_j: Vec3, // split of vj toward v_{j+1}
-            dir: Vec3,     // split_j - split_i (unnormalised is fine for intersection)
+            split_i: Vec3, // split of vi (start of sharp edge)
+            split_j: Vec3, // split of vj (end of sharp edge)
+            dir: Vec3,     // split_j - split_i
         }
 
         let mut cuts: Vec<Option<CutLine>> = vec![None; n];
@@ -171,10 +192,24 @@ pub fn generate_cut_offset_chamfer(
             if !sharp_edges.contains(&edge_key(face.verts[i], face.verts[j])) {
                 continue;
             }
-            let ip = (i + n - 1) % n; // index of vertex before vi
-            let jn = (j + 1) % n; // index of vertex after vj
-            let si = split_toward(i, ip);
-            let sj = split_toward(j, jn);
+            let ip = (i + n - 1) % n;
+            let jn = (j + 1) % n;
+
+            // At vi: split toward prev vertex, unless prev edge is collinear
+            // with this sharp edge (midpoint vertex) — then use perpendicular.
+            let si = if is_collinear(i, ip, i, j) {
+                perp_offset(i, i, j)
+            } else {
+                split_toward(i, ip)
+            };
+
+            // At vj: split toward next vertex, unless next edge is collinear.
+            let sj = if is_collinear(j, jn, i, j) {
+                perp_offset(j, i, j)
+            } else {
+                split_toward(j, jn)
+            };
+
             cuts[i] = Some(CutLine {
                 split_i: si,
                 split_j: sj,
@@ -202,31 +237,54 @@ pub fn generate_cut_offset_chamfer(
                 }
                 (true, false) => {
                     // Prev edge (ip) is sharp.  Split vi along the *next*
-                    // edge (toward vj) — this is where prev's cut line exits
-                    // the next edge.
-                    inner.push(split_toward(i, j));
+                    // edge (toward vj), unless next edge is collinear with
+                    // the prev sharp edge — then use perpendicular offset.
+                    if is_collinear(i, j, ip, i) {
+                        inner.push(perp_offset(i, ip, i));
+                    } else {
+                        inner.push(split_toward(i, j));
+                    }
                 }
                 (false, true) => {
                     // Next edge (i) is sharp.  Split vi along the *prev*
-                    // edge (toward v_{i-1}).
-                    inner.push(split_toward(i, ip));
+                    // edge (toward v_{i-1}), unless prev edge is collinear.
+                    if is_collinear(i, ip, i, j) {
+                        inner.push(perp_offset(i, i, j));
+                    } else {
+                        inner.push(split_toward(i, ip));
+                    }
                 }
                 (true, true) => {
-                    // Both adjacent edges are sharp.  Intersect the two cut
-                    // lines in the face plane.
-                    let cut_prev = &cuts[ip]; // cut for edge ip→i
-                    let cut_next = &cuts[i]; // cut for edge i→j
-                    if let (Some(cp), Some(cn)) = (cut_prev, cut_next) {
-                        if let Some(pt) =
-                            intersect_lines_in_plane(cp.split_i, cp.dir, cn.split_i, cn.dir, fn_)
-                        {
-                            inner.push(pt);
-                        } else {
-                            // Parallel / collinear — fall back to single offset
-                            inner.push(split_toward(i, ip));
-                        }
+                    // Both adjacent edges are sharp.
+                    let prev_dir = (orig[i] - orig[ip]).normalize_or_zero();
+                    let next_dir = (orig[j] - orig[i]).normalize_or_zero();
+                    let collinear = prev_dir.dot(next_dir).abs() > 0.99;
+
+                    if collinear {
+                        // Midpoint on a single long edge — both sharp edges
+                        // are the same line.  Offset perpendicular to the
+                        // edge along the face.
+                        let edge_dir = prev_dir;
+                        let inward = edge_dir.cross(fn_).normalize_or_zero();
+                        inner.push(orig[i] + inward * CHAMFER_WIDTH);
                     } else {
-                        inner.push(orig[i]);
+                        // Normal case: intersect the two cut lines.
+                        let cut_prev = &cuts[ip];
+                        let cut_next = &cuts[i];
+                        if let (Some(cp), Some(cn)) = (cut_prev, cut_next) {
+                            if let Some(pt) = intersect_lines_in_plane(
+                                cp.split_i, cp.dir, cn.split_i, cn.dir, fn_,
+                            ) {
+                                inner.push(pt);
+                            } else {
+                                // Shouldn't happen for non-collinear, but
+                                // fall back to perpendicular offset.
+                                let inward = prev_dir.cross(fn_).normalize_or_zero();
+                                inner.push(orig[i] + inward * CHAMFER_WIDTH);
+                            }
+                        } else {
+                            inner.push(orig[i]);
+                        }
                     }
                 }
             }
@@ -282,6 +340,19 @@ pub fn generate_cut_offset_chamfer(
         // line intersection).  Otherwise, outer is the original vertex and
         // inner is the split vertex (which equals the inner-polygon vertex).
 
+        // Helper: detect collinear midpoint vertex (both adjacent edges are
+        // sharp and effectively the same line).
+        let is_collinear_midpoint = |i: usize| -> bool {
+            if !prev_sharp[i] || !next_sharp[i] {
+                return false;
+            }
+            let ip = (i + n - 1) % n;
+            let j = (i + 1) % n;
+            let prev_dir = (orig[i] - orig[ip]).normalize_or_zero();
+            let next_dir = (orig[j] - orig[i]).normalize_or_zero();
+            prev_dir.dot(next_dir).abs() > 0.99
+        };
+
         for i in 0..n {
             let j = (i + 1) % n;
             if cuts[i].is_none() {
@@ -289,27 +360,9 @@ pub fn generate_cut_offset_chamfer(
             }
 
             // --- vi end ---
-            let (outer_i, inner_i) = if prev_sharp[i] {
-                // The OTHER edge at vi (prev) is also sharp.
-                // Outer: split vi toward vj along this edge (the split vertex
-                // for THIS edge's cut at vi end — lies on the prev edge).
-                // But actually the split for this edge at vi is
-                // split_toward(i, ip) which is on the PREV edge.
-                //
-                // The truncation point on the ORIGINAL edge (vi→vj line) is
-                // the split of vi along the next edge for the OTHER cut, which
-                // is cuts[ip].split_j.  But more simply:
-                //   outer_i = split of vi along the next edge direction =
-                //             the point on edge vi→vj at CHAMFER_WIDTH from vi
-                //             ... NO — that would be on the SHARP edge, not the
-                //             adjacent edge.
-                //
-                // Correct: the truncation point is the split vertex from the
-                // PREV edge's cut line at the vi end.  The prev edge's cut at
-                // vi is split_toward(i, j) (slide vi along the next edge,
-                // which is the edge we're currently processing).
-                // That's: vi + CHAMFER_WIDTH * dir(vi→vj).
-                // This point lies on the current sharp edge itself.
+            // If the other edge at vi is sharp AND non-collinear, truncate.
+            // If collinear (midpoint), no truncation — the strip passes through.
+            let (outer_i, inner_i) = if prev_sharp[i] && !is_collinear_midpoint(i) {
                 let ip = (i + n - 1) % n;
                 let trunc = cuts[ip].as_ref().map_or(orig[i], |c| c.split_j);
                 (trunc, inner[i])
@@ -318,10 +371,8 @@ pub fn generate_cut_offset_chamfer(
             };
 
             // --- vj end ---
-            let (outer_j, inner_j) = if next_sharp[j] {
-                let jn = (j + 1) % n;
+            let (outer_j, inner_j) = if next_sharp[j] && !is_collinear_midpoint(j) {
                 let trunc = cuts[j].as_ref().map_or(orig[j], |c| c.split_i);
-                let _ = jn; // suppress unused warning
                 (trunc, inner[j])
             } else {
                 (orig[j], inner[j])
@@ -342,19 +393,16 @@ pub fn generate_cut_offset_chamfer(
         }
 
         // -- Emit corner patches ---------------------------------------------
-        // At each vertex where both adjacent edges are sharp, a small quad
-        // (or triangle) fills the gap between the two truncated strips.
-        //
-        // The four vertices of the corner patch are:
-        //   orig[i]           — the original corner vertex
-        //   trunc_from_prev   — where the prev edge's cut exits onto this edge
-        //                       (= split vi along the next edge = cuts[ip].split_j)
-        //   inner[i]          — cut-line intersection
-        //   trunc_from_next   — where the next edge's cut exits onto the prev edge
-        //                       (= split vi along the prev edge = cuts[i].split_i)
+        // At each vertex where both adjacent edges are sharp AND non-collinear,
+        // a small quad fills the gap between the two truncated strips.
+        // Collinear midpoint vertices get no corner patch — the strip passes
+        // straight through them.
 
         for i in 0..n {
             if !prev_sharp[i] || !next_sharp[i] {
+                continue;
+            }
+            if is_collinear_midpoint(i) {
                 continue;
             }
             let ip = (i + n - 1) % n;
