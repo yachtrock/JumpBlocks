@@ -186,7 +186,9 @@ pub fn generate_cut_offset_chamfer(
         let nb = solid.faces[info.faces[1]].normal;
         let avg_n = (na + nb).normalize_or_zero();
         let push = fillet_push_amount(na, nb, CHAMFER_WIDTH);
-        edge_push.insert(ek, avg_n * push);
+        // Negate: the fillet rounds INWARD (toward solid interior),
+        // opposite the outward-pointing bisector.
+        edge_push.insert(ek, -avg_n * push);
         edge_bisector.insert(ek, avg_n);
     }
 
@@ -643,7 +645,8 @@ pub fn generate_cut_offset_chamfer(
         for (&v, &push) in &vert_push {
             if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
                 chamfer_offsets[idx] = push.into();
-                normals[idx] = push.normalize_or_zero().into();
+                // Normal points outward (opposite to the inward push).
+                normals[idx] = (-push).normalize_or_zero().into();
                 at_vert = true;
                 break;
             }
