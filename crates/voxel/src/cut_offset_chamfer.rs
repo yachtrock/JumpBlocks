@@ -172,11 +172,52 @@ pub fn generate_cut_offset_chamfer(
     }
     let chamfered_verts: HashSet<u32> = vert_sharp_dirs.keys().copied().collect();
 
+    // -- Precompute fillet push vectors per sharp edge and vertex ------------
+    // Each sharp edge gets a push along the bisector of its two face normals.
+    // Each sharp vertex gets an averaged push from all its incident edges.
+    let mut edge_push: HashMap<(u32, u32), Vec3> = HashMap::new();
+    let mut edge_bisector: HashMap<(u32, u32), Vec3> = HashMap::new();
+    for &ek in &sharp_edges {
+        let Some(info) = edge_graph.get(&ek) else { continue };
+        if info.faces.len() < 2 {
+            continue;
+        }
+        let na = solid.faces[info.faces[0]].normal;
+        let nb = solid.faces[info.faces[1]].normal;
+        let avg_n = (na + nb).normalize_or_zero();
+        let push = fillet_push_amount(na, nb, CHAMFER_WIDTH);
+        edge_push.insert(ek, avg_n * push);
+        edge_bisector.insert(ek, avg_n);
+    }
+
+    // Per sharp vertex: average push from all incident sharp edges.
+    let mut vert_push: HashMap<u32, Vec3> = HashMap::new();
+    let mut vert_count: HashMap<u32, usize> = HashMap::new();
+    for (&ek, &push) in &edge_push {
+        let (a, b) = ek;
+        *vert_push.entry(a).or_insert(Vec3::ZERO) += push;
+        *vert_push.entry(b).or_insert(Vec3::ZERO) += push;
+        *vert_count.entry(a).or_default() += 1;
+        *vert_count.entry(b).or_default() += 1;
+    }
+    for (&v, push) in vert_push.iter_mut() {
+        let count = vert_count.get(&v).copied().unwrap_or(1);
+        *push /= count as f32;
+    }
+
     // -- Output buffers ------------------------------------------------------
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut chamfer_offsets: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+
+    /// Pad chamfer_offsets with zeros to match positions length.
+    fn pad_offsets(offsets: &mut Vec<[f32; 3]>, positions: &[[f32; 3]]) {
+        while offsets.len() < positions.len() {
+            offsets.push([0.0; 3]);
+        }
+    }
 
     // Per (edge_key, face_index) → (inner_v_at_a, inner_v_at_b) in edge-key
     // order.  Will be used for cross-face strip emission in future phases.
@@ -521,7 +562,7 @@ pub fn generate_cut_offset_chamfer(
                 (orig[j], inner[j])
             };
 
-            // Quad CW from outside: outer_i → inner_i → inner_j → outer_j
+            // Quad: outer_i → inner_i → inner_j → outer_j
             emit_quad(
                 &mut positions,
                 &mut normals,
@@ -587,17 +628,67 @@ pub fn generate_cut_offset_chamfer(
     }
 
     // -----------------------------------------------------------------------
-    // TODO: Cross-face chamfer strips & vertex offset (fillet shaping)
+    // Compute fillet offsets + smooth normals
     // -----------------------------------------------------------------------
-    // Future phases:
-    // 1. Offset the outer vertices (on original sharp edges) inward along
-    //    the bisector of adjacent face normals.
-    // 2. Bridge the gap between adjacent faces' on-face strips with fillet
-    //    surface quads.
-    // 3. Smooth normals across the chamfer bands.
-    // 4. Corner caps where 3+ chamfer strips converge.
+    // For every emitted vertex, check if it lies on a sharp edge or at a
+    // sharp vertex.  If so, apply the fillet push and set a smooth normal.
+    chamfer_offsets.resize(positions.len(), [0.0; 3]);
 
-    let chamfer_offsets = vec![[0.0; 3]; positions.len()];
+    for idx in 0..positions.len() {
+        let p = Vec3::from_array(positions[idx]);
+
+        // 1. Check if at an original sharp vertex (endpoint of sharp edges).
+        //    Use averaged push from all incident sharp edges.
+        let mut at_vert = false;
+        for (&v, &push) in &vert_push {
+            if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
+                chamfer_offsets[idx] = push.into();
+                normals[idx] = push.normalize_or_zero().into();
+                at_vert = true;
+                break;
+            }
+        }
+        if at_vert {
+            continue;
+        }
+
+        // 2. Check if on a sharp edge (between two endpoints).
+        for &(a, b) in &sharp_edges {
+            let pa = solid.positions[a as usize];
+            let pb = solid.positions[b as usize];
+            let edge_vec = pb - pa;
+            let edge_len_sq = edge_vec.length_squared();
+            if edge_len_sq < 1e-8 {
+                continue;
+            }
+
+            let t = (p - pa).dot(edge_vec) / edge_len_sq;
+            if t < -0.01 || t > 1.01 {
+                continue;
+            }
+
+            let closest = pa + edge_vec * t.clamp(0.0, 1.0);
+            let dist_sq = (p - closest).length_squared();
+
+            if dist_sq < 1e-6 {
+                if let Some(&push) = edge_push.get(&edge_key(a, b)) {
+                    chamfer_offsets[idx] = push.into();
+                    if let Some(&bisect) = edge_bisector.get(&edge_key(a, b)) {
+                        normals[idx] = bisect.into();
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Apply offsets to positions so we see the filleted version.
+    for i in 0..positions.len() {
+        positions[i][0] += chamfer_offsets[i][0];
+        positions[i][1] += chamfer_offsets[i][1];
+        positions[i][2] += chamfer_offsets[i][2];
+    }
+
     ChunkMeshData {
         positions,
         normals,
