@@ -211,24 +211,66 @@ pub fn generate_cut_offset_chamfer(
         // Convex: push inward (-bisector). Concave: push outward (+bisector).
         let sign = if is_convex { -1.0 } else { 1.0 };
         edge_push.insert(ek, avg_n * sign * push_amount);
-        edge_bisector.insert(ek, avg_n * sign);
+        // Bisector always unsigned — used for surface normals (always outward).
+        edge_bisector.insert(ek, avg_n);
     }
 
-    // Per sharp vertex: average the push vectors from all incident sharp
-    // edges.  Each edge push already has the correct sign (inward for convex,
-    // outward for concave), so averaging naturally handles mixed corners.
+    // Per sharp vertex: compute push from a sphere of radius R tangent to
+    // all incident face planes.  Direction from incident edge pushes.
     let mut vert_push: HashMap<u32, Vec3> = HashMap::new();
-    let mut vert_push_count: HashMap<u32, usize> = HashMap::new();
-    for (&ek, &push) in &edge_push {
-        let (a, b) = ek;
-        *vert_push.entry(a).or_insert(Vec3::ZERO) += push;
-        *vert_push.entry(b).or_insert(Vec3::ZERO) += push;
-        *vert_push_count.entry(a).or_default() += 1;
-        *vert_push_count.entry(b).or_default() += 1;
-    }
-    for (&v, push) in vert_push.iter_mut() {
-        let count = vert_push_count.get(&v).copied().unwrap_or(1);
-        *push /= count as f32;
+    let mut vert_bisector: HashMap<u32, Vec3> = HashMap::new();
+    {
+        // Collect unique face normals per vertex.
+        let mut vert_face_normals: HashMap<u32, Vec<Vec3>> = HashMap::new();
+        // Accumulate signed push direction to determine convex/concave.
+        let mut vert_push_dir: HashMap<u32, Vec3> = HashMap::new();
+        let mut vert_edge_count: HashMap<u32, usize> = HashMap::new();
+
+        for &(a, b) in &sharp_edges {
+            let ek = edge_key(a, b);
+            let Some(info) = edge_graph.get(&ek) else { continue };
+            for &fi in &info.faces {
+                let n = solid.faces[fi].normal;
+                for &v in &[a, b] {
+                    let norms = vert_face_normals.entry(v).or_default();
+                    if !norms.iter().any(|existing| existing.dot(n) > 0.99) {
+                        norms.push(n);
+                    }
+                }
+            }
+            if let Some(&push) = edge_push.get(&ek) {
+                *vert_push_dir.entry(a).or_insert(Vec3::ZERO) += push;
+                *vert_push_dir.entry(b).or_insert(Vec3::ZERO) += push;
+                *vert_edge_count.entry(a).or_default() += 1;
+                *vert_edge_count.entry(b).or_default() += 1;
+            }
+        }
+
+        for (&v, face_normals) in &vert_face_normals {
+            if face_normals.len() < 2 {
+                continue;
+            }
+            // Average face normal = direction to/from sphere center.
+            let avg_n: Vec3 = face_normals.iter().copied().sum::<Vec3>().normalize_or_zero();
+
+            // Sphere-tangent push: R * (1/sin(α) - 1).
+            // Use average cos(α) across all faces for stability.
+            let cos_sum: f32 = face_normals.iter().map(|n| n.dot(avg_n)).sum();
+            let cos_a = cos_sum / face_normals.len() as f32;
+            let sin_sq = (1.0 - cos_a * cos_a).max(0.0);
+            if sin_sq < 1e-6 {
+                continue;
+            }
+            let sin_a = sin_sq.sqrt();
+            let push_amount = CHAMFER_WIDTH * (1.0 / sin_a - 1.0);
+
+            // Direction from accumulated edge pushes (has correct convex/concave sign).
+            let push_dir = vert_push_dir.get(&v).copied().unwrap_or(-avg_n);
+            let push_dir_n = push_dir.normalize_or_zero();
+
+            vert_push.insert(v, push_dir_n * push_amount);
+            vert_bisector.insert(v, avg_n);
+        }
     }
 
     // -- Output buffers ------------------------------------------------------
@@ -669,11 +711,9 @@ pub fn generate_cut_offset_chamfer(
         for (&v, &push) in &vert_push {
             if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
                 chamfer_offsets[idx] = push.into();
-                // Normal = outward surface normal at the fillet.
-                // Push points toward solid → normal points away from solid.
-                let push_len = push.length();
-                if push_len > 1e-8 {
-                    normals[idx] = (-push / push_len).into();
+                // Normal = average face normal (unsigned bisector) at vertex.
+                if let Some(&bisect) = vert_bisector.get(&v) {
+                    normals[idx] = bisect.into();
                 }
                 at_vert = true;
                 break;
@@ -702,13 +742,12 @@ pub fn generate_cut_offset_chamfer(
             let dist_sq = (p - closest).length_squared();
 
             if dist_sq < 1e-6 {
-                if let Some(&push) = edge_push.get(&edge_key(a, b)) {
+                let ek = edge_key(a, b);
+                if let Some(&push) = edge_push.get(&ek) {
                     chamfer_offsets[idx] = push.into();
-                    // Normal points outward from the fillet surface
-                    // (opposite to the push direction).
-                    let push_len = push.length();
-                    if push_len > 1e-8 {
-                        normals[idx] = (-push / push_len).into();
+                    // Normal = unsigned bisector (always outward).
+                    if let Some(&bisect) = edge_bisector.get(&ek) {
+                        normals[idx] = bisect.into();
                     }
                 }
                 break;
