@@ -182,28 +182,52 @@ pub fn generate_cut_offset_chamfer(
         if info.faces.len() < 2 {
             continue;
         }
-        let na = solid.faces[info.faces[0]].normal;
-        let nb = solid.faces[info.faces[1]].normal;
+        let (va, vb) = ek;
+        let fi_a = info.faces[0];
+        let fi_b = info.faces[1];
+        let na = solid.faces[fi_a].normal;
+        let nb = solid.faces[fi_b].normal;
         let avg_n = (na + nb).normalize_or_zero();
-        let push = fillet_push_amount(na, nb, CHAMFER_WIDTH);
-        // Negate: the fillet rounds INWARD (toward solid interior),
-        // opposite the outward-pointing bisector.
-        edge_push.insert(ek, -avg_n * push);
-        edge_bisector.insert(ek, avg_n);
+        let push_amount = fillet_push_amount(na, nb, CHAMFER_WIDTH);
+
+        // Detect convex vs concave: find a vertex of face A that's NOT on
+        // the shared edge, and check which side of face B's plane it's on.
+        let edge_pos = solid.positions[va as usize];
+        let is_convex = {
+            let face_a = &solid.faces[fi_a];
+            let non_edge_vert = face_a
+                .verts
+                .iter()
+                .find(|&&v| v != va && v != vb)
+                .map(|&v| solid.positions[v as usize]);
+            if let Some(c) = non_edge_vert {
+                // If c is on the opposite side of B's plane from nb → convex
+                (c - edge_pos).dot(nb) < 0.0
+            } else {
+                true // fallback: assume convex
+            }
+        };
+
+        // Convex: push inward (-bisector). Concave: push outward (+bisector).
+        let sign = if is_convex { -1.0 } else { 1.0 };
+        edge_push.insert(ek, avg_n * sign * push_amount);
+        edge_bisector.insert(ek, avg_n * sign);
     }
 
-    // Per sharp vertex: average push from all incident sharp edges.
+    // Per sharp vertex: average the push vectors from all incident sharp
+    // edges.  Each edge push already has the correct sign (inward for convex,
+    // outward for concave), so averaging naturally handles mixed corners.
     let mut vert_push: HashMap<u32, Vec3> = HashMap::new();
-    let mut vert_count: HashMap<u32, usize> = HashMap::new();
+    let mut vert_push_count: HashMap<u32, usize> = HashMap::new();
     for (&ek, &push) in &edge_push {
         let (a, b) = ek;
         *vert_push.entry(a).or_insert(Vec3::ZERO) += push;
         *vert_push.entry(b).or_insert(Vec3::ZERO) += push;
-        *vert_count.entry(a).or_default() += 1;
-        *vert_count.entry(b).or_default() += 1;
+        *vert_push_count.entry(a).or_default() += 1;
+        *vert_push_count.entry(b).or_default() += 1;
     }
     for (&v, push) in vert_push.iter_mut() {
-        let count = vert_count.get(&v).copied().unwrap_or(1);
+        let count = vert_push_count.get(&v).copied().unwrap_or(1);
         *push /= count as f32;
     }
 
@@ -645,8 +669,12 @@ pub fn generate_cut_offset_chamfer(
         for (&v, &push) in &vert_push {
             if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
                 chamfer_offsets[idx] = push.into();
-                // Normal points outward (opposite to the inward push).
-                normals[idx] = (-push).normalize_or_zero().into();
+                // Normal = outward surface normal at the fillet.
+                // Push points toward solid → normal points away from solid.
+                let push_len = push.length();
+                if push_len > 1e-8 {
+                    normals[idx] = (-push / push_len).into();
+                }
                 at_vert = true;
                 break;
             }
@@ -676,8 +704,11 @@ pub fn generate_cut_offset_chamfer(
             if dist_sq < 1e-6 {
                 if let Some(&push) = edge_push.get(&edge_key(a, b)) {
                     chamfer_offsets[idx] = push.into();
-                    if let Some(&bisect) = edge_bisector.get(&edge_key(a, b)) {
-                        normals[idx] = bisect.into();
+                    // Normal points outward from the fillet surface
+                    // (opposite to the push direction).
+                    let push_len = push.length();
+                    if push_len > 1e-8 {
+                        normals[idx] = (-push / push_len).into();
                     }
                 }
                 break;
