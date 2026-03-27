@@ -933,3 +933,69 @@ fn single_wedge_edge_sharing() {
     assert!(non_manifold == 0,
         "single wedge should have no non-manifold edges, got {}", non_manifold);
 }
+
+// ---------------------------------------------------------------------------
+// Cut-and-offset chamfer tests
+// ---------------------------------------------------------------------------
+
+/// Test a single shape with cut-offset chamfer: mesh validity + watertight.
+fn assert_cut_offset_shape_watertight(shape: u16, facing: Facing, label: &str) {
+    let shapes = make_shapes();
+    let data = single_block_chunk(shape, facing, 1);
+    let result = generate_chunk_mesh(
+        &data,
+        &ChunkNeighbors::empty(),
+        &shapes,
+        crate::PresentationMode::CutAndOffset,
+    );
+
+    assert_mesh_valid(&result.full_res, label);
+    assert_no_degenerate_triangles(&result.full_res, label);
+
+    let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
+    eprintln!(
+        "{}: {} verts, {} tris, {} boundary, {} interior, {} non-manifold edges",
+        label,
+        result.full_res.positions.len(),
+        result.full_res.indices.len() / 3,
+        boundary,
+        interior,
+        non_manifold,
+    );
+
+    if boundary > 0 {
+        dump_boundary_edges(&result.full_res, label);
+    }
+    if non_manifold > 0 {
+        dump_non_manifold_edges(&result.full_res, label);
+    }
+
+    assert!(
+        non_manifold == 0,
+        "{}: {} non-manifold edges",
+        label,
+        non_manifold
+    );
+    assert!(
+        boundary == 0,
+        "{}: {} boundary edges (not watertight)",
+        label,
+        boundary
+    );
+}
+
+#[test]
+fn cut_offset_single_cube_watertight() {
+    for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+        let label = format!("co_cube_{:?}", facing);
+        assert_cut_offset_shape_watertight(SHAPE_CUBE, facing, &label);
+    }
+}
+
+#[test]
+fn cut_offset_single_wedge_watertight() {
+    for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+        let label = format!("co_wedge_{:?}", facing);
+        assert_cut_offset_shape_watertight(SHAPE_WEDGE, facing, &label);
+    }
+}
