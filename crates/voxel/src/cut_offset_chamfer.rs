@@ -553,8 +553,9 @@ pub fn generate_cut_offset_chamfer(
                 &mut positions, &mut normals, &mut uvs, &mut indices,
                 inner[0], inner[1], inner[2], inner[3], fn_,
             );
-        } else if !face.orig_triangles.is_empty() && !any_chamfered {
-            // No vertices moved — safe to reuse original triangulation.
+        } else if !face.orig_triangles.is_empty() {
+            // Use original triangulation — preserves all boundary vertices
+            // (like collinear midpoints) so edges match adjacent faces.
             let inner_base = positions.len() as u32;
             for i in 0..n {
                 positions.push(inner[i].into());
@@ -567,8 +568,7 @@ pub fn generate_cut_offset_chamfer(
                 indices.push(inner_base + tri[0] as u32);
             }
         } else {
-            // 5+ vertices with chamfered verts — fan from vertex 0 using
-            // emit_tri for winding correction.
+            // Fallback for faces without orig_triangles.
             for k in 1..n - 1 {
                 emit_tri(
                     &mut positions, &mut normals, &mut uvs, &mut indices,
