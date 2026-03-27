@@ -109,6 +109,67 @@ fn assert_watertight(mesh: &ChunkMeshData, label: &str) {
         "{}: mesh has {} non-manifold edges (3+ triangles sharing an edge)", label, non_manifold);
 }
 
+/// Check that the mesh is convex: every vertex must be on or behind every
+/// triangle's plane.  Reports the worst violations.
+fn assert_convex(mesh: &ChunkMeshData, label: &str) {
+    use bevy::math::Vec3;
+
+    let positions: Vec<Vec3> = mesh.positions.iter().map(|p| Vec3::from_array(*p)).collect();
+    let mut worst_dist = 0.0f32;
+    let mut worst_tri = 0usize;
+    let mut worst_vert = 0usize;
+    let mut violation_count = 0usize;
+
+    let eps = 1e-4; // tolerance for floating point
+
+    for i in (0..mesh.indices.len()).step_by(3) {
+        let ia = mesh.indices[i] as usize;
+        let ib = mesh.indices[i + 1] as usize;
+        let ic = mesh.indices[i + 2] as usize;
+        let pa = positions[ia];
+        let pb = positions[ib];
+        let pc = positions[ic];
+
+        let normal = (pb - pa).cross(pc - pa);
+        let normal_len = normal.length();
+        if normal_len < 1e-10 {
+            continue; // degenerate triangle
+        }
+        let n = normal / normal_len;
+
+        // Every vertex must be on or behind this plane (dot <= eps).
+        for (vi, &p) in positions.iter().enumerate() {
+            let d = (p - pa).dot(n);
+            if d > eps {
+                violation_count += 1;
+                if d > worst_dist {
+                    worst_dist = d;
+                    worst_tri = i / 3;
+                    worst_vert = vi;
+                }
+            }
+        }
+    }
+
+    if violation_count > 0 {
+        let ti = worst_tri * 3;
+        let ia = mesh.indices[ti] as usize;
+        let ib = mesh.indices[ti + 1] as usize;
+        let ic = mesh.indices[ti + 2] as usize;
+        eprintln!(
+            "{}: NOT CONVEX — {} violations, worst: vert {} at {:?} is {:.5} in front of tri[{}] (verts {:?}, {:?}, {:?})",
+            label, violation_count, worst_vert, positions[worst_vert],
+            worst_dist, worst_tri, positions[ia], positions[ib], positions[ic],
+        );
+    }
+
+    assert!(
+        violation_count == 0,
+        "{}: mesh is not convex ({} violations, worst distance {:.5})",
+        label, violation_count, worst_dist,
+    );
+}
+
 /// Run all basic validity checks on a mesh.
 fn assert_mesh_valid(mesh: &ChunkMeshData, label: &str) {
     assert!(!mesh.positions.is_empty(), "{}: mesh has no vertices", label);
@@ -997,5 +1058,34 @@ fn cut_offset_single_wedge_watertight() {
     for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
         let label = format!("co_wedge_{:?}", facing);
         assert_cut_offset_shape_watertight(SHAPE_WEDGE, facing, &label);
+    }
+}
+
+/// Test that single shapes produce convex meshes (fillet only removes material).
+fn assert_cut_offset_shape_convex(shape: u16, facing: Facing, label: &str) {
+    let shapes = make_shapes();
+    let data = single_block_chunk(shape, facing, 1);
+    let result = generate_chunk_mesh(
+        &data,
+        &ChunkNeighbors::empty(),
+        &shapes,
+        crate::PresentationMode::CutAndOffset,
+    );
+    assert_convex(&result.full_res, label);
+}
+
+#[test]
+fn cut_offset_single_cube_convex() {
+    for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+        let label = format!("co_cube_convex_{:?}", facing);
+        assert_cut_offset_shape_convex(SHAPE_CUBE, facing, &label);
+    }
+}
+
+#[test]
+fn cut_offset_single_wedge_convex() {
+    for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+        let label = format!("co_wedge_convex_{:?}", facing);
+        assert_cut_offset_shape_convex(SHAPE_WEDGE, facing, &label);
     }
 }
