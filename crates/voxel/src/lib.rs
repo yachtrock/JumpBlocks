@@ -2,8 +2,10 @@ pub mod chunk;
 pub mod coords;
 pub mod cut_offset_chamfer;
 pub mod meshing;
+pub mod persistence;
 pub mod region;
 pub mod shape;
+pub mod streaming;
 pub mod world_grid;
 
 #[cfg(test)]
