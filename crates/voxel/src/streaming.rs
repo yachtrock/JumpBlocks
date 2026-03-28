@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
+use std::path::PathBuf;
+
 use crate::chunk::{Chunk, ChunkNeighbors};
 use crate::coords::{ChunkCoord, ChunkPos};
 use crate::world_grid::WorldGrid;
@@ -60,6 +62,11 @@ pub struct StreamingAnchor;
 /// The game should insert this during setup.
 #[derive(Resource)]
 pub struct ChunkMaterial(pub Handle<StandardMaterial>);
+
+/// Resource holding the world save directory path.
+/// If not present, chunks won't be saved/loaded from disk.
+#[derive(Resource)]
+pub struct WorldSavePath(pub PathBuf);
 
 // ---------------------------------------------------------------------------
 // Chunk streaming system
@@ -258,10 +265,39 @@ pub fn chunk_writeback_system(
 }
 
 // ---------------------------------------------------------------------------
+// Disk save system
+// ---------------------------------------------------------------------------
+
+/// Periodically saves dirty chunks to disk.
+pub fn chunk_save_system(
+    mut world_grid: ResMut<WorldGrid>,
+    save_path: Option<Res<WorldSavePath>>,
+) {
+    let Some(save_path) = save_path else {
+        return;
+    };
+
+    let active_id = world_grid.active_region;
+    let Some(region) = world_grid.get_region_mut(active_id) else {
+        return;
+    };
+
+    match crate::persistence::save_dirty_chunks(&save_path.0, region) {
+        Ok(0) => {}
+        Ok(n) => {
+            info!("Saved {} dirty chunks to disk", n);
+        }
+        Err(e) => {
+            error!("Failed to save chunks: {}", e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
-/// Plugin that adds chunk streaming, neighbor wiring, and writeback systems.
+/// Plugin that adds chunk streaming, neighbor wiring, writeback, and save systems.
 pub struct StreamingPlugin;
 
 impl Plugin for StreamingPlugin {
@@ -271,6 +307,7 @@ impl Plugin for StreamingPlugin {
                 chunk_streaming_system,
                 neighbor_wiring_system.after(chunk_streaming_system),
                 chunk_writeback_system,
+                chunk_save_system.after(chunk_writeback_system),
             ));
     }
 }

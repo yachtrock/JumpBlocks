@@ -22,6 +22,7 @@
 //! at load time. On disk, External cells are written as Empty.
 //! ```
 
+use std::fs;
 use std::io::{self, Read, Cursor};
 
 use crate::chunk::*;
@@ -222,6 +223,92 @@ pub fn region_meta_path(world_dir: &Path, region_id: RegionId) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// File I/O
+// ---------------------------------------------------------------------------
+
+/// Save a chunk to disk. Creates directories as needed.
+pub fn save_chunk_to_disk(
+    world_dir: &Path,
+    region_id: RegionId,
+    pos: ChunkPos,
+    data: &ChunkData,
+) -> io::Result<()> {
+    let path = chunk_file_path(world_dir, region_id, pos);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serialize_chunk(data);
+    fs::write(&path, bytes)
+}
+
+/// Load a chunk from disk. Returns None if the file doesn't exist.
+pub fn load_chunk_from_disk(
+    world_dir: &Path,
+    region_id: RegionId,
+    pos: ChunkPos,
+) -> io::Result<Option<ChunkData>> {
+    let path = chunk_file_path(world_dir, region_id, pos);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path)?;
+    let data = deserialize_chunk(&bytes)?;
+    Ok(Some(data))
+}
+
+/// Save region metadata to disk.
+pub fn save_region_meta_to_disk(
+    world_dir: &Path,
+    meta: &RegionMeta,
+) -> io::Result<()> {
+    let path = region_meta_path(world_dir, RegionId(meta.region_id));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serialize_region_meta(meta);
+    fs::write(&path, bytes)
+}
+
+/// Load region metadata from disk.
+pub fn load_region_meta_from_disk(
+    world_dir: &Path,
+    region_id: RegionId,
+) -> io::Result<Option<RegionMeta>> {
+    let path = region_meta_path(world_dir, region_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path)?;
+    let meta = deserialize_region_meta(&bytes)?;
+    Ok(Some(meta))
+}
+
+/// Save all dirty chunks in a region to disk.
+/// Returns the number of chunks saved.
+pub fn save_dirty_chunks(
+    world_dir: &Path,
+    region: &mut crate::region::Region,
+) -> io::Result<usize> {
+    let mut count = 0;
+    // Collect dirty positions first to avoid borrow issues
+    let dirty_positions: Vec<ChunkPos> = region
+        .dirty_chunks()
+        .map(|(pos, _)| pos)
+        .collect();
+
+    for pos in dirty_positions {
+        if let Some(slot) = region.get_chunk(pos) {
+            save_chunk_to_disk(world_dir, region.id, pos, &slot.data)?;
+            count += 1;
+        }
+        if let Some(slot) = region.get_chunk_mut(pos) {
+            slot.dirty.mark_saved();
+        }
+    }
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
 // Region metadata
 // ---------------------------------------------------------------------------
 
@@ -396,6 +483,38 @@ mod tests {
         assert_eq!(restored.world_origin, [100.0, 0.0, -200.5]);
         assert_eq!(restored.chunk_count, 1337);
         assert_eq!(restored.data_generation, 99);
+    }
+
+    #[test]
+    fn save_and_load_chunk_file() {
+        let dir = std::env::temp_dir().join("jumpblocks_test_save_load");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let region_id = crate::coords::RegionId(0);
+        let pos = crate::coords::ChunkPos::new(5, -2, 10);
+
+        let mut data = ChunkData::new();
+        data.place_std(0, 0, 0, SHAPE_CUBE, Facing::North, 1);
+        data.place_wedge(4, 2, 4, Facing::East, 3);
+
+        save_chunk_to_disk(&dir, region_id, pos, &data).unwrap();
+        let loaded = load_chunk_from_disk(&dir, region_id, pos).unwrap().unwrap();
+
+        assert_eq!(loaded.blocks.len(), 2);
+        assert!(loaded.get_cell(0, 0, 0).is_occupied());
+        assert!(loaded.get_cell(4, 2, 4).is_occupied());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_nonexistent_returns_none() {
+        let dir = std::env::temp_dir().join("jumpblocks_test_nonexistent");
+        let region_id = crate::coords::RegionId(99);
+        let pos = crate::coords::ChunkPos::new(0, 0, 0);
+        let result = load_chunk_from_disk(&dir, region_id, pos).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
