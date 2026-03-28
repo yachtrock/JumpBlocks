@@ -110,8 +110,11 @@ fn assert_watertight(mesh: &ChunkMeshData, label: &str) {
 }
 
 /// Check that the mesh is convex: every vertex must be on or behind every
-/// triangle's plane.  Reports the worst violations.
-fn assert_convex(mesh: &ChunkMeshData, label: &str) {
+/// triangle's plane.  The `tolerance` allows small violations from fillet
+/// geometry (corner patches where pushed and unpushed vertices create
+/// slightly tilted triangles).  Large violations indicate wrong push
+/// directions.
+fn assert_convex_with_tolerance(mesh: &ChunkMeshData, tolerance: f32, label: &str) {
     use bevy::math::Vec3;
 
     let positions: Vec<Vec3> = mesh.positions.iter().map(|p| Vec3::from_array(*p)).collect();
@@ -119,8 +122,6 @@ fn assert_convex(mesh: &ChunkMeshData, label: &str) {
     let mut worst_tri = 0usize;
     let mut worst_vert = 0usize;
     let mut violation_count = 0usize;
-
-    let eps = 1e-4; // tolerance for floating point
 
     for i in (0..mesh.indices.len()).step_by(3) {
         let ia = mesh.indices[i] as usize;
@@ -137,10 +138,9 @@ fn assert_convex(mesh: &ChunkMeshData, label: &str) {
         }
         let n = normal / normal_len;
 
-        // Every vertex must be on or behind this plane (dot <= eps).
         for (vi, &p) in positions.iter().enumerate() {
             let d = (p - pa).dot(n);
-            if d > eps {
+            if d > tolerance {
                 violation_count += 1;
                 if d > worst_dist {
                     worst_dist = d;
@@ -157,17 +157,22 @@ fn assert_convex(mesh: &ChunkMeshData, label: &str) {
         let ib = mesh.indices[ti + 1] as usize;
         let ic = mesh.indices[ti + 2] as usize;
         eprintln!(
-            "{}: NOT CONVEX — {} violations, worst: vert {} at {:?} is {:.5} in front of tri[{}] (verts {:?}, {:?}, {:?})",
-            label, violation_count, worst_vert, positions[worst_vert],
+            "{}: NOT CONVEX — {} violations (tolerance {:.3}), worst: vert {} at {:?} is {:.5} in front of tri[{}] (verts {:?}, {:?}, {:?})",
+            label, violation_count, tolerance, worst_vert, positions[worst_vert],
             worst_dist, worst_tri, positions[ia], positions[ib], positions[ic],
         );
     }
 
     assert!(
         violation_count == 0,
-        "{}: mesh is not convex ({} violations, worst distance {:.5})",
-        label, violation_count, worst_dist,
+        "{}: mesh is not convex ({} violations beyond tolerance {:.3}, worst distance {:.5})",
+        label, violation_count, tolerance, worst_dist,
     );
+}
+
+/// Strict convexity check (floating-point tolerance only).
+fn assert_convex(mesh: &ChunkMeshData, label: &str) {
+    assert_convex_with_tolerance(mesh, 1e-4, label);
 }
 
 /// Run all basic validity checks on a mesh.
@@ -1062,6 +1067,8 @@ fn cut_offset_single_wedge_watertight() {
 }
 
 /// Test that single shapes produce convex meshes (fillet only removes material).
+/// Allows a tolerance proportional to CHAMFER_WIDTH to accommodate the small
+/// tilt from corner patches (pushed + unpushed vertices on the same face).
 fn assert_cut_offset_shape_convex(shape: u16, facing: Facing, label: &str) {
     let shapes = make_shapes();
     let data = single_block_chunk(shape, facing, 1);
@@ -1071,6 +1078,7 @@ fn assert_cut_offset_shape_convex(shape: u16, facing: Facing, label: &str) {
         &shapes,
         crate::PresentationMode::CutAndOffset,
     );
+    // Strict convexity — fillet should only remove material.
     assert_convex(&result.full_res, label);
 }
 

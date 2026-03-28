@@ -190,21 +190,21 @@ pub fn generate_cut_offset_chamfer(
         let avg_n = (na + nb).normalize_or_zero();
         let push_amount = fillet_push_amount(na, nb, CHAMFER_WIDTH);
 
-        // Detect convex vs concave: find a vertex of face A that's NOT on
-        // the shared edge, and check which side of face B's plane it's on.
+        // Detect convex vs concave: check if face A's non-edge vertex is
+        // behind the bisector plane through the edge.  For convex edges,
+        // the solid interior is behind the bisector (avg_n points outward).
         let edge_pos = solid.positions[va as usize];
         let is_convex = {
             let face_a = &solid.faces[fi_a];
-            let non_edge_vert = face_a
+            let c = face_a
                 .verts
                 .iter()
                 .find(|&&v| v != va && v != vb)
                 .map(|&v| solid.positions[v as usize]);
-            if let Some(c) = non_edge_vert {
-                // If c is on the opposite side of B's plane from nb → convex
-                (c - edge_pos).dot(nb) < 0.0
+            if let Some(c) = c {
+                (c - edge_pos).dot(avg_n) < 0.0
             } else {
-                true // fallback: assume convex
+                true
             }
         };
 
@@ -250,25 +250,70 @@ pub fn generate_cut_offset_chamfer(
             if face_normals.len() < 2 {
                 continue;
             }
-            // Average face normal = direction to/from sphere center.
+
+            let r = CHAMFER_WIDTH;
+
             let avg_n: Vec3 = face_normals.iter().copied().sum::<Vec3>().normalize_or_zero();
 
-            // Sphere-tangent push: R * (1/sin(α) - 1).
-            // Use average cos(α) across all faces for stability.
-            let cos_sum: f32 = face_normals.iter().map(|n| n.dot(avg_n)).sum();
-            let cos_a = cos_sum / face_normals.len() as f32;
-            let sin_sq = (1.0 - cos_a * cos_a).max(0.0);
-            if sin_sq < 1e-6 {
+            // For a single convex block, all vertices are convex.
+            // Use the same sign as the edge convex detection at this vertex.
+            // Count how many incident edges are convex vs concave.
+            let mut convex_edges = 0i32;
+            let mut concave_edges = 0i32;
+            for &(a, b) in &sharp_edges {
+                if a != v && b != v { continue; }
+                let ek = edge_key(a, b);
+                if let Some(&push) = edge_push.get(&ek) {
+                    if let Some(&bisect) = edge_bisector.get(&ek) {
+                        // Convex edges have push opposite to bisector
+                        if push.dot(bisect) < 0.0 {
+                            convex_edges += 1;
+                        } else {
+                            concave_edges += 1;
+                        }
+                    }
+                }
+            }
+            let sign = if convex_edges >= concave_edges { -1.0 } else { 1.0 };
+
+            // Solve N δ = sign * r * 1  for the sphere center offset δ.
+            // N is the matrix with face normals as rows.
+            let delta = if face_normals.len() == 3 {
+                // Exact 3x3 solve: δ = sign * r * N⁻¹ * [1,1,1]ᵀ
+                let n = bevy::math::Mat3::from_cols(
+                    face_normals[0],
+                    face_normals[1],
+                    face_normals[2],
+                ).transpose();
+                let det = n.determinant();
+                if det.abs() < 1e-6 {
+                    continue; // near-singular (coplanar faces)
+                }
+                n.inverse() * (Vec3::ONE * sign * r)
+            } else {
+                // Least-squares for N > 3: δ = sign * r * Nᵀ(NNᵀ)⁻¹ · 1
+                // For 2 normals or >3, use the pseudo-inverse approach.
+                // Simplified: project onto avg_n with the 2-face formula.
+                let cos_a = face_normals.iter()
+                    .map(|n| n.dot(avg_n))
+                    .sum::<f32>() / face_normals.len() as f32;
+                let sin_sq = (1.0 - cos_a * cos_a).max(0.0);
+                if sin_sq < 1e-6 { continue; }
+                let sin_a = sin_sq.sqrt();
+                avg_n * sign * r / sin_a
+            };
+
+            let delta_len = delta.length();
+            if delta_len < 1e-6 {
                 continue;
             }
-            let sin_a = sin_sq.sqrt();
-            let push_amount = CHAMFER_WIDTH * (1.0 / sin_a - 1.0);
 
-            // Direction from accumulated edge pushes (has correct convex/concave sign).
-            let push_dir = vert_push_dir.get(&v).copied().unwrap_or(-avg_n);
-            let push_dir_n = push_dir.normalize_or_zero();
+            // The vertex offset = from original position to sphere surface
+            // (closest point on sphere to original vertex).
+            // offset = δ - r * normalize(δ) = δ * (1 - r / |δ|)
+            let offset = delta * (1.0 - r / delta_len);
 
-            vert_push.insert(v, push_dir_n * push_amount);
+            vert_push.insert(v, offset);
             vert_bisector.insert(v, avg_n);
         }
     }
@@ -710,6 +755,11 @@ pub fn generate_cut_offset_chamfer(
         let mut at_vert = false;
         for (&v, &push) in &vert_push {
             if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
+                let pushed = p + push;
+                if (pushed.x - 4.015).abs() < 0.02 && (pushed.y - 8.481).abs() < 0.02 {
+                    warn!("Vert push at idx {} v={} orig={:?} → pushed={:?}: push={:?}",
+                          idx, v, p, pushed, push);
+                }
                 chamfer_offsets[idx] = push.into();
                 // Normal = average face normal (unsigned bisector) at vertex.
                 if let Some(&bisect) = vert_bisector.get(&v) {
@@ -745,13 +795,21 @@ pub fn generate_cut_offset_chamfer(
                 let ek = edge_key(a, b);
                 if let Some(&push) = edge_push.get(&ek) {
                     chamfer_offsets[idx] = push.into();
-                    // Normal = unsigned bisector (always outward).
                     if let Some(&bisect) = edge_bisector.get(&ek) {
                         normals[idx] = bisect.into();
                     }
                 }
                 break;
             }
+        }
+    }
+
+    // Debug: log all non-zero offsets
+    let mut nonzero_offsets = 0;
+    for i in 0..positions.len() {
+        let o = Vec3::from_array(chamfer_offsets[i]);
+        if o.length() > 1e-6 {
+            nonzero_offsets += 1;
         }
     }
 
