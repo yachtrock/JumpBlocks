@@ -8,6 +8,9 @@ use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
 use crate::player::{ControlScheme, ControlSchemeConfig, LeanSettings, Player, PlayerSettings};
 use bevy_tnua::prelude::*;
 use jumpblocks_voxel::chunk::Chunk;
+use jumpblocks_voxel::chunk_lod::{LodConfig, LodTier};
+use jumpblocks_voxel::coords::ChunkCoord;
+use jumpblocks_voxel::streaming::StreamingConfig;
 
 pub struct DebugUiPlugin;
 
@@ -64,6 +67,9 @@ fn debug_ui_system(
     gamepads: Query<(Entity, &Gamepad)>,
     chunk_query: Query<(&Chunk, &Mesh3d)>,
     mesh_assets: Res<Assets<Mesh>>,
+    mut lod_config: ResMut<LodConfig>,
+    mut streaming_config: ResMut<StreamingConfig>,
+    lod_chunks: Query<(&ChunkCoord, &LodTier)>,
 ) {
     if !state.visible {
         return;
@@ -175,6 +181,38 @@ fn debug_ui_system(
                 });
             }
         }
+
+        ui.separator();
+
+        // World / LOD
+        ui.collapsing("World / LOD", |ui| {
+            ui.label("Streaming");
+            ui.add(egui::Slider::new(&mut streaming_config.load_radius_xz, 1..=32).text("Load radius XZ"));
+            ui.add(egui::Slider::new(&mut streaming_config.load_radius_y, 1..=16).text("Load radius Y"));
+            ui.add(egui::Slider::new(&mut streaming_config.unload_padding, 0..=8).text("Unload padding"));
+            ui.add(egui::Slider::new(&mut streaming_config.load_budget, 1..=32).text("Load budget/frame"));
+            ui.add(egui::Slider::new(&mut streaming_config.unload_budget, 1..=32).text("Unload budget/frame"));
+
+            ui.separator();
+            ui.label("LOD Tiers");
+            ui.add(egui::Slider::new(&mut lod_config.full_radius, 0..=16).text("Full radius"));
+            ui.add(egui::Slider::new(&mut lod_config.reduced_radius, 1..=32).text("Reduced radius"));
+
+            ui.separator();
+            let mut full_count = 0;
+            let mut reduced_count = 0;
+            let mut hidden_count = 0;
+            for (_, tier) in lod_chunks.iter() {
+                match tier {
+                    LodTier::Full => full_count += 1,
+                    LodTier::Reduced => reduced_count += 1,
+                    LodTier::Hidden => hidden_count += 1,
+                }
+            }
+            let total = full_count + reduced_count + hidden_count;
+            ui.label(format!("Chunks: {} total", total));
+            ui.label(format!("  Full: {}  Reduced: {}  Hidden: {}", full_count, reduced_count, hidden_count));
+        });
 
         ui.separator();
 
