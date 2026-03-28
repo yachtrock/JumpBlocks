@@ -7,6 +7,7 @@ use crate::camera::OrbitCamera;
 use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
 use crate::player::{ControlScheme, ControlSchemeConfig, LeanSettings, Player, PlayerSettings};
 use bevy_tnua::prelude::*;
+use jumpblocks_voxel::chunk::Chunk;
 
 pub struct DebugUiPlugin;
 
@@ -61,6 +62,8 @@ fn debug_ui_system(
     mut camera_query: Query<&mut OrbitCamera>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
     gamepads: Query<(Entity, &Gamepad)>,
+    chunk_query: Query<(&Chunk, &Mesh3d)>,
+    mesh_assets: Res<Assets<Mesh>>,
 ) {
     if !state.visible {
         return;
@@ -82,6 +85,21 @@ fn debug_ui_system(
                 ui.label(format!("Frame time: {value:.2} ms"));
             }
         }
+
+        // Chunk / triangle stats
+        let mut chunk_count = 0u32;
+        let mut total_tris = 0u32;
+        let mut total_verts = 0u32;
+        for (_chunk, mesh_handle) in chunk_query.iter() {
+            chunk_count += 1;
+            if let Some(mesh) = mesh_assets.get(&mesh_handle.0) {
+                total_verts += mesh.count_vertices() as u32;
+                if let Some(indices) = mesh.indices() {
+                    total_tris += indices.len() as u32 / 3;
+                }
+            }
+        }
+        ui.label(format!("Chunks: {chunk_count}  Tris: {total_tris}  Verts: {total_verts}"));
 
         ui.separator();
 

@@ -157,6 +157,23 @@ pub struct VoxelEdge {
     pub neighbor_sides: Vec<FaceSide>,
 }
 
+/// How much of a cell-side a face covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// Face fully covers this cell-side (full quad). Occludes any neighbor coverage.
+    Full,
+    /// Face partially covers this cell-side. Only occludes a neighbor with the
+    /// same partial ID (matching shapes that together fill the cell boundary).
+    Partial(u8),
+}
+
+/// Well-known partial coverage IDs.
+/// Wedge upper side triangle (the triangular portion of a pentagon side face).
+pub const PARTIAL_WEDGE_UPPER_TRI: u8 = 1;
+/// Wedge front face — fully covers its cells but the slope above exposes the
+/// boundary from certain angles, so it must not be mutually culled with cubes.
+pub const PARTIAL_WEDGE_FRONT: u8 = 2;
+
 /// Which cell within a block a face covers, and on which side.
 #[derive(Debug, Clone)]
 pub struct CellCover {
@@ -164,8 +181,8 @@ pub struct CellCover {
     pub cell: (u8, u8, u8),
     /// Which side of that cell this face covers.
     pub side: FaceSide,
-    /// Whether this face fully covers that cell-side.
-    pub full: bool,
+    /// How much of this cell-side the face covers.
+    pub coverage: Coverage,
 }
 
 /// A face of a block shape.
@@ -254,10 +271,10 @@ fn cube_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 0), side: FaceSide::Top, full: true },
-                CellCover { cell: (1, 0, 0), side: FaceSide::Top, full: true },
-                CellCover { cell: (0, 0, 1), side: FaceSide::Top, full: true },
-                CellCover { cell: (1, 0, 1), side: FaceSide::Top, full: true },
+                CellCover { cell: (0, 0, 0), side: FaceSide::Top, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 0), side: FaceSide::Top, coverage: Coverage::Full },
+                CellCover { cell: (0, 0, 1), side: FaceSide::Top, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 1), side: FaceSide::Top, coverage: Coverage::Full },
             ],
         },
         // Bottom (-Y)
@@ -272,10 +289,10 @@ fn cube_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 0), side: FaceSide::Bottom, full: true },
-                CellCover { cell: (1, 0, 0), side: FaceSide::Bottom, full: true },
-                CellCover { cell: (0, 0, 1), side: FaceSide::Bottom, full: true },
-                CellCover { cell: (1, 0, 1), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (0, 0, 0), side: FaceSide::Bottom, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 0), side: FaceSide::Bottom, coverage: Coverage::Full },
+                CellCover { cell: (0, 0, 1), side: FaceSide::Bottom, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 1), side: FaceSide::Bottom, coverage: Coverage::Full },
             ],
         },
         // North (+Z)
@@ -290,8 +307,8 @@ fn cube_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::East] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 1), side: FaceSide::North, full: true },
-                CellCover { cell: (1, 0, 1), side: FaceSide::North, full: true },
+                CellCover { cell: (0, 0, 1), side: FaceSide::North, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 1), side: FaceSide::North, coverage: Coverage::Full },
             ],
         },
         // South (-Z)
@@ -306,8 +323,8 @@ fn cube_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 0), side: FaceSide::South, full: true },
-                CellCover { cell: (1, 0, 0), side: FaceSide::South, full: true },
+                CellCover { cell: (0, 0, 0), side: FaceSide::South, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 0), side: FaceSide::South, coverage: Coverage::Full },
             ],
         },
         // East (+X)
@@ -322,8 +339,8 @@ fn cube_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::South] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (1, 0, 0), side: FaceSide::East, full: true },
-                CellCover { cell: (1, 0, 1), side: FaceSide::East, full: true },
+                CellCover { cell: (1, 0, 0), side: FaceSide::East, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 1), side: FaceSide::East, coverage: Coverage::Full },
             ],
         },
         // West (-X)
@@ -338,8 +355,8 @@ fn cube_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::North] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 0), side: FaceSide::West, full: true },
-                CellCover { cell: (0, 0, 1), side: FaceSide::West, full: true },
+                CellCover { cell: (0, 0, 0), side: FaceSide::West, coverage: Coverage::Full },
+                CellCover { cell: (0, 0, 1), side: FaceSide::West, coverage: Coverage::Full },
             ],
         },
     ];
@@ -388,10 +405,10 @@ fn wedge_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 0), side: FaceSide::Bottom, full: true },
-                CellCover { cell: (1, 0, 0), side: FaceSide::Bottom, full: true },
-                CellCover { cell: (0, 0, 1), side: FaceSide::Bottom, full: true },
-                CellCover { cell: (1, 0, 1), side: FaceSide::Bottom, full: true },
+                CellCover { cell: (0, 0, 0), side: FaceSide::Bottom, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 0), side: FaceSide::Bottom, coverage: Coverage::Full },
+                CellCover { cell: (0, 0, 1), side: FaceSide::Bottom, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 1), side: FaceSide::Bottom, coverage: Coverage::Full },
             ],
         },
         // South/Back wall (-Z): 6-vertex polygon with y=1 midpoints
@@ -409,10 +426,10 @@ fn wedge_shape() -> BlockShape {
                 VoxelEdge { v0: 5, v1: 0, neighbor_sides: vec![FaceSide::West] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 0), side: FaceSide::South, full: true },
-                CellCover { cell: (1, 0, 0), side: FaceSide::South, full: true },
-                CellCover { cell: (0, 1, 0), side: FaceSide::South, full: true },
-                CellCover { cell: (1, 1, 0), side: FaceSide::South, full: true },
+                CellCover { cell: (0, 0, 0), side: FaceSide::South, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 0), side: FaceSide::South, coverage: Coverage::Full },
+                CellCover { cell: (0, 1, 0), side: FaceSide::South, coverage: Coverage::Full },
+                CellCover { cell: (1, 1, 0), side: FaceSide::South, coverage: Coverage::Full },
             ],
         },
         // North/Front wall (+Z): short front z=2, y=0..1
@@ -427,8 +444,8 @@ fn wedge_shape() -> BlockShape {
                 VoxelEdge { v0: 3, v1: 0, neighbor_sides: vec![FaceSide::East] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 1), side: FaceSide::North, full: true },
-                CellCover { cell: (1, 0, 1), side: FaceSide::North, full: true },
+                CellCover { cell: (0, 0, 1), side: FaceSide::North, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 1), side: FaceSide::North, coverage: Coverage::Full },
             ],
         },
         // Slope face: from back-top to front-mid — diagonal, never culled
@@ -458,10 +475,10 @@ fn wedge_shape() -> BlockShape {
                 VoxelEdge { v0: 4, v1: 0, neighbor_sides: vec![FaceSide::North] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (0, 0, 0), side: FaceSide::West, full: true },
-                CellCover { cell: (0, 0, 1), side: FaceSide::West, full: true },
-                CellCover { cell: (0, 1, 0), side: FaceSide::West, full: false },
-                CellCover { cell: (0, 1, 1), side: FaceSide::West, full: false },
+                CellCover { cell: (0, 0, 0), side: FaceSide::West, coverage: Coverage::Full },
+                CellCover { cell: (0, 0, 1), side: FaceSide::West, coverage: Coverage::Full },
+                CellCover { cell: (0, 1, 0), side: FaceSide::West, coverage: Coverage::Partial(PARTIAL_WEDGE_UPPER_TRI) },
+                CellCover { cell: (0, 1, 1), side: FaceSide::West, coverage: Coverage::Partial(PARTIAL_WEDGE_UPPER_TRI) },
             ],
         },
         // East (+X): 5-vertex pentagon with y=1 midpoint
@@ -478,10 +495,10 @@ fn wedge_shape() -> BlockShape {
                 VoxelEdge { v0: 4, v1: 0, neighbor_sides: vec![FaceSide::South] },
             ],
             cell_coverage: vec![
-                CellCover { cell: (1, 0, 0), side: FaceSide::East, full: true },
-                CellCover { cell: (1, 0, 1), side: FaceSide::East, full: true },
-                CellCover { cell: (1, 1, 0), side: FaceSide::East, full: false },
-                CellCover { cell: (1, 1, 1), side: FaceSide::East, full: false },
+                CellCover { cell: (1, 0, 0), side: FaceSide::East, coverage: Coverage::Full },
+                CellCover { cell: (1, 0, 1), side: FaceSide::East, coverage: Coverage::Full },
+                CellCover { cell: (1, 1, 0), side: FaceSide::East, coverage: Coverage::Partial(PARTIAL_WEDGE_UPPER_TRI) },
+                CellCover { cell: (1, 1, 1), side: FaceSide::East, coverage: Coverage::Partial(PARTIAL_WEDGE_UPPER_TRI) },
             ],
         },
     ];

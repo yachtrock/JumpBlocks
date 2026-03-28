@@ -200,7 +200,6 @@ fn face_is_occluded(
     }
 
     let (ox, oy, oz) = block.origin;
-
     for cover in &face.cell_coverage {
         // Rotate the cell offset by the block's facing
         let rotated_cell = rotate_cell_offset(cover.cell, facing, size);
@@ -218,7 +217,7 @@ fn face_is_occluded(
         let ny = cell_y + dy;
         let nz = cell_z + dz;
 
-        if !neighbor_cell_occludes(data, neighbors, shapes, nx, ny, nz, world_side.opposite()) {
+        if !neighbor_cell_occludes(data, neighbors, shapes, nx, ny, nz, world_side.opposite(), cover.coverage) {
             return false; // at least one coverage entry is not occluded
         }
     }
@@ -226,16 +225,45 @@ fn face_is_occluded(
     true // all coverage entries are occluded
 }
 
-/// Check if the block at (nx, ny, nz) has a cell that fully covers `side_facing_us`.
+const NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
+    (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+];
+
+/// Check if a block is fully interior (every occupied cell has all 6 neighbors occupied).
+/// If true, all faces would be occluded so the block can be skipped entirely.
+fn block_is_fully_interior(
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+    block: &Block,
+    shape: &BlockShape,
+    facing: Facing,
+) -> bool {
+    let (ox, oy, oz) = block.origin;
+    for &cell in &shape.occupied_cells {
+        let rotated = rotate_cell_offset(cell, facing, shape.size);
+        let cx = ox as i32 + rotated.0 as i32;
+        let cy = oy as i32 + rotated.1 as i32;
+        let cz = oz as i32 + rotated.2 as i32;
+        for (dx, dy, dz) in NEIGHBOR_OFFSETS {
+            if !is_cell_occupied(data, neighbors, cx + dx, cy + dy, cz + dz) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Check if the block at (nx, ny, nz) occludes the given coverage on `side_facing_us`.
 ///
-/// This does per-cell checking: it resolves which specific cell within the neighbor
-/// block is at position (nx, ny, nz) and checks only that cell's coverage.
+/// Full coverage is occluded by any neighbor coverage (Full or Partial).
+/// Partial coverage is only occluded by Full coverage or a matching Partial ID.
 fn neighbor_cell_occludes(
     data: &ChunkData,
     neighbors: &ChunkNeighbors,
     shapes: &ShapeTable,
     nx: i32, ny: i32, nz: i32,
     side_facing_us: FaceSide,
+    our_coverage: Coverage,
 ) -> bool {
     let Some((shape_idx, facing, origin)) = resolve_block_info_at(data, neighbors, nx, ny, nz) else {
         return false;
@@ -270,8 +298,18 @@ fn neighbor_cell_occludes(
         for cover in &face.cell_coverage {
             let rotated_cell = rotate_cell_offset(cover.cell, facing, shape.size);
             let rotated_side = cover.side.rotated_by(facing);
-            if rotated_cell == world_offset && rotated_side == side_facing_us && cover.full {
+            if rotated_cell != world_offset || rotated_side != side_facing_us {
+                continue;
+            }
+            // Full neighbor coverage always occludes (original behavior)
+            if cover.coverage == Coverage::Full {
                 return true;
+            }
+            // Matching partial IDs occlude each other (wedge-wedge adjacency)
+            if let (Coverage::Partial(our_id), Coverage::Partial(their_id)) = (our_coverage, cover.coverage) {
+                if our_id == their_id {
+                    return true;
+                }
             }
         }
     }
@@ -340,6 +378,12 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
     let mut uvs = Vec::new();
     let mut indices = Vec::new();
 
+    let mut stats_blocks = 0u32;
+    let mut stats_blocks_no_cells = 0u32;
+    let mut stats_blocks_interior = 0u32;
+    let mut stats_faces_total = 0u32;
+    let mut stats_faces_culled = 0u32;
+
     for (block_idx, block) in data.blocks.iter().enumerate() {
         let Some(shape) = shapes.get(block.shape) else { continue; };
         let facing = block.facing;
@@ -347,6 +391,7 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
         let wx = ox as f32 * VOXEL_SIZE;
         let wy = oy as f32 * VOXEL_SIZE;
         let wz = oz as f32 * VOXEL_SIZE;
+        stats_blocks += 1;
 
         // Verify this block still owns at least one cell (not removed)
         let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
@@ -355,10 +400,22 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
             let cz = oz as usize + dz as usize;
             data.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
         });
-        if !has_cells { continue; }
+        if !has_cells { stats_blocks_no_cells += 1; continue; }
+
+        // Skip fully interior blocks — all faces would be occluded
+        if block_is_fully_interior(data, neighbors, block, shape, facing) {
+            stats_blocks_interior += 1;
+            stats_faces_total += shape.faces.len() as u32;
+            stats_faces_culled += shape.faces.len() as u32;
+            continue;
+        }
 
         for face in &shape.faces {
-            if face_is_occluded(data, neighbors, shapes, block, face, facing, shape.size) { continue; }
+            stats_faces_total += 1;
+            if face_is_occluded(data, neighbors, shapes, block, face, facing, shape.size) {
+                stats_faces_culled += 1;
+                continue;
+            }
 
             let base_index = positions.len() as u32;
             let world_verts: Vec<Vec3> = face.vertices.iter()
@@ -379,6 +436,13 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
             }
         }
     }
+
+    let stats_faces_emitted = stats_faces_total - stats_faces_culled;
+    info!(
+        "[lod mesh] blocks: {} (no_cells: {}, interior: {}), faces: {} total, {} culled, {} emitted",
+        stats_blocks, stats_blocks_no_cells, stats_blocks_interior,
+        stats_faces_total, stats_faces_culled, stats_faces_emitted,
+    );
 
     let n = positions.len();
     ChunkMeshData { positions, normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], indices }
@@ -440,6 +504,12 @@ pub fn build_solid_mesh_public(data: &ChunkData, neighbors: &ChunkNeighbors, sha
 fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable) -> SolidMesh {
     let mut mesh = SolidMesh::new();
 
+    let mut stats_blocks = 0u32;
+    let mut stats_blocks_no_cells = 0u32;
+    let mut stats_blocks_interior = 0u32;
+    let mut stats_faces_total = 0u32;
+    let mut stats_faces_culled = 0u32;
+
     for (block_idx, block) in data.blocks.iter().enumerate() {
         let Some(shape) = shapes.get(block.shape) else { continue; };
         let facing = block.facing;
@@ -447,6 +517,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
         let wx = ox as f32 * VOXEL_SIZE;
         let wy = oy as f32 * VOXEL_SIZE;
         let wz = oz as f32 * VOXEL_SIZE;
+        stats_blocks += 1;
 
         // Verify this block still owns at least one cell
         let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
@@ -455,10 +526,22 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
             let cz = oz as usize + dz as usize;
             data.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
         });
-        if !has_cells { continue; }
+        if !has_cells { stats_blocks_no_cells += 1; continue; }
+
+        // Skip fully interior blocks — all faces would be occluded
+        if block_is_fully_interior(data, neighbors, block, shape, facing) {
+            stats_blocks_interior += 1;
+            stats_faces_total += shape.faces.len() as u32;
+            stats_faces_culled += shape.faces.len() as u32;
+            continue;
+        }
 
         for face in &shape.faces {
-            if face_is_occluded(data, neighbors, shapes, block, face, facing, shape.size) { continue; }
+            stats_faces_total += 1;
+            if face_is_occluded(data, neighbors, shapes, block, face, facing, shape.size) {
+                stats_faces_culled += 1;
+                continue;
+            }
 
             let world_verts: Vec<Vec3> = face.vertices.iter()
                 .map(|v| to_world(facing.rotate_block_point(*v, shape.size), wx, wy, wz))
@@ -477,6 +560,8 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
             });
         }
     }
+
+    let faces_before_btb = mesh.faces.len();
 
     // Remove back-to-back faces
     let mut face_groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
@@ -498,6 +583,17 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
         .filter(|(fi, _)| !remove[*fi])
         .map(|(_, f)| f)
         .collect();
+
+    let btb_removed = faces_before_btb - mesh.faces.len();
+    let stats_faces_emitted = stats_faces_total - stats_faces_culled;
+    info!(
+        "[solid mesh] blocks: {} (no_cells: {}, interior: {}), faces: {} total, {} culled, {} emitted, {} back-to-back removed",
+        stats_blocks, stats_blocks_no_cells, stats_blocks_interior,
+        stats_faces_total, stats_faces_culled, stats_faces_emitted, btb_removed,
+    );
+    if btb_removed > 0 {
+        warn!("[solid mesh] {} back-to-back faces removed — indicates CellCover gap", btb_removed);
+    }
 
     mesh
 }

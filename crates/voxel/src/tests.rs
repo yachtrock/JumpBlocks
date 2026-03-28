@@ -1097,3 +1097,114 @@ fn cut_offset_single_wedge_convex() {
         assert_cut_offset_shape_convex(SHAPE_WEDGE, facing, &label);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wedge + wall occlusion tests
+// ---------------------------------------------------------------------------
+
+/// Count LOD mesh triangles: each shape face emits its own triangles in the LOD path,
+/// so triangle count directly reflects how many faces are emitted.
+fn lod_tri_count(data: &ChunkData) -> usize {
+    let shapes = make_shapes();
+    let result = generate_chunk_mesh(data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::Flat);
+    result.lod.indices.len() / 3
+}
+
+#[test]
+fn isolated_wedge_emits_all_faces() {
+    // A lone wedge should have all 6 faces emitted (no neighbors to occlude).
+    // Wedge has: bottom(2tri) + south/back(4tri) + north/front(2tri) + slope(2tri) + west(3tri) + east(3tri) = 16 tri
+    let shapes = make_shapes();
+    let wedge_shape = shapes.get(SHAPE_WEDGE).unwrap();
+    let expected_tris: usize = wedge_shape.faces.iter().map(|f| f.triangles.len()).sum();
+
+    for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+        let mut data = ChunkData::new();
+        data.place_wedge(8, 8, 8, facing, 1);
+        let tris = lod_tri_count(&data);
+        assert_eq!(tris, expected_tris,
+            "Isolated wedge facing {:?}: expected {} tris (all faces), got {}", facing, expected_tris, tris);
+    }
+}
+
+#[test]
+fn wedge_wall_upper_cube_face_not_culled() {
+    // Place a wedge and a 2-high wall of cubes on the slope side.
+    // The lower cube's face toward the wedge SHOULD be culled (behind solid base).
+    // The upper cube's face toward the wedge SHOULD NOT be culled (slope exposes it).
+    //
+    // We test by comparing:
+    //   - tris with just wedge + upper cube (upper face definitely visible)
+    //   - tris with wedge + both cubes (lower face may be culled)
+    //   - tris with just wedge + lower cube (to isolate lower face culling)
+    let shapes = make_shapes();
+    let cube_shape = shapes.get(SHAPE_CUBE).unwrap();
+    let cube_tris: usize = cube_shape.faces.iter().map(|f| f.triangles.len()).sum();
+    let wedge_shape = shapes.get(SHAPE_WEDGE).unwrap();
+    let wedge_tris: usize = wedge_shape.faces.iter().map(|f| f.triangles.len()).sum();
+
+    // Test each wedge facing. The slope side (front) rotates with facing:
+    //   North → slope faces +Z → wall at z+2
+    //   East  → slope faces -X → wall at x-2
+    //   South → slope faces -Z → wall at z-2
+    //   West  → slope faces +X → wall at x+2
+    struct TestCase {
+        facing: Facing,
+        // Offset from wedge origin to place the wall cubes
+        wall_dx: i32,
+        wall_dz: i32,
+    }
+    let cases = [
+        TestCase { facing: Facing::North, wall_dx: 0, wall_dz: 2 },
+        TestCase { facing: Facing::East,  wall_dx: -2, wall_dz: 0 },
+        TestCase { facing: Facing::South, wall_dx: 0, wall_dz: -2 },
+        TestCase { facing: Facing::West,  wall_dx: 2, wall_dz: 0 },
+    ];
+
+    for tc in &cases {
+        let wx = 10;
+        let wy = 10;
+        let wz = 10;
+        let cx = (wx as i32 + tc.wall_dx) as usize;
+        let cz = (wz as i32 + tc.wall_dz) as usize;
+
+        // Wedge alone
+        let mut data_wedge_only = ChunkData::new();
+        data_wedge_only.place_wedge(wx, wy, wz, tc.facing, 1);
+        let tris_wedge_only = lod_tri_count(&data_wedge_only);
+        assert_eq!(tris_wedge_only, wedge_tris,
+            "{:?}: isolated wedge should emit all faces", tc.facing);
+
+        // Wedge + upper cube only (at wedge y + 1, which is upper cell level)
+        let mut data_upper = ChunkData::new();
+        data_upper.place_wedge(wx, wy, wz, tc.facing, 1);
+        data_upper.place_std(cx, wy + 1, cz, SHAPE_CUBE, Facing::North, 1);
+        let tris_upper = lod_tri_count(&data_upper);
+
+        // The upper cube is at y=wy+1 which is the wedge's upper cell row.
+        // The wedge should NOT fully occlude the upper cube's face (slope exposes it).
+        // So the upper cube should have all 6 faces minus at most 0-1 culled by the wedge.
+        // If the upper cube face IS incorrectly culled, we'd see fewer tris than expected.
+        let upper_cube_tris = tris_upper - tris_wedge_only;
+        // Upper cube should have at least cube_tris - 2 (at most 1 face = 2 tris culled by wedge top)
+        // But since wedge has no Top coverage, no face should be culled at all.
+        assert_eq!(upper_cube_tris, cube_tris,
+            "{:?}: upper cube next to wedge slope should have ALL faces visible (got {} tris, expected {}). \
+             This means the wedge is incorrectly occluding the upper cube.",
+            tc.facing, upper_cube_tris, cube_tris);
+
+        // Wedge + lower cube (at same y as wedge, bottom cell level)
+        let mut data_lower = ChunkData::new();
+        data_lower.place_wedge(wx, wy, wz, tc.facing, 1);
+        data_lower.place_std(cx, wy, cz, SHAPE_CUBE, Facing::North, 1);
+        let tris_lower = lod_tri_count(&data_lower);
+
+        // Lower cube IS behind the wedge's solid base, so its face toward the wedge
+        // SHOULD be culled (2 tris). The wedge's front face at bottom should also be
+        // culled by the cube (2 tris). So we expect 2+2=4 fewer tris.
+        let expected_lower = wedge_tris + cube_tris - 4;
+        assert_eq!(tris_lower, expected_lower,
+            "{:?}: wedge + lower cube should have {} tris (mutual culling of 2 faces), got {}",
+            tc.facing, expected_lower, tris_lower);
+    }
+}
