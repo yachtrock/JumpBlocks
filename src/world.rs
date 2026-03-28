@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{Chunk, ChunkData, ChunkNeighbors};
+use jumpblocks_voxel::coords::{ChunkCoord, ChunkPos, RegionId};
+use jumpblocks_voxel::region::Region;
 use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
+use jumpblocks_voxel::world_grid::WorldGrid;
 
 use crate::layers::GameLayer;
 
@@ -9,7 +14,8 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_world);
+        app.init_resource::<WorldGrid>()
+            .add_systems(Startup, setup_world);
     }
 }
 
@@ -17,6 +23,7 @@ fn setup_world(
     mut commands: Commands,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut world_grid: ResMut<WorldGrid>,
 ) {
     let has_rendering = meshes.is_some() && materials.is_some();
 
@@ -95,6 +102,9 @@ fn setup_world(
             brightness: 50.0,
             ..default()
         });
+
+        // --- Create a region and populate it with demo chunks ---
+        let region_id = world_grid.create_region(Vec3::ZERO);
 
         // Demo voxel chunk
         // All blocks are 2x2x2 cells. Each block = 1x1x1 world units (VOXEL_SIZE=0.5).
@@ -216,12 +226,30 @@ fn setup_world(
             neighbor_data.place_wedge(6, 1, 14 + bz * 2, Facing::West, 1);
         }
 
-        // Wire up neighbor references
+        // Store chunks in the region
+        let chunk1_pos = ChunkPos::new(0, 0, 0);
+        let chunk2_pos = ChunkPos::new(1, 0, 0);
+
+        if let Some(region) = world_grid.get_region_mut(region_id) {
+            region.set_chunk(chunk1_pos, chunk_data.clone());
+            region.set_chunk(chunk2_pos, neighbor_data.clone());
+        }
+
+        // Wire up neighbor references using Arc from region storage
+        let chunk1_arc = world_grid.get_region(region_id)
+            .and_then(|r| r.get_chunk_data(chunk1_pos));
+        let chunk2_arc = world_grid.get_region(region_id)
+            .and_then(|r| r.get_chunk_data(chunk2_pos));
+
         let mut chunk1_neighbors = ChunkNeighbors::empty();
-        chunk1_neighbors.set(1, 0, 0, neighbor_data.clone());
+        if let Some(arc) = &chunk2_arc {
+            chunk1_neighbors.set_arc(1, 0, 0, Arc::clone(arc));
+        }
 
         let mut chunk2_neighbors = ChunkNeighbors::empty();
-        chunk2_neighbors.set(-1, 0, 0, chunk_data.clone());
+        if let Some(arc) = &chunk1_arc {
+            chunk2_neighbors.set_arc(-1, 0, 0, Arc::clone(arc));
+        }
 
         // Validate chunk data before creating chunks
         let shapes = ShapeTable::default();
@@ -238,19 +266,32 @@ fn setup_world(
         let mut chunk2 = Chunk::new(neighbor_data);
         chunk2.neighbors = chunk2_neighbors;
 
-        commands.spawn((
+        // Spawn chunk entities with ChunkCoord for spatial lookup
+        let chunk1_entity = commands.spawn((
             chunk1,
+            ChunkCoord { region: region_id, pos: chunk1_pos },
             MeshMaterial3d(chunk_material.clone()),
             Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
             CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
-        ));
+        )).id();
 
-        commands.spawn((
+        let chunk2_entity = commands.spawn((
             chunk2,
+            ChunkCoord { region: region_id, pos: chunk2_pos },
             MeshMaterial3d(neighbor_material),
             Transform::from_translation(Vec3::new(11.0, 0.0, 5.0)),
             CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
-        ));
+        )).id();
+
+        // Record entity handles back into region storage
+        if let Some(region) = world_grid.get_region_mut(region_id) {
+            if let Some(slot) = region.get_chunk_mut(chunk1_pos) {
+                slot.entity = Some(chunk1_entity);
+            }
+            if let Some(slot) = region.get_chunk_mut(chunk2_pos) {
+                slot.entity = Some(chunk2_entity);
+            }
+        }
 
         // ---- Floating test blocks ----
         let mut test_data = ChunkData::new();
