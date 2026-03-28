@@ -52,6 +52,14 @@ pub struct ChunkLodMesh {
     pub lod: Option<Handle<Mesh>>,
 }
 
+/// Optional debug materials for visualizing LOD tiers.
+/// If present, chunks change color based on their tier.
+#[derive(Resource)]
+pub struct LodDebugMaterials {
+    pub full: Handle<StandardMaterial>,
+    pub reduced: Handle<StandardMaterial>,
+}
+
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
@@ -88,11 +96,12 @@ pub fn lod_tier_assignment_system(
     }
 }
 
-/// Swaps the visible mesh based on the current LodTier.
+/// Swaps the visible mesh and optionally material based on the current LodTier.
 /// Requires ChunkLodMesh to have been populated by the meshing pipeline.
 pub fn lod_mesh_swap_system(
     mut commands: Commands,
     chunks: Query<(Entity, &LodTier, &ChunkLodMesh), Changed<LodTier>>,
+    debug_mats: Option<Res<LodDebugMaterials>>,
 ) {
     for (entity, tier, lod_mesh) in chunks.iter() {
         match tier {
@@ -100,10 +109,16 @@ pub fn lod_mesh_swap_system(
                 if let Some(ref handle) = lod_mesh.full_res {
                     commands.entity(entity).insert(Mesh3d(handle.clone()));
                 }
+                if let Some(ref mats) = debug_mats {
+                    commands.entity(entity).insert(MeshMaterial3d(mats.full.clone()));
+                }
             }
             LodTier::Reduced => {
                 if let Some(ref handle) = lod_mesh.lod {
                     commands.entity(entity).insert(Mesh3d(handle.clone()));
+                }
+                if let Some(ref mats) = debug_mats {
+                    commands.entity(entity).insert(MeshMaterial3d(mats.reduced.clone()));
                 }
             }
             LodTier::Hidden => {

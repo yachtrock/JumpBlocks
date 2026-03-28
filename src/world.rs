@@ -1,6 +1,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::ChunkData;
+use jumpblocks_voxel::chunk_lod::LodDebugMaterials;
 use jumpblocks_voxel::coords::ChunkPos;
 use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
 use jumpblocks_voxel::streaming::ChunkMaterial;
@@ -116,7 +117,16 @@ fn setup_world(
             base_color: Color::srgb(0.6, 0.5, 0.4),
             ..default()
         });
-        commands.insert_resource(ChunkMaterial(chunk_mat));
+        commands.insert_resource(ChunkMaterial(chunk_mat.clone()));
+
+        // Debug materials for LOD tier visualization
+        commands.insert_resource(LodDebugMaterials {
+            full: chunk_mat,
+            reduced: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.3, 0.7, 0.9),
+                ..default()
+            }),
+        });
     }
 
     // --- Populate the region with demo chunk data ---
