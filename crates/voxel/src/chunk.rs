@@ -103,9 +103,24 @@ impl ChunkData {
         Self::default()
     }
 
+    /// Construct from raw parts (used by deserialization).
+    pub fn from_raw(cells: Box<[Cell; CHUNK_VOLUME]>, blocks: Vec<Block>) -> Self {
+        Self { cells, blocks }
+    }
+
     #[inline]
     fn index(x: usize, y: usize, z: usize) -> usize {
         y * CHUNK_X * CHUNK_Z + z * CHUNK_X + x
+    }
+
+    /// Get a cell by its flat index (0..CHUNK_VOLUME).
+    #[inline]
+    pub fn get_cell_by_index(&self, idx: usize) -> Cell {
+        if idx < CHUNK_VOLUME {
+            self.cells[idx]
+        } else {
+            Cell::Empty
+        }
     }
 
     /// Get the cell at the given position.
