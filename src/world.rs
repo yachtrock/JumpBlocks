@@ -79,20 +79,20 @@ fn setup_world(
             ));
         }
 
-        // Directional light (sun)
+        // Directional light — pointing straight down for clean platformer shadows
         commands.spawn((
             DirectionalLight {
-                illuminance: 10_000.0,
+                illuminance: 8_000.0,
                 shadows_enabled: true,
                 ..default()
             },
-            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.4, 0.0)),
+            Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
         ));
 
-        // Ambient light
+        // Low ambient — IBL on the camera provides the real ambient coloring
         commands.insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.9, 0.9, 1.0),
-            brightness: 300.0,
+            brightness: 50.0,
             ..default()
         });
 

@@ -1,6 +1,11 @@
 use avian3d::prelude::*;
+use bevy::image::Image;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::prelude::EnvironmentMapLight;
 use bevy::prelude::*;
+use bevy::render::render_resource::{
+    Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::layers::GameLayer;
@@ -59,19 +64,143 @@ impl Default for OrbitCamera {
     }
 }
 
+/// Create a procedural gradient cubemap for image-based lighting.
+///
+/// Produces a sky-to-ground gradient: blue sky above, warm horizon glow at
+/// the equator, and earthy tones below.  The result is used for both the
+/// diffuse irradiance and specular maps in `EnvironmentMapLight`.
+fn create_ibl_cubemap(size: u32) -> Image {
+    let texels_per_face = (size * size) as usize;
+    // Rgba32Float = 16 bytes per texel
+    let mut data = vec![0u8; texels_per_face * 16 * 6];
+
+    for face in 0..6u32 {
+        for y in 0..size {
+            for x in 0..size {
+                // Map texel to direction on the unit cube, then normalize.
+                let u = (2.0 * x as f32 + 1.0) / size as f32 - 1.0;
+                let v = (2.0 * y as f32 + 1.0) / size as f32 - 1.0;
+
+                let dir = match face {
+                    0 => Vec3::new(1.0, -v, -u),  // +X
+                    1 => Vec3::new(-1.0, -v, u),   // -X
+                    2 => Vec3::new(u, 1.0, v),     // +Y
+                    3 => Vec3::new(u, -1.0, -v),   // -Y
+                    4 => Vec3::new(u, -v, 1.0),    // +Z
+                    _ => Vec3::new(-u, -v, -1.0),  // -Z
+                }
+                .normalize();
+
+                // Vertical blend factor: 1 = straight up, -1 = straight down.
+                let h = dir.y;
+
+                // Horizontal direction weights (in xz plane) for cardinal
+                // color variation.  Each is 0..1, peaking when looking
+                // toward that direction.  Using saturated dot products
+                // with a soft power gives wide, overlapping lobes.
+                let horiz = Vec2::new(dir.x, dir.z).normalize_or_zero();
+                let w_south = horiz.dot(Vec2::new(0.0, 1.0)).max(0.0).powf(0.8);  // +Z
+                let w_north = horiz.dot(Vec2::new(0.0, -1.0)).max(0.0).powf(0.8); // -Z
+                let w_east = horiz.dot(Vec2::new(1.0, 0.0)).max(0.0).powf(0.8);   // +X
+                let w_west = horiz.dot(Vec2::new(-1.0, 0.0)).max(0.0).powf(0.8);  // -X
+
+                // Cardinal sky tints — asymmetric to fake a sun somewhere
+                // in the south-east and cooler fill from the north-west.
+                //          base blue     + directional tint
+                let sky_south = Vec3::new(0.50, 0.60, 0.95); // warm haze
+                let sky_north = Vec3::new(0.25, 0.45, 1.05); // deep cool blue
+                let sky_east  = Vec3::new(0.55, 0.58, 0.85); // golden-warm
+                let sky_west  = Vec3::new(0.30, 0.50, 1.00); // neutral cool
+                let sky_base  = Vec3::new(0.35, 0.55, 1.0);
+
+                let sky_tint = sky_base
+                    + (sky_south - sky_base) * w_south
+                    + (sky_north - sky_base) * w_north
+                    + (sky_east - sky_base) * w_east
+                    + (sky_west - sky_base) * w_west;
+                let sky = sky_tint * (1.0 + h * 0.3);
+
+                // Horizon: warmer glow toward the south-east "sun",
+                // cooler and dimmer toward the north-west.
+                let hz_south = Vec3::new(1.10, 0.88, 0.65);
+                let hz_north = Vec3::new(0.75, 0.78, 0.85);
+                let hz_east  = Vec3::new(1.05, 0.85, 0.60);
+                let hz_west  = Vec3::new(0.80, 0.80, 0.85);
+                let hz_base  = Vec3::new(0.90, 0.82, 0.72);
+
+                let horizon = hz_base
+                    + (hz_south - hz_base) * w_south
+                    + (hz_north - hz_base) * w_north
+                    + (hz_east - hz_base) * w_east
+                    + (hz_west - hz_base) * w_west;
+
+                // Ground bounce — slightly warmer from the sunlit side.
+                let gnd_base = Vec3::new(0.45, 0.38, 0.30) * 0.5;
+                let gnd_warm = Vec3::new(0.50, 0.40, 0.30) * 0.55;
+                let sun_weight = (w_south + w_east) * 0.5;
+                let ground = gnd_base.lerp(gnd_warm, sun_weight);
+
+                let color = if h > 0.0 {
+                    // Above horizon: blend sky ↔ horizon.
+                    let t = h.powf(0.6);
+                    horizon.lerp(sky, t)
+                } else {
+                    // Below horizon: blend horizon ↔ ground.
+                    let t = (-h).powf(0.4);
+                    horizon.lerp(ground, t)
+                };
+
+                let offset = ((face * size * size + y * size + x) as usize) * 16;
+                data[offset..offset + 4].copy_from_slice(&color.x.to_le_bytes());
+                data[offset + 4..offset + 8].copy_from_slice(&color.y.to_le_bytes());
+                data[offset + 8..offset + 12].copy_from_slice(&color.z.to_le_bytes());
+                data[offset + 12..offset + 16].copy_from_slice(&1.0f32.to_le_bytes());
+            }
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 6,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba32Float,
+        default(),
+    );
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..default()
+    });
+    image
+}
+
 /// Small offset so the camera doesn't clip into geometry.
 const CAMERA_CLIP_OFFSET: f32 = 0.2;
 
 fn spawn_camera(
     mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
     mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
+    let diffuse_map = images.add(create_ibl_cubemap(32));
+    let specular_map = images.add(create_ibl_cubemap(64));
+
     commands.spawn((
         OrbitCamera::default(),
         Camera3d::default(),
         Camera {
             is_active: false, // disabled until curtain is ready
             ..default()
+        },
+        EnvironmentMapLight {
+            diffuse_map,
+            specular_map,
+            intensity: 800.0,
+            rotation: Quat::IDENTITY,
+            affects_lightmapped_mesh_diffuse: false,
         },
     ));
 
