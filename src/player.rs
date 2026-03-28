@@ -9,6 +9,7 @@ use crate::player_state::PlayerState;
 use crate::UiInputBlock;
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dSensorShape;
+use jumpblocks_voxel::streaming::StreamingAnchor;
 
 pub struct PlayerPlugin;
 
@@ -105,6 +106,7 @@ fn spawn_player(
     let mut player = commands.spawn((
         Player,
         LocalPlayer,
+        StreamingAnchor,
         PlayerState::default(),
         ActionState::default(),
         ConsumedInputs::default(),

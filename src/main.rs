@@ -410,6 +410,7 @@ fn main() {
         // Client-side plugins (rendering available)
         app.add_plugins((
             jumpblocks_voxel::VoxelPlugin,
+            jumpblocks_voxel::streaming::StreamingPlugin,
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
             action_state::ActionStatePlugin,
