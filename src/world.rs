@@ -113,9 +113,11 @@ fn setup_world(
         for step in 0..8usize {
             let y_top = 1 + step; // top of this step
             for bx in 0..2 {
+                // bx=0 when step>0 shares its column with bx=1 of the previous step,
+                // which already filled up to y=(step). Only place the new top layer.
+                let y_start = if bx == 0 && step > 0 { y_top } else { 1 };
                 for bz in 0..3 {
-                    // Fill from ground (y=1) up to this step's height
-                    for y in 1..=y_top {
+                    for y in y_start..=y_top {
                         chunk_data.place_std(bx * 2 + step * 2, y, bz * 2 + 6, SHAPE_CUBE, Facing::North, 1);
                     }
                 }
