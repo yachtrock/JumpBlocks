@@ -197,6 +197,7 @@ fn debug_ui_system(
             ui.label("LOD Tiers");
             ui.add(egui::Slider::new(&mut lod_config.full_radius, 0..=16).text("Full radius"));
             ui.add(egui::Slider::new(&mut lod_config.reduced_radius, 1..=32).text("Reduced radius"));
+            ui.add(egui::Slider::new(&mut lod_config.transition_duration, 0.05..=2.0).text("Transition (sec)"));
 
             ui.separator();
             let mut full_count = 0;

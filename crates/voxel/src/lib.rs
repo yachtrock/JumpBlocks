@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
 use chunk::*;
-use chunk_lod::{ChunkLodMesh, LodTier};
+use chunk_lod::ChunkLodMesh;
 use meshing::*;
 use shape::*;
 
@@ -156,7 +156,6 @@ fn handle_chunk_mesh_results(
                     full_res: Some(full_res_handle),
                     lod: Some(lod_handle),
                 },
-                LodTier::Full,
             ))
             .remove::<ChunkMeshTask>();
 

@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use std::path::PathBuf;
 
 use crate::chunk::{Chunk, ChunkNeighbors};
+use crate::chunk_lod::{ChunkDitherMaterial, LodTarget, LodTier};
 use crate::coords::{ChunkCoord, ChunkPos};
 use crate::world_grid::WorldGrid;
 
@@ -58,10 +59,10 @@ impl Default for StreamingConfig {
 #[derive(Component)]
 pub struct StreamingAnchor;
 
-/// Resource holding the default material for streamed chunk entities.
+/// Resource holding the default dither material for streamed chunk entities.
 /// The game should insert this during setup.
 #[derive(Resource)]
-pub struct ChunkMaterial(pub Handle<StandardMaterial>);
+pub struct ChunkMaterial(pub Handle<ChunkDitherMaterial>);
 
 /// Resource holding the world save directory path.
 /// If not present, chunks won't be saved/loaded from disk.
@@ -160,6 +161,8 @@ pub fn chunk_streaming_system(
         let mut entity_commands = commands.spawn((
             Chunk::new(chunk_data),
             ChunkCoord { region: active_id, pos: *pos },
+            LodTier::default(),
+            LodTarget::default(),
             Transform::from_translation(*world_pos),
         ));
 

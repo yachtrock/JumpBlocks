@@ -1,7 +1,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::ChunkData;
-use jumpblocks_voxel::chunk_lod::LodDebugMaterials;
+use jumpblocks_voxel::chunk_lod::{ChunkDitherMaterial, DitherFadeExtension, LodDebugMaterials};
 use jumpblocks_voxel::coords::ChunkPos;
 use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
 use jumpblocks_voxel::streaming::ChunkMaterial;
@@ -35,6 +35,7 @@ fn setup_world(
     mut commands: Commands,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
+    dither_materials: Option<ResMut<Assets<ChunkDitherMaterial>>>,
     mut world_grid: ResMut<WorldGrid>,
 ) {
     let has_rendering = meshes.is_some() && materials.is_some();
@@ -112,21 +113,29 @@ fn setup_world(
             ..default()
         });
 
-        // Default material for streamed chunks
-        let chunk_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.6, 0.5, 0.4),
-            ..default()
-        });
-        commands.insert_resource(ChunkMaterial(chunk_mat.clone()));
+        // Default dither material for streamed chunks
+        if let Some(mut dither_mats) = dither_materials {
+            let chunk_mat = dither_mats.add(ChunkDitherMaterial {
+                base: StandardMaterial {
+                    base_color: Color::srgb(0.6, 0.5, 0.4),
+                    ..default()
+                },
+                extension: DitherFadeExtension { fade: 0.0 },
+            });
+            commands.insert_resource(ChunkMaterial(chunk_mat.clone()));
 
-        // Debug materials for LOD tier visualization
-        commands.insert_resource(LodDebugMaterials {
-            full: chunk_mat,
-            reduced: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.3, 0.7, 0.9),
-                ..default()
-            }),
-        });
+            // Debug materials for LOD tier visualization
+            commands.insert_resource(LodDebugMaterials {
+                full: chunk_mat,
+                reduced: dither_mats.add(ChunkDitherMaterial {
+                    base: StandardMaterial {
+                        base_color: Color::srgb(0.3, 0.7, 0.9),
+                        ..default()
+                    },
+                    extension: DitherFadeExtension { fade: 0.0 },
+                }),
+            });
+        }
     }
 
     // --- Populate the region with demo chunk data ---
