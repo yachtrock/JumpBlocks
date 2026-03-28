@@ -8,7 +8,7 @@
 //   rotate_facing_right(f) / rotate_facing_left(f) → facing helpers (0=N 1=E 2=S 3=W)
 //
 // Facing: 0=North 1=East 2=South 3=West
-// Shapes: 0=cube 1=smooth_cube 2=wedge 3=smooth_wedge
+// Shapes: 0=cube 1=wedge
 
 fn on_enter(ctx) {
     log("Entered building state with item: " + ctx.item_name);
@@ -18,6 +18,8 @@ fn on_enter(ctx) {
     set_button_hint("Place Block", "F", "ZR");
     set_button_hint("Put Away", "Esc", "B");
     set_button_hint("Options", "Q", "ZL");
+
+    set_selected_shape(1); // wedge
 
     #{
         item_name: ctx.item_name,
@@ -52,10 +54,10 @@ fn on_update(state, input) {
         show_preview_in_hand(state.facing);
     }
 
-    // ── Place block (wedge = shape 2) ────────────────────────────────
+    // ── Place block (wedge = shape 1) ────────────────────────────────
     if input_just_pressed("GamepadRightTrigger") || input_just_pressed("KeyF") {
         if pos != () {
-            place_block(2, state.facing, 1);
+            place_block(1, state.facing, 1);
             log("Placed " + state.item_name + " facing " + state.facing);
         }
     }

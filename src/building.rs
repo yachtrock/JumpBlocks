@@ -15,6 +15,7 @@
 //! - `show_preview(facing)` — show preview at the current build position
 //! - `show_preview_in_hand(facing)` — show preview floating in front of player
 //! - `hide_preview()` — hide the preview
+//! - `set_selected_shape(shape)` — tell the placement system which shape to validate
 //! - `place_block(shape, facing, texture)` — place at the current build position
 //! - `rotate_facing_right(facing)` / `rotate_facing_left(facing)` — helpers
 
@@ -22,9 +23,9 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{
-    Chunk, BlockModification, CHUNK_X, CHUNK_Y, CHUNK_Z, VOXEL_SIZE,
+    Chunk, ChunkData, BlockModification, CHUNK_X, CHUNK_Y, CHUNK_Z, VOXEL_SIZE,
 };
-use jumpblocks_voxel::shape::{Facing, SHAPE_WEDGE};
+use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
 use rhai::{Dynamic, Map, INT};
 
 use crate::action_state::{ActionState, ActionStateEngine};
@@ -97,6 +98,8 @@ struct BuildingApiInner {
     preview: PreviewState,
     /// Block placement requests (set by script, drained by post-system).
     place_requests: Vec<PlaceRequest>,
+    /// The shape the script wants to place (persists across frames).
+    selected_shape: u16,
 }
 
 impl BuildingApiInner {
@@ -107,6 +110,7 @@ impl BuildingApiInner {
             camera_forward: Vec3::NEG_Z,
             preview: PreviewState::Hidden,
             place_requests: Vec::new(),
+            selected_shape: SHAPE_CUBE,
         }
     }
 
@@ -114,6 +118,7 @@ impl BuildingApiInner {
         self.build_pos = None;
         self.preview = PreviewState::Hidden;
         self.place_requests.clear();
+        // Note: selected_shape is NOT cleared — it persists across frames.
     }
 }
 
@@ -228,6 +233,17 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
         );
     }
 
+    // set_selected_shape(shape) — tell the placement system what shape to validate for
+    {
+        let inner = inner.clone();
+        engine
+            .rhai_engine_mut()
+            .register_fn("set_selected_shape", move |shape: INT| {
+                let mut data = inner.lock().unwrap();
+                data.selected_shape = shape as u16;
+            });
+    }
+
     // rotate_facing_right(facing) -> int
     engine
         .rhai_engine_mut()
@@ -251,6 +267,7 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
 
 fn compute_build_context(
     api: Res<BuildingApi>,
+    shapes: Res<ShapeTable>,
     action_query: Query<(&ActionState, &Transform), With<Player>>,
     camera_query: Query<&Transform, (With<OrbitCamera>, Without<Player>)>,
     chunks: Query<(Entity, &Chunk, &Transform)>,
@@ -279,7 +296,12 @@ fn compute_build_context(
     inner.player_pos = player_pos;
     inner.camera_forward = cam_forward;
 
-    inner.build_pos = find_placement_position(player_pos, cam_forward, &chunks);
+    let occupied = shapes
+        .get(inner.selected_shape)
+        .map(|s| s.occupied_cells.as_slice())
+        .unwrap_or(&jumpblocks_voxel::chunk::BLOCK_CELLS);
+
+    inner.build_pos = find_placement_position(player_pos, cam_forward, &chunks, occupied);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +311,7 @@ fn compute_build_context(
 fn apply_building_commands(
     mut commands: Commands,
     api: Res<BuildingApi>,
+    shapes: Res<ShapeTable>,
     mut chunks: Query<(&mut Chunk, &Transform)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -301,11 +324,15 @@ fn apply_building_commands(
     for req in &inner.place_requests {
         if let Some(ref pos) = inner.build_pos {
             if let Ok((mut chunk, _)) = chunks.get_mut(pos.chunk_entity) {
-                if req.shape == SHAPE_WEDGE {
-                    chunk.data.place_wedge(pos.x, pos.y, pos.z, req.facing, req.texture);
-                } else {
-                    chunk.data.place_std(pos.x, pos.y, pos.z, req.shape, req.facing, req.texture);
-                }
+                let occupied = shapes
+                    .get(req.shape)
+                    .map(|s| s.occupied_cells.as_slice())
+                    .unwrap_or(&jumpblocks_voxel::chunk::BLOCK_CELLS);
+
+                chunk.data.place_block(
+                    req.shape, req.facing, req.texture,
+                    pos.x, pos.y, pos.z, occupied,
+                );
                 chunk.pending_modifications.push(BlockModification {
                     x: pos.x,
                     y: pos.y,
@@ -436,10 +463,20 @@ fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
 const BUILD_RAY_MAX_DIST: f32 = 6.0;
 const BUILD_RAY_STEP: f32 = 0.25;
 
+/// Find the best placement position for a block along the camera ray.
+///
+/// Algorithm:
+/// 1. Step along the ray until we hit an occupied cell.
+/// 2. Determine which face of the cell was hit (approach direction).
+/// 3. Try placing the block adjacent to that face, testing all valid origins
+///    so that one of the block's occupied cells lands in the adjacent empty cell.
+/// 4. Among valid origins, pick the one whose block center is closest to the
+///    aim point for the most intuitive placement.
 fn find_placement_position(
     player_pos: Vec3,
     camera_forward: Vec3,
     chunks: &Query<(Entity, &Chunk, &Transform)>,
+    occupied_cells: &[(u8, u8, u8)],
 ) -> Option<BuildPos> {
     let ray_dir = camera_forward.normalize_or_zero();
     if ray_dir == Vec3::ZERO {
@@ -447,9 +484,7 @@ fn find_placement_position(
     }
 
     let ray_origin = player_pos + Vec3::Y * 0.5;
-
     let steps = ((BUILD_RAY_MAX_DIST / BUILD_RAY_STEP) as usize).max(1);
-
     let mut prev_world = ray_origin;
 
     for i in 1..=steps {
@@ -457,10 +492,8 @@ fn find_placement_position(
         let sample_world = ray_origin + ray_dir * t;
 
         for (chunk_entity, chunk, chunk_transform) in chunks.iter() {
-            let local = chunk_transform
-                .compute_affine()
-                .inverse()
-                .transform_point3(sample_world);
+            let inv = chunk_transform.compute_affine().inverse();
+            let local = inv.transform_point3(sample_world);
 
             let vx = (local.x / VOXEL_SIZE).floor() as i32;
             let vy = (local.y / VOXEL_SIZE).floor() as i32;
@@ -475,12 +508,18 @@ fn find_placement_position(
             }
 
             if chunk.data.is_occupied(ux, uy, uz) {
-                if let Some(pos) =
-                    try_place_at_world(prev_world, chunks)
-                {
-                    return Some(pos);
-                }
-                if let Some(pos) = search_down_for_build(ux, uy, uz, chunk, chunk_entity) {
+                // Determine approach direction from the previous ray sample.
+                let prev_local = inv.transform_point3(prev_world);
+                let aim_local = local;
+
+                if let Some(pos) = find_adjacent_placement(
+                    &chunk.data,
+                    chunk_entity,
+                    ux, uy, uz,
+                    prev_local,
+                    aim_local,
+                    occupied_cells,
+                ) {
                     return Some(pos);
                 }
             }
@@ -489,12 +528,102 @@ fn find_placement_position(
         prev_world = sample_world;
     }
 
-    try_place_at_world(prev_world, chunks)
+    // End of ray — try placing in the air if adjacent to something.
+    try_place_near_world(prev_world, chunks, occupied_cells)
 }
 
-fn try_place_at_world(
+/// Given a hit cell, find the best adjacent position to place a block.
+///
+/// Determines the approach face from the previous ray sample, then tries all
+/// possible block origins that would put one of the block's cells in the
+/// adjacent empty space. Picks the origin whose block center is closest to
+/// the aim point.
+fn find_adjacent_placement(
+    data: &ChunkData,
+    chunk_entity: Entity,
+    hit_x: usize,
+    hit_y: usize,
+    hit_z: usize,
+    prev_local: Vec3,
+    aim_local: Vec3,
+    occupied_cells: &[(u8, u8, u8)],
+) -> Option<BuildPos> {
+    // Build a prioritized list of adjacent directions.
+    // Primary: the face the ray approached from.
+    // Secondary: all other faces, ordered by alignment with the approach direction.
+    let approach = Vec3::new(
+        prev_local.x - aim_local.x,
+        prev_local.y - aim_local.y,
+        prev_local.z - aim_local.z,
+    );
+
+    let mut face_dirs: [(i32, i32, i32); 6] = [
+        (-1, 0, 0), (1, 0, 0),
+        (0, -1, 0), (0, 1, 0),
+        (0, 0, -1), (0, 0, 1),
+    ];
+
+    // Sort faces so the one most aligned with the approach direction comes first.
+    face_dirs.sort_by(|a, b| {
+        let dot_a = a.0 as f32 * approach.x + a.1 as f32 * approach.y + a.2 as f32 * approach.z;
+        let dot_b = b.0 as f32 * approach.x + b.1 as f32 * approach.y + b.2 as f32 * approach.z;
+        dot_b.partial_cmp(&dot_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for &(fdx, fdy, fdz) in &face_dirs {
+        let adj_x = hit_x as i32 + fdx;
+        let adj_y = hit_y as i32 + fdy;
+        let adj_z = hit_z as i32 + fdz;
+
+        if adj_x < 0 || adj_y < 0 || adj_z < 0 {
+            continue;
+        }
+
+        // Try all origins that would place one of the block's cells at (adj_x, adj_y, adj_z).
+        let mut best: Option<BuildPos> = None;
+        let mut best_dist_sq = f32::MAX;
+        let aim_cell = Vec3::new(adj_x as f32, adj_y as f32, adj_z as f32);
+
+        for &(ox, oy, oz) in occupied_cells {
+            let origin_x = adj_x - ox as i32;
+            let origin_y = adj_y - oy as i32;
+            let origin_z = adj_z - oz as i32;
+
+            if origin_x < 0 || origin_y < 0 || origin_z < 0 {
+                continue;
+            }
+            let (ux, uy, uz) = (origin_x as usize, origin_y as usize, origin_z as usize);
+
+            if data.can_place(ux, uy, uz, occupied_cells) {
+                // Compute block center for tie-breaking.
+                let center = block_center(ux, uy, uz, occupied_cells);
+                let dist_sq = (center - aim_cell).length_squared();
+                if dist_sq < best_dist_sq {
+                    best_dist_sq = dist_sq;
+                    best = Some(BuildPos {
+                        x: ux,
+                        y: uy,
+                        z: uz,
+                        chunk_entity,
+                    });
+                }
+            }
+        }
+
+        if best.is_some() {
+            return best;
+        }
+    }
+
+    // Fallback: search up/down near the hit column.
+    search_vertical_for_build(hit_x, hit_y, hit_z, data, chunk_entity, occupied_cells)
+}
+
+/// Try placing a block near a world position (end-of-ray fallback).
+fn try_place_near_world(
     world_pos: Vec3,
     chunks: &Query<(Entity, &Chunk, &Transform)>,
+    occupied_cells: &[(u8, u8, u8)],
 ) -> Option<BuildPos> {
     for (chunk_entity, chunk, chunk_transform) in chunks.iter() {
         let local = chunk_transform
@@ -514,63 +643,104 @@ fn try_place_at_world(
             continue;
         }
 
-        let (ux, uy, uz) = (ux & !1, uy, uz & !1);
-
-        if chunk.data.can_place_std(ux, uy, uz) {
-            return Some(BuildPos {
-                x: ux,
-                y: uy,
-                z: uz,
-                chunk_entity,
-            });
+        // Try origins near this cell that would cover it.
+        if let Some(pos) = try_origins_near(ux, uy, uz, &chunk.data, chunk_entity, occupied_cells) {
+            return Some(pos);
         }
 
-        if let Some(pos) = search_down_for_build(ux, uy, uz, chunk, chunk_entity) {
+        if let Some(pos) =
+            search_vertical_for_build(ux, uy, uz, &chunk.data, chunk_entity, occupied_cells)
+        {
             return Some(pos);
         }
     }
     None
 }
 
-fn search_down_for_build(
-    x: usize,
-    start_y: usize,
-    z: usize,
-    chunk: &Chunk,
+/// Try all block origins that would place one of the block's cells at `(cx, cy, cz)`.
+fn try_origins_near(
+    cx: usize,
+    cy: usize,
+    cz: usize,
+    data: &ChunkData,
     chunk_entity: Entity,
+    occupied_cells: &[(u8, u8, u8)],
 ) -> Option<BuildPos> {
-    let x = x & !1;
-    let z = z & !1;
-    if start_y + 1 < CHUNK_Y && chunk.data.can_place_std(x, start_y + 1, z) {
-        return Some(BuildPos {
-            x,
-            y: start_y + 1,
-            z,
-            chunk_entity,
-        });
-    }
+    let mut best: Option<BuildPos> = None;
+    let mut best_dist_sq = f32::MAX;
+    let target = Vec3::new(cx as f32, cy as f32, cz as f32);
 
-    for y in (0..=start_y).rev() {
-        if chunk.data.can_place_std(x, y, z) {
-            return Some(BuildPos {
-                x,
-                y,
-                z,
-                chunk_entity,
-            });
+    for &(ox, oy, oz) in occupied_cells {
+        let origin_x = cx as i32 - ox as i32;
+        let origin_y = cy as i32 - oy as i32;
+        let origin_z = cz as i32 - oz as i32;
+
+        if origin_x < 0 || origin_y < 0 || origin_z < 0 {
+            continue;
         }
-        if chunk.data.is_occupied(x, y, z) && y + 1 <= start_y {
-            if chunk.data.can_place_std(x, y + 1, z) {
-                return Some(BuildPos {
-                    x,
-                    y: y + 1,
-                    z,
+        let (ux, uy, uz) = (origin_x as usize, origin_y as usize, origin_z as usize);
+
+        if data.can_place(ux, uy, uz, occupied_cells) {
+            let center = block_center(ux, uy, uz, occupied_cells);
+            let dist_sq = (center - target).length_squared();
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+                best = Some(BuildPos {
+                    x: ux,
+                    y: uy,
+                    z: uz,
                     chunk_entity,
                 });
             }
         }
     }
+    best
+}
+
+/// Search vertically near a column for a valid placement.
+fn search_vertical_for_build(
+    x: usize,
+    start_y: usize,
+    z: usize,
+    data: &ChunkData,
+    chunk_entity: Entity,
+    occupied_cells: &[(u8, u8, u8)],
+) -> Option<BuildPos> {
+    // Try one above first.
+    if start_y + 1 < CHUNK_Y {
+        if let Some(pos) = try_origins_near(x, start_y + 1, z, data, chunk_entity, occupied_cells) {
+            return Some(pos);
+        }
+    }
+
+    // Search downward.
+    for y in (0..=start_y).rev() {
+        if let Some(pos) = try_origins_near(x, y, z, data, chunk_entity, occupied_cells) {
+            return Some(pos);
+        }
+        // If we hit an occupied cell, try just above it.
+        if data.is_occupied(x, y, z) && y + 1 <= start_y {
+            if let Some(pos) = try_origins_near(x, y + 1, z, data, chunk_entity, occupied_cells) {
+                return Some(pos);
+            }
+            break;
+        }
+    }
     None
+}
+
+/// Compute the center of a block's occupied cells given its origin.
+fn block_center(ox: usize, oy: usize, oz: usize, occupied_cells: &[(u8, u8, u8)]) -> Vec3 {
+    let n = occupied_cells.len() as f32;
+    let mut sum = Vec3::ZERO;
+    for &(dx, dy, dz) in occupied_cells {
+        sum += Vec3::new(
+            (ox + dx as usize) as f32,
+            (oy + dy as usize) as f32,
+            (oz + dz as usize) as f32,
+        );
+    }
+    sum / n
 }
 
 // ---------------------------------------------------------------------------

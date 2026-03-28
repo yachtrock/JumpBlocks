@@ -227,6 +227,48 @@ impl ChunkData {
         false
     }
 
+    /// Check whether a block with the given occupied cells can be placed at origin `(x, y, z)`.
+    /// All occupied cells must be empty and in-bounds, and at least one must be adjacent
+    /// to an existing occupied cell.
+    pub fn can_place(&self, x: usize, y: usize, z: usize, occupied: &[(u8, u8, u8)]) -> bool {
+        // All cells must be empty and in-bounds.
+        for &(dx, dy, dz) in occupied {
+            let cx = x + dx as usize;
+            let cy = y + dy as usize;
+            let cz = z + dz as usize;
+            if cx >= CHUNK_X || cy >= CHUNK_Y || cz >= CHUNK_Z {
+                return false;
+            }
+            if self.get_cell(cx, cy, cz).is_occupied() {
+                return false;
+            }
+        }
+        // At least one occupied cell must be adjacent to an existing block.
+        for &(dx, dy, dz) in occupied {
+            let cx = (x + dx as usize) as i32;
+            let cy = (y + dy as usize) as i32;
+            let cz = (z + dz as usize) as i32;
+            for &(nx, ny, nz) in &[(-1i32,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)] {
+                let tx = cx + nx;
+                let ty = cy + ny;
+                let tz = cz + nz;
+                // Skip cells inside the block itself.
+                let inside = occupied.iter().any(|&(ox, oy, oz)| {
+                    tx == (x + ox as usize) as i32
+                        && ty == (y + oy as usize) as i32
+                        && tz == (z + oz as usize) as i32
+                });
+                if inside {
+                    continue;
+                }
+                if self.is_neighbor_occupied(tx, ty, tz) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Check whether a block can be placed at `(x, y, z)`.
     pub fn can_build_at(&self, x: usize, y: usize, z: usize) -> bool {
         if x >= CHUNK_X || y >= CHUNK_Y || z >= CHUNK_Z {
