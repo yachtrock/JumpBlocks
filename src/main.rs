@@ -411,6 +411,7 @@ fn main() {
         app.add_plugins((
             jumpblocks_voxel::VoxelPlugin,
             jumpblocks_voxel::streaming::StreamingPlugin,
+            jumpblocks_voxel::chunk_lod::LodPlugin,
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
             action_state::ActionStatePlugin,

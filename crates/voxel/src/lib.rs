@@ -1,4 +1,5 @@
 pub mod chunk;
+pub mod chunk_lod;
 pub mod coords;
 pub mod cut_offset_chamfer;
 pub mod meshing;
@@ -16,6 +17,7 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
 use chunk::*;
+use chunk_lod::{ChunkLodMesh, LodTier};
 use meshing::*;
 use shape::*;
 
@@ -133,8 +135,11 @@ fn handle_chunk_mesh_results(
             continue;
         }
 
-        let mesh = build_full_res_mesh(&result.full_res);
-        let mesh_handle = meshes.add(mesh);
+        let full_res_mesh = build_full_res_mesh(&result.full_res);
+        let full_res_handle = meshes.add(full_res_mesh);
+
+        let lod_mesh = build_lod_mesh(&result.lod);
+        let lod_handle = meshes.add(lod_mesh);
 
         let collider = Collider::trimesh(
             result.collider_data.vertices,
@@ -143,7 +148,16 @@ fn handle_chunk_mesh_results(
 
         commands
             .entity(entity)
-            .insert((Mesh3d(mesh_handle), collider, RigidBody::Static))
+            .insert((
+                Mesh3d(full_res_handle.clone()),
+                collider,
+                RigidBody::Static,
+                ChunkLodMesh {
+                    full_res: Some(full_res_handle),
+                    lod: Some(lod_handle),
+                },
+                LodTier::Full,
+            ))
             .remove::<ChunkMeshTask>();
 
         // Spawn debug overlay as child entity with red material
