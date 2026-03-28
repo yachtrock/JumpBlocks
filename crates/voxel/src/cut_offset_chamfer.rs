@@ -190,22 +190,26 @@ pub fn generate_cut_offset_chamfer(
         let avg_n = (na + nb).normalize_or_zero();
         let push_amount = fillet_push_amount(na, nb, CHAMFER_WIDTH);
 
-        // Detect convex vs concave: check if face A's non-edge vertex is
-        // behind the bisector plane through the edge.  For convex edges,
-        // the solid interior is behind the bisector (avg_n points outward).
-        let edge_pos = solid.positions[va as usize];
-        let is_convex = {
-            let face_a = &solid.faces[fi_a];
-            let c = face_a
-                .verts
-                .iter()
-                .find(|&&v| v != va && v != vb)
-                .map(|&v| solid.positions[v as usize]);
-            if let Some(c) = c {
-                (c - edge_pos).dot(avg_n) < 0.0
-            } else {
-                true
-            }
+        // Detect convex vs concave using the signed dihedral angle.
+        // (n1 × n2) · edge_dir gives the sine of the dihedral angle with
+        // correct sign: positive → convex, negative → concave.
+        let pa = solid.positions[va as usize];
+        let pb = solid.positions[vb as usize];
+        let edge_dir = (pb - pa).normalize_or_zero();
+        // Signed dihedral: (na × nb) · edge_dir.
+        // The sign depends on which face is "left" vs "right" of the edge.
+        // Determine this from face A's vertex winding: if face A traverses
+        // the edge va→vb in its polygon order, it's on the left.
+        let face_a_verts = &solid.faces[fi_a].verts;
+        let n = face_a_verts.len();
+        let face_a_forward = (0..n).any(|i| {
+            face_a_verts[i] == va && face_a_verts[(i + 1) % n] == vb
+        });
+        let signed_dihedral = na.cross(nb).dot(edge_dir);
+        let is_convex = if face_a_forward {
+            signed_dihedral < 0.0
+        } else {
+            signed_dihedral > 0.0
         };
 
         // Convex: push inward (-bisector). Concave: push outward (+bisector).
@@ -723,7 +727,31 @@ pub fn generate_cut_offset_chamfer(
             );
         }
 
-        // -- Emit corner patches + gap triangles --------------------------------
+        // -- Emit corner patches + gap geometry ---------------------------------
+
+        // Precompute split points for each patched vertex so we can
+        // reference a neighbor's split when building gap quads.
+        let mut patch_split_next: Vec<Option<Vec3>> = vec![None; n];
+        let mut patch_split_prev: Vec<Option<Vec3>> = vec![None; n];
+
+        for i in 0..n {
+            if !needs_patch[i] {
+                continue;
+            }
+            let ip = (i + n - 1) % n;
+            let j = (i + 1) % n;
+
+            patch_split_next[i] = Some(if prev_sharp[i] {
+                cuts[ip].as_ref().map_or(split_toward(i, j), |c| c.split_j)
+            } else {
+                split_toward(i, j)
+            });
+            patch_split_prev[i] = Some(if next_sharp[i] {
+                cuts[i].as_ref().map_or(split_toward(i, ip), |c| c.split_i)
+            } else {
+                split_toward(i, ip)
+            });
+        }
 
         for i in 0..n {
             if !needs_patch[i] {
@@ -733,16 +761,8 @@ pub fn generate_cut_offset_chamfer(
             let ip = (i + n - 1) % n;
             let j = (i + 1) % n;
 
-            let split_on_next_edge = if prev_sharp[i] {
-                cuts[ip].as_ref().map_or(split_toward(i, j), |c| c.split_j)
-            } else {
-                split_toward(i, j)
-            };
-            let split_on_prev_edge = if next_sharp[i] {
-                cuts[i].as_ref().map_or(split_toward(i, ip), |c| c.split_i)
-            } else {
-                split_toward(i, ip)
-            };
+            let split_on_next_edge = patch_split_next[i].unwrap();
+            let split_on_prev_edge = patch_split_prev[i].unwrap();
 
             // Corner patch quad:
             //   orig → split_on_prev_edge → inner → split_on_next_edge
@@ -758,18 +778,46 @@ pub fn generate_cut_offset_chamfer(
                 fn_,
             );
 
-            // Gap triangles on non-sharp edges.
+            // Gap geometry on non-sharp edges.
+            // When both endpoints have patches, emit a quad connecting all
+            // four points instead of two separate triangles (which leave a
+            // diamond-shaped gap between the split points).
             if !prev_sharp[i] {
-                emit_tri(
-                    &mut positions, &mut normals, &mut uvs, &mut indices,
-                    inner[ip], split_on_prev_edge, inner[i], fn_,
-                );
+                if needs_patch[ip] {
+                    // Both endpoints patched — emit quad from the lower-
+                    // indexed side only to avoid double emission.
+                    if i < ip || (i == n - 1 && ip == 0) {
+                        let split_ip = patch_split_next[ip].unwrap();
+                        emit_quad(
+                            &mut positions, &mut normals, &mut uvs, &mut indices,
+                            inner[ip], split_ip, split_on_prev_edge, inner[i], fn_,
+                        );
+                    }
+                } else {
+                    emit_tri(
+                        &mut positions, &mut normals, &mut uvs, &mut indices,
+                        inner[ip], split_on_prev_edge, inner[i], fn_,
+                    );
+                }
             }
             if !next_sharp[i] {
-                emit_tri(
-                    &mut positions, &mut normals, &mut uvs, &mut indices,
-                    inner[i], split_on_next_edge, inner[j], fn_,
-                );
+                if needs_patch[j] {
+                    // Will be handled when vertex j processes its prev edge.
+                    // Only emit from one side — vertex j will handle it
+                    // unless we're the designated emitter.
+                    if i < j || (i == n - 1 && j == 0) {
+                        let split_j = patch_split_prev[j].unwrap();
+                        emit_quad(
+                            &mut positions, &mut normals, &mut uvs, &mut indices,
+                            inner[i], split_on_next_edge, split_j, inner[j], fn_,
+                        );
+                    }
+                } else {
+                    emit_tri(
+                        &mut positions, &mut normals, &mut uvs, &mut indices,
+                        inner[i], split_on_next_edge, inner[j], fn_,
+                    );
+                }
             }
         }
     }
