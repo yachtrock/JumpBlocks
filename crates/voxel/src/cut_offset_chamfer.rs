@@ -276,10 +276,40 @@ pub fn generate_cut_offset_chamfer(
             }
             let sign = if convex_edges >= concave_edges { -1.0 } else { 1.0 };
 
-            // Solve N δ = sign * r * 1  for the sphere center offset δ.
-            // N is the matrix with face normals as rows.
+            // Compute effective fillet radius per face from incident edges.
+            // Each face's constraint: nj · δ = sign * rj
+            // rj = max radius of chamfered edges incident to face j.
+            let mut face_radii: Vec<f32> = vec![0.0; face_normals.len()];
+            for &(a, b) in &sharp_edges {
+                if a != v && b != v { continue; }
+                let ek = edge_key(a, b);
+                let Some(info) = edge_graph.get(&ek) else { continue };
+                if info.faces.len() < 2 { continue; }
+                let na_e = solid.faces[info.faces[0]].normal;
+                let nb_e = solid.faces[info.faces[1]].normal;
+                // Effective radius: r = setback * tan(θ/2)
+                let k = (na_e + nb_e).length();
+                let sin_half = k / 2.0;
+                let cos_half_sq = (1.0 - sin_half * sin_half).max(0.0);
+                if cos_half_sq < 1e-6 { continue; }
+                let cos_half = cos_half_sq.sqrt();
+                let r_edge = r * sin_half / cos_half; // r * tan(θ/2)... wait
+                // tan(θ/2) = sin(θ/2) / cos(θ/2) = (k/2) / √(1 - k²/4)
+                let r_edge = r * sin_half / cos_half;
+
+                // Assign to faces that have this edge's normals
+                for &fi in &info.faces {
+                    let fn_e = solid.faces[fi].normal;
+                    for (j, fn_v) in face_normals.iter().enumerate() {
+                        if fn_e.dot(*fn_v) > 0.99 {
+                            face_radii[j] = face_radii[j].max(r_edge);
+                        }
+                    }
+                }
+            }
+
+            // Solve N δ = sign * r_vec for the sphere center offset δ.
             let delta = if face_normals.len() == 3 {
-                // Exact 3x3 solve: δ = sign * r * N⁻¹ * [1,1,1]ᵀ
                 let n = bevy::math::Mat3::from_cols(
                     face_normals[0],
                     face_normals[1],
@@ -287,20 +317,24 @@ pub fn generate_cut_offset_chamfer(
                 ).transpose();
                 let det = n.determinant();
                 if det.abs() < 1e-6 {
-                    continue; // near-singular (coplanar faces)
+                    continue;
                 }
-                n.inverse() * (Vec3::ONE * sign * r)
+                let rhs = Vec3::new(
+                    sign * face_radii[0],
+                    sign * face_radii[1],
+                    sign * face_radii[2],
+                );
+                n.inverse() * rhs
             } else {
-                // Least-squares for N > 3: δ = sign * r * Nᵀ(NNᵀ)⁻¹ · 1
-                // For 2 normals or >3, use the pseudo-inverse approach.
-                // Simplified: project onto avg_n with the 2-face formula.
+                // Fallback for non-3 faces: use average radius
+                let avg_r = face_radii.iter().sum::<f32>() / face_radii.len().max(1) as f32;
                 let cos_a = face_normals.iter()
                     .map(|n| n.dot(avg_n))
                     .sum::<f32>() / face_normals.len() as f32;
                 let sin_sq = (1.0 - cos_a * cos_a).max(0.0);
                 if sin_sq < 1e-6 { continue; }
                 let sin_a = sin_sq.sqrt();
-                avg_n * sign * r / sin_a
+                avg_n * sign * avg_r / sin_a
             };
 
             let delta_len = delta.length();
@@ -308,10 +342,10 @@ pub fn generate_cut_offset_chamfer(
                 continue;
             }
 
-            // The vertex offset = from original position to sphere surface
-            // (closest point on sphere to original vertex).
-            // offset = δ - r * normalize(δ) = δ * (1 - r / |δ|)
-            let offset = delta * (1.0 - r / delta_len);
+            // The vertex offset: from original to sphere surface.
+            // Use the average radius for the sphere surface distance.
+            let avg_r = face_radii.iter().sum::<f32>() / face_radii.len().max(1) as f32;
+            let offset = delta * (1.0 - avg_r / delta_len);
 
             vert_push.insert(v, offset);
             vert_bisector.insert(v, avg_n);

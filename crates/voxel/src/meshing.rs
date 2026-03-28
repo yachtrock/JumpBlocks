@@ -522,23 +522,28 @@ pub const SHARP_DOT_THRESHOLD: f32 = 0.985;
 /// Compute the fillet push: how far to push the center-line outward from the
 /// flat chamfer midpoint toward the edge, to approximate a circular arc.
 /// Returns the push vector along avg_normal.
-/// Compute the fillet push amount for a circular arc of radius R = chamfer_width
-/// tangent to two face planes with normals `na` and `nb`.
+/// Compute the fillet push amount for a circular arc tangent to two face
+/// planes with normals `na` and `nb`.
 ///
-/// The arc center sits at R/sin(α) from the edge along the bisector, where α
-/// is the half-angle between the face normals.  The push is the distance from
-/// the original edge to the closest point on the arc:
-///     push = R * (1/sin(α) - 1)
-///     sin(α) = sqrt(1 - (k/2)²),  k = |na + nb|
+/// `chamfer_width` is the SETBACK distance (how far from the edge the cut
+/// line sits along each face).  The fillet RADIUS varies by edge angle:
+///     r = setback * tan(θ/2)
+/// where θ is the dihedral angle.
+///
+/// The push (distance from original edge to the arc surface):
+///     push = setback * (1 - sin(θ/2)) / cos(θ/2)
+///
+/// In terms of k = |na + nb|:  sin(θ/2) = k/2,  cos(θ/2) = √(1-(k/2)²)
+///     push = setback * (1 - k/2) / √(1 - k²/4)
 pub fn fillet_push_amount(na: Vec3, nb: Vec3, chamfer_width: f32) -> f32 {
     let k = (na + nb).length();
-    let half_cos = k / 2.0; // cos(α) = k/2
-    let sin_sq = 1.0 - half_cos * half_cos;
-    if sin_sq < 1e-6 {
+    let sin_half = k / 2.0; // sin(θ/2) where θ = dihedral angle
+    let cos_half_sq = 1.0 - sin_half * sin_half;
+    if cos_half_sq < 1e-6 {
         return 0.0; // Nearly parallel faces — no push needed.
     }
-    let sin_a = sin_sq.sqrt();
-    (chamfer_width * (1.0 / sin_a - 1.0)).clamp(0.0, chamfer_width)
+    let cos_half = cos_half_sq.sqrt();
+    (chamfer_width * (1.0 - sin_half) / cos_half).clamp(0.0, chamfer_width)
 }
 
 pub fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {
