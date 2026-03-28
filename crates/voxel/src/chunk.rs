@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bevy::prelude::*;
 
 use crate::shape::Facing;
@@ -77,6 +79,14 @@ pub struct Block {
 pub struct ChunkData {
     cells: Box<[Cell; CHUNK_VOLUME]>,
     pub blocks: Vec<Block>,
+}
+
+impl std::fmt::Debug for ChunkData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChunkData")
+            .field("blocks", &self.blocks.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ChunkData {
@@ -352,7 +362,7 @@ pub enum ChunkState {
 /// All 26 neighbor directions of a chunk in a 3×3×3 grid (excluding center).
 #[derive(Clone)]
 pub struct ChunkNeighbors {
-    slots: [Option<ChunkData>; 26],
+    slots: [Option<Arc<ChunkData>>; 26],
 }
 
 impl Default for ChunkNeighbors {
@@ -377,11 +387,22 @@ impl ChunkNeighbors {
     }
 
     pub fn get(&self, dx: i32, dy: i32, dz: i32) -> Option<&ChunkData> {
-        self.slots[Self::offset_to_index(dx, dy, dz)].as_ref()
+        self.slots[Self::offset_to_index(dx, dy, dz)].as_deref()
     }
 
-    pub fn set(&mut self, dx: i32, dy: i32, dz: i32, data: ChunkData) {
+    /// Set a neighbor slot from an Arc (shared reference, no clone of data).
+    pub fn set_arc(&mut self, dx: i32, dy: i32, dz: i32, data: Arc<ChunkData>) {
         self.slots[Self::offset_to_index(dx, dy, dz)] = Some(data);
+    }
+
+    /// Set a neighbor slot from owned data (wraps in Arc).
+    pub fn set(&mut self, dx: i32, dy: i32, dz: i32, data: ChunkData) {
+        self.slots[Self::offset_to_index(dx, dy, dz)] = Some(Arc::new(data));
+    }
+
+    /// Clear a neighbor slot.
+    pub fn clear(&mut self, dx: i32, dy: i32, dz: i32) {
+        self.slots[Self::offset_to_index(dx, dy, dz)] = None;
     }
 }
 
