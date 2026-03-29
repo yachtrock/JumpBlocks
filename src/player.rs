@@ -78,7 +78,7 @@ fn spawn_player(
     let spawn_pos = debug_start
         .as_ref()
         .and_then(|d| d.warp)
-        .unwrap_or(Vec3::new(0.0, 2.0, 0.0));
+        .unwrap_or(Vec3::new(0.0, 10.0, 0.0));
     let player_height = 1.0;
     let player_radius = 0.35;
 
@@ -192,7 +192,7 @@ fn spawn_headless_player(
             lerp_speed: 8.0,
         },
         LeanState::default(),
-        Transform::from_xyz(0.0, 2.0, 0.0),
+        Transform::from_xyz(0.0, 10.0, 0.0),
         RigidBody::Dynamic,
         Collider::capsule(player_radius, player_height),
         LockedAxes::ROTATION_LOCKED,
