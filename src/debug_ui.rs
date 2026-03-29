@@ -9,6 +9,7 @@ use crate::player::{ControlScheme, ControlSchemeConfig, LeanSettings, Player, Pl
 use bevy_tnua::prelude::*;
 use jumpblocks_voxel::chunk::Chunk;
 use jumpblocks_voxel::chunk_lod::{LodConfig, LodTier};
+use jumpblocks_voxel::cluster::{ClusterConfig, RenderStats};
 use jumpblocks_voxel::coords::ChunkCoord;
 use jumpblocks_voxel::streaming::StreamingConfig;
 
@@ -69,6 +70,8 @@ fn debug_ui_system(
     mesh_assets: Res<Assets<Mesh>>,
     mut lod_config: ResMut<LodConfig>,
     mut streaming_config: ResMut<StreamingConfig>,
+    mut cluster_config: ResMut<ClusterConfig>,
+    render_stats: Res<RenderStats>,
     lod_chunks: Query<(&ChunkCoord, &LodTier)>,
 ) {
     if !state.visible {
@@ -205,6 +208,17 @@ fn debug_ui_system(
             ui.add(egui::Slider::new(&mut lod_config.chamfer_end, 0.0..=8.0).text("Chamfer end"));
 
             ui.separator();
+            ui.label("Clusters");
+            ui.add(egui::Slider::new(&mut cluster_config.cluster_radius, 2..=16).text("Cluster radius"));
+
+            ui.separator();
+            ui.label("Render Stats");
+            ui.label(format!("  LOD0 (full):    {}", render_stats.lod0_count));
+            ui.label(format!("  LOD1 (reduced): {}", render_stats.lod1_count));
+            ui.label(format!("  Clusters:       {}", render_stats.cluster_count));
+            ui.label(format!("  Impostors:      {}", render_stats.impostor_count));
+
+            ui.separator();
             let mut full_count = 0;
             let mut reduced_count = 0;
             let mut hidden_count = 0;
@@ -216,7 +230,7 @@ fn debug_ui_system(
                 }
             }
             let total = full_count + reduced_count + hidden_count;
-            ui.label(format!("Chunks: {} total", total));
+            ui.label(format!("Chunk entities: {} total", total));
             ui.label(format!("  Full: {}  Reduced: {}  Hidden: {}", full_count, reduced_count, hidden_count));
         });
 
