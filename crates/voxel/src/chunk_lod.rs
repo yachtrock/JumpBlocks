@@ -208,8 +208,7 @@ pub fn lod_child_setup_system(
             Mesh3d(lod_handle.clone()),
             MeshMaterial3d(child_mat),
             Transform::default(),
-            // Start hidden — only made visible during LOD transitions
-            Visibility::Hidden,
+            Visibility::default(),
         )).id();
 
         commands.entity(entity).add_child(child);
@@ -223,12 +222,12 @@ pub fn lod_transition_start_system(
     config: Res<LodConfig>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
     chunks: Query<
-        (Entity, &LodTier, &LodTarget, &LodChild, &ChunkLodMesh),
+        (Entity, &LodTier, &LodTarget, &LodChild),
         (Changed<LodTarget>, Without<LodTransition>),
     >,
     debug_mats: Option<Res<LodDebugMaterials>>,
 ) {
-    for (entity, current_tier, target, lod_child, lod_mesh) in chunks.iter() {
+    for (entity, current_tier, target, lod_child) in chunks.iter() {
         let target_tier = target.as_tier();
         if *current_tier == target_tier {
             continue;
@@ -266,17 +265,10 @@ pub fn lod_transition_start_system(
             extension: DitherFadeExtension { fade: child_start, invert: child_inv },
         });
 
-        // Make both meshes visible for the crossfade.
-        // Parent: re-insert Mesh3d in case it was removed (e.g. was in Reduced/Hidden).
-        // Child: set Visibility::Inherited so it renders.
-        if let Some(ref full_handle) = lod_mesh.full_res {
-            commands.entity(entity).insert(Mesh3d(full_handle.clone()));
-        }
+        // Apply crossfade materials to both meshes.
+        // Both always have Mesh3d — visibility is controlled purely by fade values.
         commands.entity(entity).insert(MeshMaterial3d(main_mat.clone()));
-        commands.entity(lod_child.0).insert((
-            MeshMaterial3d(child_mat.clone()),
-            Visibility::Inherited,
-        ));
+        commands.entity(lod_child.0).insert(MeshMaterial3d(child_mat.clone()));
 
         commands.entity(entity).insert(LodTransition {
             to: target_tier,
@@ -347,23 +339,13 @@ pub fn lod_transition_update_system(
             let final_main_mat = final_material_for_tier(transition.to, true, &debug_mats, &mut dither_materials);
             let final_child_mat = final_material_for_tier(transition.to, false, &debug_mats, &mut dither_materials);
 
-            let main_visible = matches!(transition.to, LodTier::Full);
-            let child_visible = matches!(transition.to, LodTier::Reduced);
-
-            // Parent: remove Mesh3d to stop rendering when not the active tier.
-            // (Can't use Visibility on parent — it cascades to children.)
-            let mut ecmds = commands.entity(entity);
-            ecmds.insert(MeshMaterial3d(final_main_mat))
+            // Set final materials with fade=0 or fade=1. No Mesh3d removal
+            // or Visibility toggling — the shader discards all fragments at fade=1.
+            commands.entity(entity)
+                .insert(MeshMaterial3d(final_main_mat))
                 .remove::<LodTransition>();
-            if !main_visible {
-                ecmds.remove::<Mesh3d>();
-            }
-
             commands.entity(lod_child.0)
-                .insert((
-                    MeshMaterial3d(final_child_mat),
-                    if child_visible { Visibility::Inherited } else { Visibility::Hidden },
-                ));
+                .insert(MeshMaterial3d(final_child_mat));
         }
     }
 }
