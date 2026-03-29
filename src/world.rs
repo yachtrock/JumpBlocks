@@ -9,6 +9,7 @@ use jumpblocks_voxel::persistence;
 use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
 use jumpblocks_voxel::streaming::{ChunkMaterial, WorldSavePath};
 use jumpblocks_voxel::world_grid::WorldGrid;
+use jumpblocks_voxel::worldgen::{self, IslandGenConfig};
 
 use crate::layers::GameLayer;
 
@@ -137,7 +138,7 @@ fn setup_world(
     }
 
     // --- Create a region and load chunk data ---
-    let region_id = world_grid.create_region(Vec3::new(-5.0, 0.0, 5.0));
+    let region_id = world_grid.create_region(Vec3::new(-2048.0, 0.0, -2048.0));
     world_grid.active_region = region_id;
 
     let loaded_from_disk = if let Some(ref save) = save_path {
@@ -148,7 +149,7 @@ fn setup_world(
 
     if !loaded_from_disk {
         // No saved world — populate with demo data in memory
-        populate_demo_chunks(region_id, &mut world_grid);
+        populate_region(region_id, &mut world_grid);
 
         // Save the demo chunks to disk if we have a save path
         if let Some(ref save) = save_path {
@@ -235,32 +236,20 @@ fn save_region_to_disk(
     }
 }
 
-/// Populate a region with demo chunks (in-memory only).
-fn populate_demo_chunks(region_id: RegionId, world_grid: &mut WorldGrid) {
-    let shapes = ShapeTable::default();
+/// Generate island terrain for a region.
+fn populate_region(region_id: RegionId, world_grid: &mut WorldGrid) {
     let region = world_grid.get_region_mut(region_id).unwrap();
-
-    let chunks: Vec<(ChunkPos, ChunkData)> = vec![
-        (ChunkPos::new(0, 0, 0), build_main_demo_chunk()),
-        (ChunkPos::new(1, 0, 0), build_neighbor_demo_chunk()),
-        (ChunkPos::new(2, 0, 0), build_test_demo_chunk()),
-    ];
-
-    for (pos, data) in chunks {
-        let errors = data.validate(&shapes);
-        for e in &errors {
-            error!("[world] chunk {}: {}", pos, e);
-        }
-        region.set_chunk(pos, data);
-    }
+    let config = IslandGenConfig::default();
+    let count = worldgen::generate_island(region, &config);
+    info!("[world] Generated island with {} chunks", count);
 }
 
 /// Build a world to disk (CLI --new-world command).
 /// Creates the demo chunks and saves them without starting the game.
 pub fn build_world_to_disk(world_dir: &Path) {
     let mut world_grid = WorldGrid::new();
-    let region_id = world_grid.create_region(Vec3::new(-5.0, 0.0, 5.0));
-    populate_demo_chunks(region_id, &mut world_grid);
+    let region_id = world_grid.create_region(Vec3::new(-2048.0, 0.0, -2048.0));
+    populate_region(region_id, &mut world_grid);
 
     let region = world_grid.get_region_mut(region_id).unwrap();
     match persistence::save_dirty_chunks(world_dir, region) {
@@ -271,7 +260,7 @@ pub fn build_world_to_disk(world_dir: &Path) {
     // Save region metadata
     let meta = persistence::RegionMeta {
         region_id: region_id.0,
-        world_origin: [-5.0, 0.0, 5.0],
+        world_origin: [-2048.0, 0.0, -2048.0],
         chunk_count: region.chunk_count() as u32,
         data_generation: region.dirty.data_gen.0,
     };

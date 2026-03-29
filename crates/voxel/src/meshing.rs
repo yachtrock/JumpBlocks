@@ -33,13 +33,22 @@ pub struct ChunkColliderData {
 }
 
 pub struct ChunkMeshResult {
-    pub full_res: ChunkMeshData,
+    pub full_res: Option<ChunkMeshData>,
     pub lod: ChunkMeshData,
+    pub level: MeshLevel,
     pub collider_data: ChunkColliderData,
     /// Debug overlay mesh highlighting faces with "impacted corner" vertices
     /// (vertices that share a position with a chamfered edge but whose own
     /// edges at that vertex are not sharp).
     pub debug_overlay: Option<ChunkMeshData>,
+}
+
+impl ChunkMeshResult {
+    /// Returns full_res, panicking if not generated. For use in tests
+    /// where generate_chunk_mesh always produces Full level.
+    pub fn full_res(&self) -> &ChunkMeshData {
+        self.full_res.as_ref().expect("full_res not generated")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,25 +238,53 @@ fn rotate_cell_offset(cell: (u8, u8, u8), facing: Facing, size: (u8, u8, u8)) ->
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// What level of mesh detail to generate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshLevel {
+    /// Only the LOD mesh (fast, no chamfer). For distant chunks.
+    LodOnly,
+    /// Both full-res (chamfered) and LOD meshes. For nearby chunks.
+    Full,
+}
+
 pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable, mode: crate::PresentationMode) -> ChunkMeshResult {
+    generate_chunk_mesh_at_level(data, neighbors, shapes, mode, MeshLevel::Full)
+}
+
+pub fn generate_chunk_mesh_at_level(
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+    shapes: &ShapeTable,
+    mode: crate::PresentationMode,
+    level: MeshLevel,
+) -> ChunkMeshResult {
     let t0 = Instant::now();
-    let (full_res, debug_overlay) = match mode {
-        crate::PresentationMode::Flat => (generate_lod_mesh(data, neighbors, shapes), None),
-        crate::PresentationMode::CutAndOffset => (crate::cut_offset_chamfer::generate_cut_offset_chamfer(data, neighbors, shapes), None),
+
+    let (full_res, debug_overlay) = if level == MeshLevel::Full {
+        match mode {
+            crate::PresentationMode::Flat => (Some(generate_lod_mesh(data, neighbors, shapes)), None),
+            crate::PresentationMode::CutAndOffset => (Some(crate::cut_offset_chamfer::generate_cut_offset_chamfer(data, neighbors, shapes)), None),
+        }
+    } else {
+        (None, None)
     };
+
     let t1 = Instant::now();
     let lod = generate_lod_mesh(data, neighbors, shapes);
     let t2 = Instant::now();
 
     let full_ms = (t1 - t0).as_secs_f64() * 1000.0;
     let lod_ms = (t2 - t1).as_secs_f64() * 1000.0;
-    info!(
-        "Chunk meshed [{}]: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
-        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::CutAndOffset => "cut-offset" },
-        full_ms, lod_ms, full_ms + lod_ms,
-        full_res.positions.len(), full_res.indices.len() / 3,
-        lod.positions.len(), lod.indices.len() / 3,
-    );
+    if let Some(ref fr) = full_res {
+        info!(
+            "Chunk meshed [full]: chamfer={:.2}ms, lod={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
+            full_ms, lod_ms,
+            fr.positions.len(), fr.indices.len() / 3,
+            lod.positions.len(), lod.indices.len() / 3,
+        );
+    } else {
+        info!("Chunk meshed [lod-only]: {:.2}ms ({} verts/{} tris)", lod_ms, lod.positions.len(), lod.indices.len() / 3);
+    }
 
     let collider_vertices: Vec<Vec3> = lod.positions.iter().map(|p| Vec3::new(p[0], p[1], p[2])).collect();
     let collider_indices: Vec<[u32; 3]> = lod.indices.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
@@ -255,6 +292,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     ChunkMeshResult {
         full_res,
         lod,
+        level,
         collider_data: ChunkColliderData {
             vertices: collider_vertices,
             indices: collider_indices,
