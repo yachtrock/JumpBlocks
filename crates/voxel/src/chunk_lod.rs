@@ -26,7 +26,8 @@ use crate::streaming::StreamingAnchor;
 /// Type alias for the extended material used by all chunk meshes.
 pub type ChunkDitherMaterial = ExtendedMaterial<StandardMaterial, DitherFadeExtension>;
 
-/// Material extension that adds screen-space dither fading to StandardMaterial.
+/// Material extension that adds screen-space dither fading and chamfer
+/// amount control to StandardMaterial.
 #[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
 #[uniform(200, DitherFadeUniform)]
 pub struct DitherFadeExtension {
@@ -34,12 +35,16 @@ pub struct DitherFadeExtension {
     pub fade: f32,
     /// If true, uses the inverted dither pattern (for the incoming mesh in a crossfade).
     pub invert: bool,
+    /// 0.0 = no chamfer (flat), 1.0 = full chamfer. Smoothly reduces fillets with distance.
+    pub chamfer_amount: f32,
 }
 
 #[derive(Clone, Default, ShaderType)]
 pub struct DitherFadeUniform {
     pub fade: f32,
     pub invert: f32,
+    pub chamfer_amount: f32,
+    pub _pad: f32,
 }
 
 impl From<&DitherFadeExtension> for DitherFadeUniform {
@@ -47,11 +52,17 @@ impl From<&DitherFadeExtension> for DitherFadeUniform {
         Self {
             fade: ext.fade,
             invert: if ext.invert { 1.0 } else { 0.0 },
+            chamfer_amount: ext.chamfer_amount,
+            _pad: 0.0,
         }
     }
 }
 
 impl MaterialExtension for DitherFadeExtension {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/chunk_vertex.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "shaders/dither_fade.wgsl".into()
     }
@@ -99,6 +110,10 @@ pub struct LodConfig {
     pub reduced_radius: i32,
     /// Duration of the dither crossfade in seconds.
     pub transition_duration: f32,
+    /// Distance (in chunk units) where chamfer starts fading out. Must be <= full_radius.
+    pub chamfer_start: f32,
+    /// Distance (in chunk units) where chamfer is fully gone. Must be >= chamfer_start.
+    pub chamfer_end: f32,
 }
 
 impl Default for LodConfig {
@@ -107,6 +122,8 @@ impl Default for LodConfig {
             full_radius: 2,
             reduced_radius: 6,
             transition_duration: 0.4,
+            chamfer_start: 1.0,
+            chamfer_end: 2.0,
         }
     }
 }
@@ -184,6 +201,37 @@ pub fn lod_target_assignment_system(
     }
 }
 
+/// Updates chamfer_amount on each chunk's material based on distance.
+/// Chamfer fades from 1→0 over the chamfer_start..chamfer_end band.
+pub fn chamfer_fade_system(
+    config: Res<LodConfig>,
+    anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
+    chunks: Query<(&ChunkCoord, &MeshMaterial3d<ChunkDitherMaterial>)>,
+    mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
+) {
+    let Ok(anchor_transform) = anchor_query.single() else {
+        return;
+    };
+    let anchor_pos = anchor_transform.translation();
+    let start = config.chamfer_start;
+    let end = config.chamfer_end;
+    let range = (end - start).max(0.001);
+
+    for (coord, mat_handle) in chunks.iter() {
+        let chunk_center = coord.pos.to_world_offset()
+            + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
+
+        let dist_chunks = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
+        let max_dist = dist_chunks.x.max(dist_chunks.y).max(dist_chunks.z);
+
+        let chamfer = 1.0 - ((max_dist - start) / range).clamp(0.0, 1.0);
+
+        if let Some(mat) = dither_materials.get_mut(&mat_handle.0) {
+            mat.extension.chamfer_amount = chamfer;
+        }
+    }
+}
+
 /// Creates the permanent LodChild when a chunk first gets its meshes.
 /// The child starts invisible (fade=1).
 pub fn lod_child_setup_system(
@@ -207,7 +255,7 @@ pub fn lod_child_setup_system(
             });
         let child_mat = dither_materials.add(ChunkDitherMaterial {
             base,
-            extension: DitherFadeExtension { fade: 1.0, invert: false },
+            extension: DitherFadeExtension { fade: 1.0, invert: false, chamfer_amount: 0.0 },
         });
 
         let child = commands.spawn((
@@ -264,12 +312,12 @@ pub fn lod_transition_start_system(
 
         let main_mat = dither_materials.add(ChunkDitherMaterial {
             base: base_material_for_tier(LodTier::Full, &debug_mats),
-            extension: DitherFadeExtension { fade: main_start, invert: main_inv },
+            extension: DitherFadeExtension { fade: main_start, invert: main_inv, chamfer_amount: 1.0 },
         });
 
         let child_mat = dither_materials.add(ChunkDitherMaterial {
             base: base_material_for_tier(LodTier::Reduced, &debug_mats),
-            extension: DitherFadeExtension { fade: child_start, invert: child_inv },
+            extension: DitherFadeExtension { fade: child_start, invert: child_inv, chamfer_amount: 0.0 },
         });
 
         // Apply crossfade materials to both meshes.
@@ -405,7 +453,7 @@ fn final_material_for_tier(
     // Always create a material with the correct fade value (no invert at rest)
     dither_materials.add(ChunkDitherMaterial {
         base: base_material_for_tier(base_tier, debug_mats),
-        extension: DitherFadeExtension { fade, invert: false },
+        extension: DitherFadeExtension { fade, invert: false, chamfer_amount: if is_main { 1.0 } else { 0.0 } },
     })
 }
 
@@ -421,6 +469,7 @@ impl Plugin for LodPlugin {
             .init_resource::<LodConfig>()
             .add_systems(Update, (
                 lod_target_assignment_system,
+                chamfer_fade_system,
                 lod_child_setup_system,
                 lod_transition_start_system
                     .after(lod_target_assignment_system)

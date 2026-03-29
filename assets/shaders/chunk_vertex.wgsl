@@ -1,0 +1,98 @@
+// Vertex shader for chunk meshes with chamfer amount control.
+// Reads the ChamferOffset custom vertex attribute and scales it
+// by `chamfer_amount` (0 = flat/no chamfer, 1 = full chamfer).
+// This allows smooth fillet fade-out with distance.
+
+#import bevy_pbr::{
+    mesh_bindings::mesh,
+    mesh_functions,
+    forward_io::{Vertex, VertexOutput},
+    view_transformations::position_world_to_clip,
+}
+
+// Custom vertex attribute: the direction each vertex was pushed for chamfering.
+// Stored as Float32x3 in the mesh, matching ATTRIBUTE_CHAMFER_OFFSET.
+@location(6) var<private> chamfer_offset_attr: vec3<f32>;
+
+struct DitherFadeUniform {
+    fade: f32,
+    invert: f32,
+    chamfer_amount: f32,
+    _pad: f32,
+};
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(200)
+var<uniform> dither_fade: DitherFadeUniform;
+
+struct ChunkVertex {
+    @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) index: u32,
+    @location(0) position: vec3<f32>,
+#ifdef VERTEX_NORMALS
+    @location(1) normal: vec3<f32>,
+#endif
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_TANGENTS
+    @location(3) tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(4) color: vec4<f32>,
+#endif
+    // ChamferOffset — custom attribute at location 6
+    @location(6) chamfer_offset: vec3<f32>,
+}
+
+@vertex
+fn vertex(in: ChunkVertex) -> VertexOutput {
+    var out: VertexOutput;
+
+    // Scale back the chamfer offset: at chamfer_amount=1 the mesh is fully
+    // chamfered (as authored), at chamfer_amount=0 the chamfer is removed
+    // (vertices pushed back to their unchamfered positions).
+    let undo = (1.0 - dither_fade.chamfer_amount) * in.chamfer_offset;
+    let position = in.position - undo;
+
+    let mesh_world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    var world_from_local = mesh_world_from_local;
+
+#ifdef VERTEX_NORMALS
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(
+        in.normal,
+        in.instance_index
+    );
+#endif
+
+#ifdef VERTEX_POSITIONS
+    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(position, 1.0));
+    out.position = position_world_to_clip(out.world_position.xyz);
+#endif
+
+#ifdef VERTEX_UVS_A
+    out.uv = in.uv;
+#endif
+
+#ifdef VERTEX_TANGENTS
+    out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
+        world_from_local,
+        in.tangent,
+        in.instance_index
+    );
+#endif
+
+#ifdef VERTEX_COLORS
+    out.color = in.color;
+#endif
+
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = in.instance_index;
+#endif
+
+#ifdef VISIBILITY_RANGE_DITHER
+    out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
+        in.instance_index, mesh_world_from_local[3]);
+#endif
+
+    return out;
+}
