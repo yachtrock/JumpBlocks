@@ -270,11 +270,28 @@ pub fn chunk_writeback_system(
 // Disk save system
 // ---------------------------------------------------------------------------
 
-/// Periodically saves dirty chunks to disk.
+/// Timer for throttling disk saves.
+#[derive(Resource)]
+pub struct SaveTimer(pub Timer);
+
+impl Default for SaveTimer {
+    fn default() -> Self {
+        Self(Timer::from_seconds(5.0, TimerMode::Repeating))
+    }
+}
+
+/// Periodically saves dirty chunks to disk (every 5 seconds).
 pub fn chunk_save_system(
     mut world_grid: ResMut<WorldGrid>,
     save_path: Option<Res<WorldSavePath>>,
+    time: Res<Time>,
+    mut timer: ResMut<SaveTimer>,
 ) {
+    timer.0.tick(time.delta());
+    if !timer.0.just_finished() {
+        return;
+    }
+
     let Some(save_path) = save_path else {
         return;
     };
@@ -305,6 +322,7 @@ pub struct StreamingPlugin;
 impl Plugin for StreamingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StreamingConfig>()
+            .init_resource::<SaveTimer>()
             .add_systems(Update, (
                 chunk_streaming_system,
                 neighbor_wiring_system.after(chunk_streaming_system),
