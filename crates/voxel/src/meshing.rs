@@ -660,5 +660,7 @@ pub fn build_lod_mesh(data: &ChunkMeshData) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
     mesh.insert_indices(Indices::U32(data.indices.clone()));
+    // Generate tangents so IBL specular reflections match the full-res mesh.
+    let _ = mesh.generate_tangents();
     mesh
 }
