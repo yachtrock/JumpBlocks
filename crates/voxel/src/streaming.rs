@@ -11,12 +11,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use bevy::camera::primitives::Aabb;
 
 use std::path::PathBuf;
 
 use crate::chunk::{Chunk, ChunkNeighbors};
 use crate::chunk_lod::{ChunkDitherMaterial, LodTier};
-use crate::coords::{ChunkCoord, ChunkPos};
+use crate::coords::{ChunkCoord, ChunkPos, CHUNK_WORLD_SIZE};
 use crate::world_grid::WorldGrid;
 
 // ---------------------------------------------------------------------------
@@ -158,11 +159,20 @@ pub fn chunk_streaming_system(
         };
         let chunk_data = (*slot.data).clone();
 
+        // Pre-insert an Aabb so Bevy's frustum culling works immediately,
+        // even before the mesh is generated. The AABB is in local space
+        // (centered at half chunk size).
+        let chunk_aabb = Aabb::from_min_max(
+            Vec3::ZERO,
+            Vec3::splat(CHUNK_WORLD_SIZE),
+        );
+
         let mut entity_commands = commands.spawn((
             Chunk::new(chunk_data),
             ChunkCoord { region: active_id, pos: *pos },
             LodTier::default(),
             Transform::from_translation(*world_pos),
+            chunk_aabb,
         ));
 
         if let Some(ref mat) = chunk_material {
