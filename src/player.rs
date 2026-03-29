@@ -119,7 +119,7 @@ fn spawn_player(
         LeanState::default(),
         EdgeDetectionSettings::default(),
         PrecariousEdge::default(),
-        Transform::from_xyz(0.0, 2.0, 0.0),
+        Transform::from_xyz(0.0, 10.0, 0.0),
         Visibility::default(),
     ));
     player.insert((
@@ -187,7 +187,7 @@ fn spawn_headless_player(
             lerp_speed: 8.0,
         },
         LeanState::default(),
-        Transform::from_xyz(0.0, 2.0, 0.0),
+        Transform::from_xyz(0.0, 10.0, 0.0),
         RigidBody::Dynamic,
         Collider::capsule(player_radius, player_height),
         LockedAxes::ROTATION_LOCKED,
