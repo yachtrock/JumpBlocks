@@ -244,6 +244,7 @@ pub fn lod_update_system(
         Entity,
         &ChunkCoord,
         &ChunkLodMaterials,
+        &ChunkLodMesh,
         &LodChild,
         &mut LodTier,
         Option<&mut LodTransition>,
@@ -259,15 +260,20 @@ pub fn lod_update_system(
     let ch_start = config.chamfer_start;
     let ch_range = (config.chamfer_end - ch_start).max(0.001);
 
-    for (entity, coord, materials, lod_child, mut tier, transition_opt) in chunks.iter_mut() {
+    for (entity, coord, materials, lod_mesh, lod_child, mut tier, transition_opt) in chunks.iter_mut() {
         let chunk_center = coord.pos.to_world_offset()
             + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
         let dist = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
         let max_dist = dist.x.max(dist.y).max(dist.z);
 
-        // --- Desired tier ---
+        // --- Desired tier (stall if full-res mesh not yet available) ---
         let desired = if (max_dist as i32) <= config.full_radius {
-            LodTier::Full
+            // Only allow Full tier if the full-res mesh has been generated
+            if lod_mesh.full_res.is_some() {
+                LodTier::Full
+            } else {
+                LodTier::Reduced // stall at Reduced until full-res is ready
+            }
         } else if (max_dist as i32) <= config.reduced_radius {
             LodTier::Reduced
         } else {
