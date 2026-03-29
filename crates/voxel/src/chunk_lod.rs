@@ -32,16 +32,22 @@ pub type ChunkDitherMaterial = ExtendedMaterial<StandardMaterial, DitherFadeExte
 pub struct DitherFadeExtension {
     /// 0.0 = fully visible, 1.0 = fully invisible.
     pub fade: f32,
+    /// If true, uses the inverted dither pattern (for the incoming mesh in a crossfade).
+    pub invert: bool,
 }
 
 #[derive(Clone, Default, ShaderType)]
 pub struct DitherFadeUniform {
     pub fade: f32,
+    pub invert: f32,
 }
 
 impl From<&DitherFadeExtension> for DitherFadeUniform {
     fn from(ext: &DitherFadeExtension) -> Self {
-        Self { fade: ext.fade }
+        Self {
+            fade: ext.fade,
+            invert: if ext.invert { 1.0 } else { 0.0 },
+        }
     }
 }
 
@@ -194,7 +200,7 @@ pub fn lod_child_setup_system(
         // Child starts invisible
         let child_mat = dither_materials.add(ChunkDitherMaterial {
             base: base_material_for_tier(LodTier::Reduced, &debug_mats),
-            extension: DitherFadeExtension { fade: 1.0 },
+            extension: DitherFadeExtension { fade: 1.0, invert: false },
         });
 
         let child = commands.spawn((
@@ -236,24 +242,28 @@ pub fn lod_transition_start_system(
         // Any → Hidden:   both fade out
         // Hidden → Any:   appropriate one fades in
 
-        let (main_start, child_start) = match (*current_tier, target_tier) {
-            (LodTier::Full, LodTier::Reduced) => (0.0, 1.0),    // main visible, child invisible
-            (LodTier::Reduced, LodTier::Full) => (1.0, 0.0),     // main invisible, child visible
-            (LodTier::Full, LodTier::Hidden) => (0.0, 1.0),      // main visible, child invisible
-            (LodTier::Reduced, LodTier::Hidden) => (1.0, 0.0),   // main invisible, child visible
-            (LodTier::Hidden, LodTier::Full) => (1.0, 1.0),      // both invisible → main fades in
-            (LodTier::Hidden, LodTier::Reduced) => (1.0, 1.0),   // both invisible → child fades in
+        // (main_start_fade, main_invert, child_start_fade, child_invert)
+        // The outgoing mesh uses normal dither (invert=false), fading 0→1
+        // The incoming mesh uses inverted dither (invert=true), fading 1→0
+        // This ensures complementary pixel coverage at all times.
+        let (main_start, main_inv, child_start, child_inv) = match (*current_tier, target_tier) {
+            (LodTier::Full, LodTier::Reduced) => (0.0, false, 1.0, true),   // main out, child in
+            (LodTier::Reduced, LodTier::Full) => (1.0, true, 0.0, false),   // main in, child out
+            (LodTier::Full, LodTier::Hidden) => (0.0, false, 1.0, false),   // main out, child stays hidden
+            (LodTier::Reduced, LodTier::Hidden) => (1.0, false, 0.0, false),// child out, main stays hidden
+            (LodTier::Hidden, LodTier::Full) => (1.0, true, 1.0, false),    // main in from hidden
+            (LodTier::Hidden, LodTier::Reduced) => (1.0, false, 1.0, true), // child in from hidden
             _ => continue,
         };
 
         let main_mat = dither_materials.add(ChunkDitherMaterial {
             base: base_material_for_tier(LodTier::Full, &debug_mats),
-            extension: DitherFadeExtension { fade: main_start },
+            extension: DitherFadeExtension { fade: main_start, invert: main_inv },
         });
 
         let child_mat = dither_materials.add(ChunkDitherMaterial {
             base: base_material_for_tier(LodTier::Reduced, &debug_mats),
-            extension: DitherFadeExtension { fade: child_start },
+            extension: DitherFadeExtension { fade: child_start, invert: child_inv },
         });
 
         // Apply materials
@@ -383,10 +393,10 @@ fn final_material_for_tier(
     let fade = if visible { 0.0 } else { 1.0 };
     let base_tier = if is_main { LodTier::Full } else { LodTier::Reduced };
 
-    // Always create a material with the correct fade value
+    // Always create a material with the correct fade value (no invert at rest)
     dither_materials.add(ChunkDitherMaterial {
         base: base_material_for_tier(base_tier, debug_mats),
-        extension: DitherFadeExtension { fade },
+        extension: DitherFadeExtension { fade, invert: false },
     })
 }
 

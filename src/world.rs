@@ -120,7 +120,7 @@ fn setup_world(
                     base_color: Color::srgb(0.6, 0.5, 0.4),
                     ..default()
                 },
-                extension: DitherFadeExtension { fade: 0.0 },
+                extension: DitherFadeExtension { fade: 0.0, invert: false },
             });
             commands.insert_resource(ChunkMaterial(chunk_mat.clone()));
 
@@ -132,7 +132,7 @@ fn setup_world(
                         base_color: Color::srgb(0.3, 0.7, 0.9),
                         ..default()
                     },
-                    extension: DitherFadeExtension { fade: 0.0 },
+                    extension: DitherFadeExtension { fade: 0.0, invert: false },
                 }),
             });
         }
