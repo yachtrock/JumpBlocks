@@ -244,9 +244,11 @@ pub fn lod_update_system(
         Entity,
         &ChunkCoord,
         &ChunkLodMaterials,
+        &LodChild,
         &mut LodTier,
         Option<&mut LodTransition>,
     )>,
+    mut child_vis: Query<&mut Visibility, With<LodChildMarker>>,
     mut commands: Commands,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
 ) {
@@ -257,7 +259,7 @@ pub fn lod_update_system(
     let ch_start = config.chamfer_start;
     let ch_range = (config.chamfer_end - ch_start).max(0.001);
 
-    for (entity, coord, materials, mut tier, transition_opt) in chunks.iter_mut() {
+    for (entity, coord, materials, lod_child, mut tier, transition_opt) in chunks.iter_mut() {
         let chunk_center = coord.pos.to_world_offset()
             + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
         let dist = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
@@ -319,6 +321,17 @@ pub fn lod_update_system(
             mat.extension.fade = child_fade;
             mat.extension.invert = child_inv;
             mat.extension.chamfer_amount = 0.0; // LOD mesh has no chamfer data
+        }
+
+        // --- Set child visibility (prevents shadow/wireframe/depth artifacts) ---
+        // Visibility::Hidden is the only way to fully exclude from all render passes.
+        // Safe on the child since it has no descendants.
+        if let Ok(mut vis) = child_vis.get_mut(lod_child.0) {
+            *vis = if child_fade >= 1.0 {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
         }
     }
 }
