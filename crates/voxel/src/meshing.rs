@@ -550,6 +550,44 @@ pub fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
     n0.dot(n1) < SHARP_DOT_THRESHOLD
 }
 
+/// Returns true if two blocks share a full face — touching along exactly one
+/// axis with positive 2D overlap on the other two (not just an edge or vertex).
+pub fn blocks_are_face_adjacent(
+    voxel_a: (usize, usize, usize),
+    size_a: (u8, u8, u8),
+    voxel_b: (usize, usize, usize),
+    size_b: (u8, u8, u8),
+) -> bool {
+    let min_a = [voxel_a.0, voxel_a.1, voxel_a.2];
+    let max_a = [voxel_a.0 + size_a.0 as usize, voxel_a.1 + size_a.1 as usize, voxel_a.2 + size_a.2 as usize];
+    let min_b = [voxel_b.0, voxel_b.1, voxel_b.2];
+    let max_b = [voxel_b.0 + size_b.0 as usize, voxel_b.1 + size_b.1 as usize, voxel_b.2 + size_b.2 as usize];
+
+    for touch_axis in 0..3 {
+        let touching = max_a[touch_axis] == min_b[touch_axis]
+            || max_b[touch_axis] == min_a[touch_axis];
+        if !touching {
+            continue;
+        }
+        let mut has_area = true;
+        for other in 0..3 {
+            if other == touch_axis {
+                continue;
+            }
+            let overlap = min_a[other].max(min_b[other]);
+            let overlap_end = max_a[other].min(max_b[other]);
+            if overlap_end <= overlap {
+                has_area = false;
+                break;
+            }
+        }
+        if has_area {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if a boundary edge lies on a chunk face where a filled neighbor cell
 /// would continue the surface.
 pub fn is_boundary_edge_at_neighbor_seam(

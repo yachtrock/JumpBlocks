@@ -285,6 +285,14 @@ fn setup_world(
         test_data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1); // C: bottom-right
         test_data.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1); // B: top-right
 
+        // Diagonal cubes sharing only a single vertex (offset in X, Y, and Z)
+        test_data.place_std(4, 4, 22, SHAPE_CUBE, Facing::North, 1);
+        test_data.place_std(6, 5, 24, SHAPE_CUBE, Facing::North, 1);
+
+        // Diagonal cubes sharing only a single edge (stacked vertically)
+        test_data.place_std(10, 4, 22, SHAPE_CUBE, Facing::North, 1);
+        test_data.place_std(12, 5, 22, SHAPE_CUBE, Facing::North, 1);
+
         let test_errors = test_data.validate(&shapes);
         for e in &test_errors {
             error!("[world] test: {}", e);

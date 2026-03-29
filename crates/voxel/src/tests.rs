@@ -369,6 +369,139 @@ fn wedge_on_cube_valid() {
 }
 
 #[test]
+fn diagonal_cubes_vertex_touching() {
+    // Two cubes sharing only a single vertex should chamfer independently —
+    // the result should have the same tri count as two isolated cubes.
+    let shapes = make_shapes();
+
+    // Single isolated cube for reference
+    let single = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
+    let single_result = generate_chunk_mesh(&single, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    let single_tris = single_result.full_res.indices.len() / 3;
+
+    // Two cubes sharing only a vertex (offset in X, Y, and Z)
+    let mut data = ChunkData::new();
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 15, 10, SHAPE_CUBE, Facing::North, 1);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+
+    let diag_tris = result.full_res.indices.len() / 3;
+    let expected = single_tris * 2;
+
+    let (boundary, _, non_manifold) = count_edge_sharing(&result.full_res);
+    eprintln!("diagonal vertex: {} tris (expected {}={}x2), boundary={}, non_manifold={}",
+        diag_tris, expected, single_tris, boundary, non_manifold);
+
+    assert_eq!(diag_tris, expected,
+        "vertex-only contact should produce same tris as two isolated cubes ({} vs {})",
+        diag_tris, expected);
+    assert_eq!(non_manifold, 0, "should have no non-manifold edges");
+}
+
+#[test]
+fn diagonal_cubes_vertex_with_nearby_wedge() {
+    // Matches the visual test chunk: wedge at (4,2,20) + diagonal cubes at (4,4,22) and (6,5,24)
+    let shapes = make_shapes();
+
+    let single = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
+    let single_result = generate_chunk_mesh(&single, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    let single_tris = single_result.full_res.indices.len() / 3;
+
+    let mut data = ChunkData::new();
+    data.place_wedge(4, 2, 20, Facing::East, 1);
+    data.place_std(4, 4, 22, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(6, 5, 24, SHAPE_CUBE, Facing::North, 1);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+
+    let wedge_only = {
+        let mut d = ChunkData::new();
+        d.place_wedge(4, 2, 20, Facing::East, 1);
+        generate_chunk_mesh(&d, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset)
+    };
+    let wedge_tris = wedge_only.full_res.indices.len() / 3;
+
+    let total_tris = result.full_res.indices.len() / 3;
+    let expected = wedge_tris + single_tris * 2;
+
+    eprintln!("vertex+wedge: {} tris (expected {}=wedge {}+cube {}x2), ",
+        total_tris, expected, wedge_tris, single_tris);
+    assert_eq!(total_tris, expected,
+        "all 3 blocks should be independent: {} vs {}", total_tris, expected);
+}
+
+#[test]
+fn diagonal_cubes_edge_touching() {
+    // Two cubes sharing only a single edge should chamfer independently.
+    // Use the same block positions as the visual test chunk in world.rs.
+    let shapes = make_shapes();
+
+    let single = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
+    let single_result = generate_chunk_mesh(&single, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    let single_tris = single_result.full_res.indices.len() / 3;
+
+    // Reproduce the full visual test chunk to catch interactions
+    let mut data = ChunkData::new();
+    data.place_std(4, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data.place_wedge(4, 4, 10, Facing::North, 1);
+    data.place_wedge(10, 4, 10, Facing::East, 1);
+    data.place_wedge(16, 4, 10, Facing::South, 1);
+    data.place_wedge(22, 4, 10, Facing::West, 1);
+    data.place_wedge(4, 4, 16, Facing::North, 1);
+    data.place_wedge(10, 4, 16, Facing::East, 1);
+    data.place_std(16, 2, 4, SHAPE_CUBE, Facing::North, 1);
+    data.place_wedge(16, 3, 4, Facing::East, 1);
+    data.place_std(22, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(24, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(4, 4, 22, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(6, 5, 24, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 4, 22, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(12, 5, 22, SHAPE_CUBE, Facing::North, 1);
+
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+
+    // Extract just the edge-touching cubes' region to count their tris
+    // They should match 2 isolated cubes exactly
+    let diag_tris = result.full_res.indices.len() / 3;
+
+    // Count tris for everything EXCEPT the two edge-touching cubes
+    let mut data_without = ChunkData::new();
+    data_without.place_std(4, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_std(10, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_wedge(4, 4, 10, Facing::North, 1);
+    data_without.place_wedge(10, 4, 10, Facing::East, 1);
+    data_without.place_wedge(16, 4, 10, Facing::South, 1);
+    data_without.place_wedge(22, 4, 10, Facing::West, 1);
+    data_without.place_wedge(4, 4, 16, Facing::North, 1);
+    data_without.place_wedge(10, 4, 16, Facing::East, 1);
+    data_without.place_std(16, 2, 4, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_wedge(16, 3, 4, Facing::East, 1);
+    data_without.place_std(22, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_std(24, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_std(4, 4, 22, SHAPE_CUBE, Facing::North, 1);
+    data_without.place_std(6, 5, 24, SHAPE_CUBE, Facing::North, 1);
+    // omit the two edge-touching cubes at (10,4,22) and (12,5,22)
+    let result_without = generate_chunk_mesh(&data_without, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    let without_tris = result_without.full_res.indices.len() / 3;
+
+    let edge_pair_tris = diag_tris - without_tris;
+    let expected_pair = single_tris * 2;
+
+    eprintln!("full chunk edge-pair: {} tris (expected {}={}x2)",
+        edge_pair_tris, expected_pair, single_tris);
+
+    assert_eq!(edge_pair_tris, expected_pair,
+        "edge-touching cubes in full chunk should match 2 isolated cubes ({} vs {})",
+        edge_pair_tris, expected_pair);
+}
+
+#[test]
 fn demo_staircase_ramp_valid() {
     let shapes = make_shapes();
     let data = demo_chunk();

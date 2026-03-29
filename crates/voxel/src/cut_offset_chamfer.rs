@@ -139,7 +139,110 @@ pub fn generate_cut_offset_chamfer(
     neighbors: &ChunkNeighbors,
     shapes: &ShapeTable,
 ) -> ChunkMeshData {
-    let solid = build_solid_mesh_public(data, neighbors, shapes);
+    let mut solid = build_solid_mesh_public(data, neighbors, shapes);
+
+    // -- Build connected components of face-adjacent blocks -------------------
+    // Blocks that only share a vertex or edge (not a full face) should not
+    // chamfer together. We union-find blocks by face-adjacency so that edges
+    // between different components are suppressed.
+    let block_component = {
+        // Collect unique blocks: (voxel_origin, block_size)
+        let mut blocks: Vec<((usize, usize, usize), (u8, u8, u8))> = Vec::new();
+        for face in &solid.faces {
+            if !blocks.iter().any(|(v, _)| *v == face.voxel) {
+                blocks.push((face.voxel, face.block_size));
+            }
+        }
+        // Simple union-find via labels
+        let n = blocks.len();
+        let mut label: Vec<usize> = (0..n).collect();
+
+        fn find(label: &mut Vec<usize>, mut i: usize) -> usize {
+            while label[i] != i {
+                label[i] = label[label[i]];
+                i = label[i];
+            }
+            i
+        }
+
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if blocks_are_face_adjacent(blocks[i].0, blocks[i].1, blocks[j].0, blocks[j].1) {
+                    let ri = find(&mut label, i);
+                    let rj = find(&mut label, j);
+                    if ri != rj {
+                        label[ri] = rj;
+                    }
+                }
+            }
+        }
+        // Build map: voxel_origin → component root
+        let mut map: HashMap<(usize, usize, usize), usize> = HashMap::new();
+        for i in 0..n {
+            let root = find(&mut label, i);
+            map.insert(blocks[i].0, root);
+        }
+        map
+    };
+
+    // -- Split vertices shared between different components -------------------
+    // When blocks only touch at a vertex or edge, the solid mesh merges their
+    // vertices. We duplicate those shared vertices so each component gets its
+    // own copies, making the chamfer pipelines fully independent.
+    // Collect split vertex indices so fillet application can avoid cross-component matching.
+    let mut split_vert_indices: HashSet<u32> = HashSet::new();
+    {
+        // Build: vertex → set of components that use it
+        let mut vert_comps: HashMap<u32, HashSet<usize>> = HashMap::new();
+        for face in &solid.faces {
+            let comp = block_component.get(&face.voxel).copied().unwrap_or(0);
+            for &vi in &face.verts {
+                vert_comps.entry(vi).or_default().insert(comp);
+            }
+        }
+
+        // For vertices used by 2+ components, create duplicates for all but the first
+        let mut remap: HashMap<(u32, usize), u32> = HashMap::new(); // (orig_vert, component) → new_vert
+        for (&vi, comps) in &vert_comps {
+            if comps.len() < 2 {
+                continue;
+            }
+            // First component keeps the original vertex, others get duplicates
+            for (idx, &comp) in comps.iter().enumerate() {
+                if idx == 0 {
+                    remap.insert((vi, comp), vi);
+                } else {
+                    let new_idx = solid.positions.len() as u32;
+                    solid.positions.push(solid.positions[vi as usize]);
+                    remap.insert((vi, comp), new_idx);
+                }
+            }
+        }
+
+        // Record all split vertex indices (originals + duplicates)
+        for (&(_vi, _comp), &new_vi) in &remap {
+            split_vert_indices.insert(new_vi);
+        }
+
+        // Rewrite face vertex indices using the remap
+        let split_count = remap.len();
+        let shared_verts = vert_comps.iter().filter(|(_, c)| c.len() >= 2).count();
+        if shared_verts > 0 {
+            warn!("[vertex-split] {} shared vertices across components, {} remap entries", shared_verts, split_count);
+        }
+        if !remap.is_empty() {
+            for face in &mut solid.faces {
+                let comp = block_component.get(&face.voxel).copied().unwrap_or(0);
+                for vi in &mut face.verts {
+                    if let Some(&new_vi) = remap.get(&(*vi, comp)) {
+                        *vi = new_vi;
+                    }
+                }
+            }
+        }
+    }
+
+    // Rebuild edge graph after vertex splitting
     let edge_graph = build_edge_graph(&solid);
 
     // -- Identify sharp edges (excluding boundary-at-neighbor-seam) ----------
@@ -148,6 +251,17 @@ pub fn generate_cut_offset_chamfer(
         .filter(|&(&(a, b), ref info)| {
             if !is_sharp(info, &solid) {
                 return false;
+            }
+            // Suppress chamfer at edges where any face belongs to a
+            // different connected component (vertex/edge-only contact).
+            if info.faces.len() >= 2 {
+                let comp0 = block_component.get(&solid.faces[info.faces[0]].voxel);
+                let has_cross = info.faces.iter().skip(1).any(|&fi| {
+                    block_component.get(&solid.faces[fi].voxel) != comp0
+                });
+                if has_cross {
+                    return false;
+                }
             }
             if info.faces.len() < 2 {
                 let fi = info.faces[0];
@@ -163,12 +277,16 @@ pub fn generate_cut_offset_chamfer(
         .collect();
 
     // -- Per-vertex sharp edge directions (for detecting external chamfering) -
-    // For each vertex, store the directions of all sharp edges emanating from it.
-    let mut vert_sharp_dirs: HashMap<u32, Vec<Vec3>> = HashMap::new();
+    // For each vertex, store the directions of all sharp edges emanating from it,
+    // tagged with the connected component so cross-component edges are ignored.
+    let mut vert_sharp_dirs: HashMap<u32, Vec<(Vec3, usize)>> = HashMap::new();
     for &(a, b) in &sharp_edges {
         let dir = (solid.positions[b as usize] - solid.positions[a as usize]).normalize_or_zero();
-        vert_sharp_dirs.entry(a).or_default().push(dir);
-        vert_sharp_dirs.entry(b).or_default().push(-dir);
+        // Find component from any face that owns this edge
+        let edge_info = edge_graph.get(&edge_key(a, b)).unwrap();
+        let comp = block_component.get(&solid.faces[edge_info.faces[0]].voxel).copied().unwrap_or(usize::MAX);
+        vert_sharp_dirs.entry(a).or_default().push((dir, comp));
+        vert_sharp_dirs.entry(b).or_default().push((-dir, comp));
     }
     let chamfered_verts: HashSet<u32> = vert_sharp_dirs.keys().copied().collect();
 
@@ -355,12 +473,27 @@ pub fn generate_cut_offset_chamfer(
         }
     }
 
+    // -- Build vertex-to-component map for fillet application ----------------
+    let solid_vert_comp: HashMap<u32, usize> = {
+        let mut m: HashMap<u32, usize> = HashMap::new();
+        for face in solid.faces.iter() {
+            let comp = block_component.get(&face.voxel).copied().unwrap_or(0);
+            for &vi in &face.verts {
+                m.insert(vi, comp);
+            }
+        }
+        m
+    };
+
     // -- Output buffers ------------------------------------------------------
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut chamfer_offsets: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    // Component tag per emitted vertex — used to prevent cross-component
+    // fillet push contamination at split vertices.
+    let mut emitted_comp: Vec<usize> = Vec::new();
 
     // Per (edge_key, face_index) → (inner_v_at_a, inner_v_at_b) in edge-key
     // order.  Will be used for cross-face strip emission in future phases.
@@ -372,6 +505,7 @@ pub fn generate_cut_offset_chamfer(
     for (fi, face) in solid.faces.iter().enumerate() {
         let n = face.verts.len();
         let fn_ = face.normal;
+        let face_comp_val = block_component.get(&face.voxel).copied().unwrap_or(0);
 
         // -- Per-vertex: classify edges and compute split positions ----------
 
@@ -469,6 +603,7 @@ pub fn generate_cut_offset_chamfer(
         // already handled by this face's own sharp edges?  Only those
         // directions (with a significant in-plane component) require extra
         // corner-patch geometry.
+        let face_comp = block_component.get(&face.voxel).copied().unwrap_or(usize::MAX);
         let has_external_chamfer = |i: usize| -> bool {
             let vi = face.verts[i];
             let Some(all_dirs) = vert_sharp_dirs.get(&vi) else {
@@ -486,7 +621,12 @@ pub fn generate_cut_offset_chamfer(
                 face_dirs.push((orig[j] - orig[i]).normalize_or_zero());
             }
 
-            for &d in all_dirs {
+            for &(d, comp) in all_dirs {
+                // Only consider sharp edges from the same connected component.
+                if comp != face_comp {
+                    continue;
+                }
+
                 // Skip edges mostly perpendicular to this face — they don't
                 // create in-plane displacement that needs a cut.
                 let in_plane = d - fn_ * d.dot(fn_);
@@ -508,15 +648,15 @@ pub fn generate_cut_offset_chamfer(
         for i in 0..n {
             let ip = (i + n - 1) % n;
             let j = (i + 1) % n;
-            let vi = face.verts[i];
 
-            if !chamfered_verts.contains(&vi) {
+            let both_sharp = prev_sharp[i] && next_sharp[i];
+            let has_ext = has_external_chamfer(i);
+            let needs_full_offset = both_sharp || has_ext;
+
+            if !prev_sharp[i] && !next_sharp[i] && !has_ext {
                 inner.push(orig[i]);
                 continue;
             }
-
-            let both_sharp = prev_sharp[i] && next_sharp[i];
-            let needs_full_offset = both_sharp || has_external_chamfer(i);
 
             // Collinear midpoint: both edges sharp and same line.
             if both_sharp {
@@ -805,6 +945,9 @@ pub fn generate_cut_offset_chamfer(
                 }
             }
         }
+
+        // Tag all vertices emitted for this face with its component.
+        emitted_comp.resize(positions.len(), face_comp_val);
     }
 
     // -----------------------------------------------------------------------
@@ -818,17 +961,16 @@ pub fn generate_cut_offset_chamfer(
         let p = Vec3::from_array(positions[idx]);
 
         // 1. Check if at an original sharp vertex (endpoint of sharp edges).
-        //    Use averaged push from all incident sharp edges.
+        //    Only match against vertices from the same connected component
+        //    to prevent cross-component fillet contamination at split positions.
+        let my_comp = emitted_comp.get(idx).copied().unwrap_or(usize::MAX);
         let mut at_vert = false;
         for (&v, &push) in &vert_push {
+            if solid_vert_comp.get(&v).copied().unwrap_or(usize::MAX) != my_comp {
+                continue;
+            }
             if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
-                let pushed = p + push;
-                if (pushed.x - 4.015).abs() < 0.02 && (pushed.y - 8.481).abs() < 0.02 {
-                    warn!("Vert push at idx {} v={} orig={:?} → pushed={:?}: push={:?}",
-                          idx, v, p, pushed, push);
-                }
                 chamfer_offsets[idx] = push.into();
-                // Normal = average face normal (unsigned bisector) at vertex.
                 if let Some(&bisect) = vert_bisector.get(&v) {
                     normals[idx] = bisect.into();
                 }
@@ -841,7 +983,11 @@ pub fn generate_cut_offset_chamfer(
         }
 
         // 2. Check if on a sharp edge (between two endpoints).
+        //    Only match against edges from the same connected component.
         for &(a, b) in &sharp_edges {
+            if solid_vert_comp.get(&a).copied().unwrap_or(usize::MAX) != my_comp {
+                continue;
+            }
             let pa = solid.positions[a as usize];
             let pb = solid.positions[b as usize];
             let edge_vec = pb - pa;
