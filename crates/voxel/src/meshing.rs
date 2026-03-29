@@ -646,6 +646,12 @@ pub fn build_full_res_mesh(data: &ChunkMeshData) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
+    // Store chamfer offset in vertex color (RGB = offset direction, A = 1.0).
+    // The vertex shader reads this to scale chamfer with distance.
+    let colors: Vec<[f32; 4]> = data.chamfer_offsets.iter()
+        .map(|o| [o[0], o[1], o[2], 1.0])
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_attribute(ATTRIBUTE_CHAMFER_OFFSET, data.chamfer_offsets.clone());
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     mesh
