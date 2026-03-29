@@ -42,6 +42,9 @@ struct ChunkVertex {
 #ifdef HAS_CHAMFER_OFFSET
     @location(10) chamfer_offset: vec3<f32>,
 #endif
+#ifdef HAS_SHARP_NORMAL
+    @location(11) sharp_normal: vec3<f32>,
+#endif
 };
 
 @vertex
@@ -57,12 +60,18 @@ fn vertex(in: ChunkVertex) -> VertexOutput {
     position = position - undo;
 #endif
 
+    // Interpolate normal from smooth (chamfered) → sharp (flat face) as chamfer fades.
+    var normal = in.normal;
+#ifdef HAS_SHARP_NORMAL
+    normal = mix(in.sharp_normal, in.normal, dither_fade.chamfer_amount);
+#endif
+
     let mesh_world_from_local = mesh_functions::get_world_from_local(in.instance_index);
     var world_from_local = mesh_world_from_local;
 
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
-        in.normal,
+        normal,
         in.instance_index
     );
 #endif

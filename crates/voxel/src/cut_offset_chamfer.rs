@@ -957,6 +957,10 @@ pub fn generate_cut_offset_chamfer(
     // sharp vertex.  If so, apply the fillet push and set a smooth normal.
     chamfer_offsets.resize(positions.len(), [0.0; 3]);
 
+    // Capture normals before chamfer smoothing — these are the original flat
+    // face normals that we'll blend back to when chamfer_amount goes to 0.
+    let sharp_normals = normals.clone();
+
     for idx in 0..positions.len() {
         let p = Vec3::from_array(positions[idx]);
 
@@ -1027,6 +1031,7 @@ pub fn generate_cut_offset_chamfer(
     ChunkMeshData {
         positions,
         normals,
+        sharp_normals,
         uvs,
         chamfer_offsets,
         indices,

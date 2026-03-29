@@ -11,9 +11,17 @@ use crate::shape::*;
 pub const ATTRIBUTE_CHAMFER_OFFSET: bevy::mesh::MeshVertexAttribute =
     bevy::mesh::MeshVertexAttribute::new("ChamferOffset", 930_481_752, bevy::render::render_resource::VertexFormat::Float32x3);
 
+/// Custom vertex attribute for the original sharp (face) normal before chamfer smoothing.
+pub const ATTRIBUTE_SHARP_NORMAL: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new("SharpNormal", 930_481_753, bevy::render::render_resource::VertexFormat::Float32x3);
+
 pub struct ChunkMeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// The original face normal before chamfer smoothing. For non-chamfered
+    /// vertices this equals `normals`. For chamfer vertices, `normals` has the
+    /// smooth bisector and `sharp_normals` has the original flat face normal.
+    pub sharp_normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub chamfer_offsets: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
@@ -332,7 +340,8 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
     );
 
     let n = positions.len();
-    ChunkMeshData { positions, normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], indices }
+    let sharp_normals = normals.clone();
+    ChunkMeshData { positions, normals, sharp_normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], indices }
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +656,7 @@ pub fn build_full_res_mesh(data: &ChunkMeshData) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
     mesh.insert_attribute(ATTRIBUTE_CHAMFER_OFFSET, data.chamfer_offsets.clone());
+    mesh.insert_attribute(ATTRIBUTE_SHARP_NORMAL, data.sharp_normals.clone());
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     mesh
 }

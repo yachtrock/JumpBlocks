@@ -18,7 +18,7 @@ use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::shader::ShaderRef;
 
 use crate::coords::{ChunkCoord, CHUNK_WORLD_SIZE};
-use crate::meshing::ATTRIBUTE_CHAMFER_OFFSET;
+use crate::meshing::{ATTRIBUTE_CHAMFER_OFFSET, ATTRIBUTE_SHARP_NORMAL};
 use crate::streaming::StreamingAnchor;
 
 // ---------------------------------------------------------------------------
@@ -62,6 +62,8 @@ impl From<&DitherFadeExtension> for DitherFadeUniform {
 
 /// Shader location for the custom ChamferOffset vertex attribute.
 pub const CHAMFER_OFFSET_LOCATION: u32 = 10;
+/// Shader location for the custom SharpNormal vertex attribute.
+pub const SHARP_NORMAL_LOCATION: u32 = 11;
 
 impl MaterialExtension for DitherFadeExtension {
     fn vertex_shader() -> ShaderRef {
@@ -99,6 +101,10 @@ impl MaterialExtension for DitherFadeExtension {
         if layout.0.contains(ATTRIBUTE_CHAMFER_OFFSET) {
             attrs.push(ATTRIBUTE_CHAMFER_OFFSET.at_shader_location(CHAMFER_OFFSET_LOCATION));
             descriptor.vertex.shader_defs.push("HAS_CHAMFER_OFFSET".into());
+        }
+        if layout.0.contains(ATTRIBUTE_SHARP_NORMAL) {
+            attrs.push(ATTRIBUTE_SHARP_NORMAL.at_shader_location(SHARP_NORMAL_LOCATION));
+            descriptor.vertex.shader_defs.push("HAS_SHARP_NORMAL".into());
         }
 
         descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
