@@ -3,7 +3,7 @@ use std::path::Path;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::ChunkData;
-use jumpblocks_voxel::chunk_lod::{ChunkDitherMaterial, DitherFadeExtension, LodDebugMaterials};
+use jumpblocks_voxel::chunk_lod::{ChunkDitherMaterial, DitherFadeExtension};
 use jumpblocks_voxel::coords::{ChunkPos, RegionId};
 use jumpblocks_voxel::persistence;
 use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
@@ -141,12 +141,6 @@ fn setup_world(
             extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },
         });
         commands.insert_resource(ChunkMaterial(chunk_mat));
-
-        // Debug materials for LOD tier visualization
-        commands.insert_resource(LodDebugMaterials {
-            full_color: Color::srgb(0.6, 0.5, 0.4),
-            reduced_color: Color::srgb(0.3, 0.7, 0.9),
-        });
     }
 
     // --- Create a region and load chunk data ---

@@ -162,11 +162,30 @@ pub struct LodTransition {
     pub blend: f32,
 }
 
-/// Optional debug coloring for LOD tiers.
-#[derive(Resource)]
-pub struct LodDebugMaterials {
-    pub full_color: Color,
-    pub reduced_color: Color,
+/// Debug visualization mode for LOD tiers. Toggled with F4.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LodDebugMode {
+    /// Normal rendering — no debug tinting.
+    #[default]
+    Normal,
+    /// Tint chunks by LOD level: normal=LOD0, blue=LOD1, red=cluster.
+    Tinted,
+}
+
+impl LodDebugMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Normal => Self::Tinted,
+            Self::Tinted => Self::Normal,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Tinted => "LOD Tinted",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +200,6 @@ pub fn lod_setup_system(
         (Entity, &ChunkLodMesh, &MeshMaterial3d<ChunkDitherMaterial>),
         (Added<ChunkLodMesh>, Without<LodChild>),
     >,
-    debug_mats: Option<Res<LodDebugMaterials>>,
 ) {
     for (entity, lod_mesh, parent_mat) in chunks.iter() {
         let Some(ref lod_handle) = lod_mesh.lod else { continue };
@@ -194,23 +212,12 @@ pub fn lod_setup_system(
                 ..default()
             });
 
-        let main_base = if let Some(ref dbg) = debug_mats {
-            StandardMaterial { base_color: dbg.full_color, ..base.clone() }
-        } else {
-            base.clone()
-        };
-        let child_base = if let Some(ref dbg) = debug_mats {
-            StandardMaterial { base_color: dbg.reduced_color, ..base }
-        } else {
-            base
-        };
-
         let main_handle = dither_materials.add(ChunkDitherMaterial {
-            base: main_base,
+            base: base.clone(),
             extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },
         });
         let child_handle = dither_materials.add(ChunkDitherMaterial {
-            base: child_base,
+            base,
             extension: DitherFadeExtension { fade: 1.0, invert: false, chamfer_amount: 0.0 },
         });
 
@@ -240,6 +247,7 @@ pub fn lod_update_system(
     config: Res<LodConfig>,
     time: Res<Time>,
     anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
+    debug_mode: Res<LodDebugMode>,
     mut chunks: Query<(
         Entity,
         &GlobalTransform,
@@ -318,15 +326,26 @@ pub fn lod_update_system(
         };
 
         // --- Write to materials ---
+        let normal_color = Color::srgb(0.6, 0.5, 0.4);
+        let (main_color, child_color) = match *debug_mode {
+            LodDebugMode::Normal => (normal_color, normal_color),
+            LodDebugMode::Tinted => (
+                normal_color,                      // LOD0: normal
+                Color::srgb(0.3, 0.5, 0.9),       // LOD1: blue
+            ),
+        };
+
         if let Some(mat) = dither_materials.get_mut(&materials.main_handle) {
             mat.extension.fade = main_fade;
             mat.extension.invert = main_inv;
             mat.extension.chamfer_amount = chamfer;
+            mat.base.base_color = main_color;
         }
         if let Some(mat) = dither_materials.get_mut(&materials.child_handle) {
             mat.extension.fade = child_fade;
             mat.extension.invert = child_inv;
-            mat.extension.chamfer_amount = 0.0; // LOD mesh has no chamfer data
+            mat.extension.chamfer_amount = 0.0;
+            mat.base.base_color = child_color;
         }
 
         // --- Set child visibility (prevents shadow/wireframe/depth artifacts) ---
@@ -374,6 +393,18 @@ fn transition_fades(from: LodTier, to: LodTier, t: f32) -> (f32, bool, f32, bool
     }
 }
 
+/// F4 toggles LOD debug visualization mode.
+pub fn toggle_lod_debug_mode(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<LodDebugMode>,
+) {
+    if keyboard.just_pressed(KeyCode::F4) {
+        let old = *mode;
+        *mode = old.cycle();
+        info!("LOD debug: {} → {}", old.label(), mode.label());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -384,7 +415,9 @@ impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<ChunkDitherMaterial>::default())
             .init_resource::<LodConfig>()
+            .init_resource::<LodDebugMode>()
             .add_systems(Update, (
+                toggle_lod_debug_mode,
                 lod_setup_system,
                 lod_update_system.after(lod_setup_system),
             ));

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy::mesh::{Indices, PrimitiveTopology};
 
-use crate::chunk_lod::{ChunkDitherMaterial, ChunkLodMaterials, ChunkLodMesh, DitherFadeExtension, LodTier, LodConfig};
+use crate::chunk_lod::{ChunkDitherMaterial, ChunkLodMaterials, ChunkLodMesh, DitherFadeExtension, LodDebugMode, LodTier, LodConfig};
 use crate::coords::{ChunkCoord, ChunkPos, CHUNK_WORLD_SIZE};
 use crate::streaming::StreamingAnchor;
 
@@ -92,6 +92,26 @@ impl Default for ClusterConfig {
 // Systems
 // ---------------------------------------------------------------------------
 
+/// Updates cluster material colors when debug mode changes.
+pub fn cluster_debug_color_system(
+    debug_mode: Res<LodDebugMode>,
+    clusters: Query<&MeshMaterial3d<ChunkDitherMaterial>, With<ClusterMarker>>,
+    mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
+) {
+    if !debug_mode.is_changed() {
+        return;
+    }
+    let color = match *debug_mode {
+        LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
+        LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3),
+    };
+    for mat_handle in clusters.iter() {
+        if let Some(mat) = dither_materials.get_mut(&mat_handle.0) {
+            mat.base.base_color = color;
+        }
+    }
+}
+
 /// Collects render stats every frame.
 pub fn render_stats_system(
     chunks: Query<(&LodTier, &ChunkLodMaterials), With<ChunkCoord>>,
@@ -133,6 +153,7 @@ pub fn cluster_management_system(
     mut existing_clusters: Query<(Entity, &mut ChunkCluster)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
+    debug_mode: Res<LodDebugMode>,
     mesh_assets: Res<Assets<Mesh>>,
 ) {
     let Ok(anchor_tf) = anchor_query.single() else { return };
@@ -214,9 +235,13 @@ pub fn cluster_management_system(
         // Compute cluster center for transform
         let min_pos = members.iter().map(|m| m.2).reduce(|a, b| a.min(b)).unwrap();
 
+        let cluster_color = match *debug_mode {
+            LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
+            LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3), // red tint
+        };
         let mat = dither_materials.add(ChunkDitherMaterial {
             base: StandardMaterial {
-                base_color: Color::srgb(0.6, 0.5, 0.4),
+                base_color: cluster_color,
                 ..default()
             },
             extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 0.0 },
@@ -333,6 +358,7 @@ impl Plugin for ClusterPlugin {
             .add_systems(Update, (
                 render_stats_system,
                 cluster_management_system,
+                cluster_debug_color_system,
             ));
     }
 }
