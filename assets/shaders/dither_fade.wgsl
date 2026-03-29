@@ -40,6 +40,9 @@ struct DitherFadeUniform {
     fade: f32,
     /// 0.0 = normal dither, 1.0 = inverted pattern (for complementary crossfade)
     invert: f32,
+    /// 0.0 = no chamfer (flat), 1.0 = full chamfer. Controlled by vertex shader.
+    chamfer_amount: f32,
+    _pad: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(200)

@@ -200,6 +200,11 @@ fn debug_ui_system(
             ui.add(egui::Slider::new(&mut lod_config.transition_duration, 0.05..=2.0).text("Transition (sec)"));
 
             ui.separator();
+            ui.label("Chamfer Fade");
+            ui.add(egui::Slider::new(&mut lod_config.chamfer_start, 0.0..=8.0).text("Chamfer start"));
+            ui.add(egui::Slider::new(&mut lod_config.chamfer_end, 0.0..=8.0).text("Chamfer end"));
+
+            ui.separator();
             let mut full_count = 0;
             let mut reduced_count = 0;
             let mut hidden_count = 0;
