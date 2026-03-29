@@ -38,6 +38,8 @@
 struct DitherFadeUniform {
     /// 0.0 = fully visible, 1.0 = fully invisible
     fade: f32,
+    /// 0.0 = normal dither, 1.0 = inverted pattern (for complementary crossfade)
+    invert: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(200)
@@ -77,7 +79,12 @@ fn fragment(
     if fade > 0.0 {
         let x = u32(in.position.x) % 4u;
         let y = u32(in.position.y) % 4u;
-        let threshold = BAYER_4X4[y * 4u + x];
+        var threshold = BAYER_4X4[y * 4u + x];
+        // Invert the pattern so the incoming mesh covers exactly the pixels
+        // the outgoing mesh discards, and vice versa.
+        if dither_fade.invert > 0.5 {
+            threshold = 1.0 - threshold;
+        }
         if fade > threshold {
             discard;
         }
