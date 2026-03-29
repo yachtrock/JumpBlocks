@@ -189,17 +189,24 @@ pub fn lod_target_assignment_system(
 pub fn lod_child_setup_system(
     mut commands: Commands,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
-    chunks: Query<(Entity, &ChunkLodMesh), Added<ChunkLodMesh>>,
-    debug_mats: Option<Res<LodDebugMaterials>>,
+    chunks: Query<(Entity, &ChunkLodMesh, &MeshMaterial3d<ChunkDitherMaterial>), Added<ChunkLodMesh>>,
 ) {
-    for (entity, lod_mesh) in chunks.iter() {
+    for (entity, lod_mesh, parent_mat) in chunks.iter() {
         let Some(ref lod_handle) = lod_mesh.lod else {
             continue;
         };
 
-        // Child starts invisible
+        // Clone the parent's base StandardMaterial so the child has identical PBR
+        // properties (roughness, reflectance, etc.) — only the fade value differs.
+        let base = dither_materials
+            .get(&parent_mat.0)
+            .map(|m| m.base.clone())
+            .unwrap_or_else(|| StandardMaterial {
+                base_color: Color::srgb(0.6, 0.5, 0.4),
+                ..default()
+            });
         let child_mat = dither_materials.add(ChunkDitherMaterial {
-            base: base_material_for_tier(LodTier::Reduced, &debug_mats),
+            base,
             extension: DitherFadeExtension { fade: 1.0, invert: false },
         });
 
