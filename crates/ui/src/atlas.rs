@@ -46,7 +46,7 @@ impl Atlas {
     pub fn new() -> Self {
         let width = INITIAL_ATLAS_SIZE;
         let height = INITIAL_ATLAS_SIZE;
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        let pixels = vec![0u8; (width * height * 4) as usize];
 
         let packer = BucketedAtlasAllocator::new(size2(width as i32, height as i32));
 

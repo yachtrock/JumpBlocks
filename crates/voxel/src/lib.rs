@@ -1,6 +1,5 @@
 pub mod chunk;
 pub mod cut_offset_chamfer;
-pub mod halfedge_chamfer;
 pub mod meshing;
 pub mod shape;
 
@@ -20,10 +19,6 @@ use shape::*;
 pub enum PresentationMode {
     /// LOD mesh — no chamfer, no shared verts.
     Flat,
-    /// Edge-graph chamfer post-process.
-    EdgeGraphChamfer,
-    /// Half-edge mesh chamfer using procedural_modelling crate.
-    HalfEdgeChamfer,
     /// Cut-and-offset chamfer: insert edge loops then offset original verts.
     #[default]
     CutAndOffset,
@@ -32,9 +27,7 @@ pub enum PresentationMode {
 impl PresentationMode {
     pub fn cycle(self) -> Self {
         match self {
-            Self::Flat => Self::EdgeGraphChamfer,
-            Self::EdgeGraphChamfer => Self::HalfEdgeChamfer,
-            Self::HalfEdgeChamfer => Self::CutAndOffset,
+            Self::Flat => Self::CutAndOffset,
             Self::CutAndOffset => Self::Flat,
         }
     }
@@ -42,8 +35,6 @@ impl PresentationMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Flat => "Flat (no chamfer)",
-            Self::EdgeGraphChamfer => "Edge-Graph Chamfer",
-            Self::HalfEdgeChamfer => "Half-Edge Chamfer",
             Self::CutAndOffset => "Cut & Offset Chamfer",
         }
     }

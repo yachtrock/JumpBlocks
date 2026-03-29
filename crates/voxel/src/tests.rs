@@ -269,99 +269,10 @@ fn demo_chunk() -> ChunkData {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn halfedge_single_cube_topology() {
-    use crate::halfedge_chamfer::generate_halfedge_chamfer;
-
-    let shapes = make_shapes();
-    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
-
-    assert_mesh_valid(&result, "he_cube");
-
-    let tri_count = result.indices.len() / 3;
-    let vert_count = result.positions.len();
-
-    eprintln!("halfedge cube: {} verts, {} tris", vert_count, tri_count);
-
-    assert!(tri_count > 12,
-        "chamfered cube should have more than 12 tris, got {}", tri_count);
-
-    assert_no_degenerate_triangles(&result, "he_cube");
-
-    let (boundary, interior, non_manifold) = count_edge_sharing(&result);
-    eprintln!("halfedge cube edges: boundary={}, interior={}, non_manifold={}", boundary, interior, non_manifold);
-    assert!(non_manifold == 0,
-        "halfedge cube should have no non-manifold edges, got {}", non_manifold);
-    if boundary > 0 {
-        eprintln!("WARNING: halfedge cube has {} boundary edges (holes)", boundary);
-        dump_boundary_edges(&result, "he_cube");
-    }
-}
-
-#[test]
-fn halfedge_single_cube_no_boundary() {
-    use crate::halfedge_chamfer::generate_halfedge_chamfer;
-
-    let shapes = make_shapes();
-    let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
-
-    let (boundary, _, _) = count_edge_sharing(&result);
-    assert!(boundary == 0,
-        "halfedge chamfered cube should be watertight (0 boundary edges), got {}", boundary);
-}
-
-#[test]
-fn halfedge_single_wedge_topology() {
-    use crate::halfedge_chamfer::generate_halfedge_chamfer;
-
-    let shapes = make_shapes();
-    let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
-    let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
-
-    assert_mesh_valid(&result, "he_wedge");
-
-    let tri_count = result.indices.len() / 3;
-    let vert_count = result.positions.len();
-    eprintln!("halfedge wedge: {} verts, {} tris", vert_count, tri_count);
-
-    assert_no_degenerate_triangles(&result, "he_wedge");
-
-    let (boundary, _, non_manifold) = count_edge_sharing(&result);
-    eprintln!("halfedge wedge edges: boundary={}, non_manifold={}", boundary, non_manifold);
-    assert!(non_manifold == 0, "he_wedge non-manifold: {}", non_manifold);
-}
-
-#[test]
-fn halfedge_wedge_on_cube_topology() {
-    use crate::halfedge_chamfer::generate_halfedge_chamfer;
-
-    let shapes = make_shapes();
-    let mut data = ChunkData::new();
-    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
-    data.place_wedge(8, 15, 8, Facing::East, 1);
-    let result = generate_halfedge_chamfer(&data, &ChunkNeighbors::empty(), &shapes);
-
-    assert_mesh_valid(&result, "he_woc");
-
-    let tri_count = result.indices.len() / 3;
-    let vert_count = result.positions.len();
-    eprintln!("halfedge wedge_on_cube: {} verts, {} tris", vert_count, tri_count);
-
-    assert_no_degenerate_triangles(&result, "he_woc");
-
-    let (boundary, _, non_manifold) = count_edge_sharing(&result);
-    eprintln!("halfedge woc edges: boundary={}, non_manifold={}", boundary, non_manifold);
-    assert!(non_manifold == 0, "he_woc non-manifold: {}", non_manifold);
-    assert!(boundary == 0,
-        "he_woc should be watertight (0 boundary edges), got {}", boundary);
-}
-
-#[test]
 fn single_cube_mesh_valid() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_mesh_valid(&result.full_res, "cube full_res");
     assert_mesh_valid(&result.lod, "cube lod");
@@ -371,7 +282,7 @@ fn single_cube_mesh_valid() {
 fn single_cube_watertight() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     let (boundary, _interior, non_manifold) = count_edge_sharing(&result.full_res);
     if boundary > 0 || non_manifold > 0 {
@@ -384,7 +295,7 @@ fn single_cube_watertight() {
 fn single_wedge_mesh_valid() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_mesh_valid(&result.full_res, "wedge full_res");
     assert_mesh_valid(&result.lod, "wedge lod");
@@ -395,7 +306,7 @@ fn single_wedge_all_facings_valid() {
     let shapes = make_shapes();
     for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
         let data = single_block_chunk(SHAPE_WEDGE, facing, 1);
-        let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+        let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
         let label = format!("wedge_{:?}", facing);
 
         assert_mesh_valid(&result.full_res, &format!("{} full_res", label));
@@ -407,7 +318,7 @@ fn single_wedge_all_facings_valid() {
 fn adjacent_cubes_mesh_valid() {
     let shapes = make_shapes();
     let data = block_2x2x2();
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_mesh_valid(&result.full_res, "2x2x2 cubes full_res");
     assert_mesh_valid(&result.lod, "2x2x2 cubes lod");
@@ -418,13 +329,13 @@ fn adjacent_cubes_no_internal_faces() {
     let shapes = make_shapes();
 
     let single = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let single_result = generate_chunk_mesh(&single, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let single_result = generate_chunk_mesh(&single, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
     let single_tris = single_result.lod.indices.len() / 3;
 
     let mut double = ChunkData::new();
     double.place_std(8, 16, 8, SHAPE_CUBE, Facing::North, 1);
     double.place_std(10, 16, 8, SHAPE_CUBE, Facing::North, 1);
-    let double_result = generate_chunk_mesh(&double, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let double_result = generate_chunk_mesh(&double, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
     let double_tris = double_result.lod.indices.len() / 3;
 
     assert!(double_tris < single_tris * 2,
@@ -439,7 +350,7 @@ fn adjacent_wedges_same_facing_valid() {
     data.place_wedge(8, 16, 6, Facing::East, 1);
     data.place_wedge(8, 16, 8, Facing::East, 1);
     data.place_wedge(8, 16, 10, Facing::East, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_mesh_valid(&result.full_res, "3 wedges full_res");
     assert_mesh_valid(&result.lod, "3 wedges lod");
@@ -451,7 +362,7 @@ fn wedge_on_cube_valid() {
     let mut data = ChunkData::new();
     data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
     data.place_wedge(8, 15, 8, Facing::East, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_mesh_valid(&result.full_res, "wedge_on_cube full_res");
     assert_mesh_valid(&result.lod, "wedge_on_cube lod");
@@ -461,7 +372,7 @@ fn wedge_on_cube_valid() {
 fn demo_staircase_ramp_valid() {
     let shapes = make_shapes();
     let data = demo_chunk();
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_mesh_valid(&result.full_res, "demo full_res");
     assert_mesh_valid(&result.lod, "demo lod");
@@ -477,7 +388,7 @@ fn demo_staircase_ramp_valid() {
 fn collider_mesh_valid() {
     let shapes = make_shapes();
     let data = demo_chunk();
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert!(!result.collider_data.vertices.is_empty(), "collider has no vertices");
     assert!(!result.collider_data.indices.is_empty(), "collider has no indices");
@@ -492,7 +403,7 @@ fn collider_mesh_valid() {
 fn chamfered_mesh_has_at_least_as_many_tris_as_lod() {
     let shapes = make_shapes();
     let data = demo_chunk();
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     let full_tris = result.full_res.indices.len() / 3;
     let lod_tris = result.lod.indices.len() / 3;
@@ -506,14 +417,14 @@ fn chamfered_mesh_no_extra_holes() {
     let shapes = make_shapes();
 
     let cube_data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let cube_result = generate_chunk_mesh(&cube_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let cube_result = generate_chunk_mesh(&cube_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
     let (cube_boundary, _, _) = count_edge_sharing(&cube_result.full_res);
     eprintln!("single cube boundary edges: {}", cube_boundary);
     assert!(cube_boundary == 0,
         "single floating cube should have 0 boundary edges, got {}", cube_boundary);
 
     let wedge_data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
-    let wedge_result = generate_chunk_mesh(&wedge_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let wedge_result = generate_chunk_mesh(&wedge_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
     let (wedge_boundary, _, _) = count_edge_sharing(&wedge_result.full_res);
     eprintln!("single wedge boundary edges: {}", wedge_boundary);
     assert!(wedge_boundary == 0,
@@ -522,7 +433,7 @@ fn chamfered_mesh_no_extra_holes() {
     let mut woc_data = ChunkData::new();
     woc_data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
     woc_data.place_wedge(8, 15, 8, Facing::East, 1);
-    let woc_result = generate_chunk_mesh(&woc_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let woc_result = generate_chunk_mesh(&woc_data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
     let (woc_boundary, _, _) = count_edge_sharing(&woc_result.full_res);
     eprintln!("wedge_on_cube boundary edges: {}", woc_boundary);
     if woc_boundary > 0 {
@@ -536,7 +447,7 @@ fn chamfered_mesh_no_extra_holes() {
 fn empty_chunk_produces_empty_mesh() {
     let shapes = make_shapes();
     let data = ChunkData::new();
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert!(result.full_res.positions.is_empty(), "empty chunk should produce empty full_res");
     assert!(result.lod.positions.is_empty(), "empty chunk should produce empty lod");
@@ -546,7 +457,7 @@ fn empty_chunk_produces_empty_mesh() {
 fn no_degenerate_triangles_single_cube() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_no_degenerate_triangles(&result.full_res, "cube full_res");
     assert_no_degenerate_triangles(&result.lod, "cube lod");
@@ -556,7 +467,7 @@ fn no_degenerate_triangles_single_cube() {
 fn no_degenerate_triangles_demo() {
     let shapes = make_shapes();
     let data = demo_chunk();
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     assert_no_degenerate_triangles(&result.full_res, "demo full_res");
     assert_no_degenerate_triangles(&result.lod, "demo lod");
@@ -566,7 +477,7 @@ fn no_degenerate_triangles_demo() {
 fn single_cube_edge_sharing() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_CUBE, Facing::North, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
     eprintln!("single cube edges: boundary={}, interior={}, non_manifold={}",
@@ -860,7 +771,7 @@ fn wedge_on_cube_edge_sharing() {
     let mut data = ChunkData::new();
     data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
     data.place_wedge(8, 15, 8, Facing::East, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
     eprintln!("wedge_on_cube edges: boundary={}, interior={}, non_manifold={}",
@@ -883,7 +794,7 @@ fn wedge_on_cube_edge_sharing() {
 fn demo_edge_sharing() {
     let shapes = make_shapes();
     let data = demo_chunk();
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
     eprintln!("demo edges: boundary={}, interior={}, non_manifold={}",
@@ -916,7 +827,7 @@ fn debug_concave_l_shape() {
     data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);  // A
     data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1); // C
     data.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1); // B
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
     let mesh = &result.full_res;
 
     eprintln!("L-shape mesh: {} verts, {} tris", mesh.positions.len(), mesh.indices.len() / 3);
@@ -991,7 +902,7 @@ fn debug_concave_l_shape() {
 fn single_wedge_edge_sharing() {
     let shapes = make_shapes();
     let data = single_block_chunk(SHAPE_WEDGE, Facing::North, 1);
-    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::EdgeGraphChamfer);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
 
     let (boundary, interior, non_manifold) = count_edge_sharing(&result.full_res);
     eprintln!("single wedge edges: boundary={}, interior={}, non_manifold={}",

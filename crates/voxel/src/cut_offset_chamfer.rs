@@ -297,7 +297,6 @@ pub fn generate_cut_offset_chamfer(
                 let cos_half_sq = (1.0 - sin_half * sin_half).max(0.0);
                 if cos_half_sq < 1e-6 { continue; }
                 let cos_half = cos_half_sq.sqrt();
-                let r_edge = r * sin_half / cos_half; // r * tan(θ/2)... wait
                 // tan(θ/2) = sin(θ/2) / cos(θ/2) = (k/2) / √(1 - k²/4)
                 let r_edge = r * sin_half / cos_half;
 
@@ -363,13 +362,6 @@ pub fn generate_cut_offset_chamfer(
     let mut chamfer_offsets: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    /// Pad chamfer_offsets with zeros to match positions length.
-    fn pad_offsets(offsets: &mut Vec<[f32; 3]>, positions: &[[f32; 3]]) {
-        while offsets.len() < positions.len() {
-            offsets.push([0.0; 3]);
-        }
-    }
-
     // Per (edge_key, face_index) → (inner_v_at_a, inner_v_at_b) in edge-key
     // order.  Will be used for cross-face strip emission in future phases.
     let mut _edge_face_inners: HashMap<((u32, u32), usize), (Vec3, Vec3)> = HashMap::new();
@@ -431,7 +423,6 @@ pub fn generate_cut_offset_chamfer(
         struct CutLine {
             split_i: Vec3, // split of vi (start of sharp edge)
             split_j: Vec3, // split of vj (end of sharp edge)
-            dir: Vec3,     // split_j - split_i
         }
 
         let mut cuts: Vec<Option<CutLine>> = vec![None; n];
@@ -462,7 +453,6 @@ pub fn generate_cut_offset_chamfer(
             cuts[i] = Some(CutLine {
                 split_i: si,
                 split_j: sj,
-                dir: sj - si,
             });
         }
 
@@ -624,8 +614,6 @@ pub fn generate_cut_offset_chamfer(
         // handle non-convex polygons and auto-correct winding.
         // The full intersection offset can make the polygon non-convex,
         // so we can't use triangulate_convex_polygon.
-        let any_chamfered = (0..n).any(|i| chamfered_verts.contains(&face.verts[i]));
-
         if n == 3 {
             emit_tri(
                 &mut positions, &mut normals, &mut uvs, &mut indices,
@@ -681,9 +669,6 @@ pub fn generate_cut_offset_chamfer(
             if cuts[i].is_none() {
                 continue;
             }
-
-            let vi = face.verts[i];
-            let vj = face.verts[j];
 
             // --- vi end ---
             // Truncate if vi has a corner patch.  A corner patch exists when:
@@ -883,15 +868,6 @@ pub fn generate_cut_offset_chamfer(
                 }
                 break;
             }
-        }
-    }
-
-    // Debug: log all non-zero offsets
-    let mut nonzero_offsets = 0;
-    for i in 0..positions.len() {
-        let o = Vec3::from_array(chamfer_offsets[i]);
-        if o.length() > 1e-6 {
-            nonzero_offsets += 1;
         }
     }
 
