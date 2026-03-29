@@ -207,9 +207,9 @@ pub fn lod_child_setup_system(
             LodChildMarker,
             Mesh3d(lod_handle.clone()),
             MeshMaterial3d(child_mat),
-            // Identity transform — inherits parent's transform
             Transform::default(),
-            Visibility::default(),
+            // Start hidden — only made visible during LOD transitions
+            Visibility::Hidden,
         )).id();
 
         commands.entity(entity).add_child(child);
@@ -266,9 +266,12 @@ pub fn lod_transition_start_system(
             extension: DitherFadeExtension { fade: child_start, invert: child_inv },
         });
 
-        // Apply materials
+        // Apply materials and make both visible for the crossfade
         commands.entity(entity).insert(MeshMaterial3d(main_mat.clone()));
-        commands.entity(lod_child.0).insert(MeshMaterial3d(child_mat.clone()));
+        commands.entity(lod_child.0).insert((
+            MeshMaterial3d(child_mat.clone()),
+            Visibility::Inherited,
+        ));
 
         commands.entity(entity).insert(LodTransition {
             to: target_tier,
@@ -335,15 +338,21 @@ pub fn lod_transition_update_system(
         if t >= 1.0 {
             *tier = transition.to;
 
-            // Set final materials (fully opaque / fully invisible)
+            // Set final materials and hide the invisible mesh
             let final_main_mat = final_material_for_tier(transition.to, true, &debug_mats, &mut dither_materials);
             let final_child_mat = final_material_for_tier(transition.to, false, &debug_mats, &mut dither_materials);
+
+            let main_visible = matches!(transition.to, LodTier::Full);
+            let child_visible = matches!(transition.to, LodTier::Reduced);
 
             commands.entity(entity)
                 .insert(MeshMaterial3d(final_main_mat))
                 .remove::<LodTransition>();
             commands.entity(lod_child.0)
-                .insert(MeshMaterial3d(final_child_mat));
+                .insert((
+                    MeshMaterial3d(final_child_mat),
+                    if child_visible { Visibility::Inherited } else { Visibility::Hidden },
+                ));
         }
     }
 }
