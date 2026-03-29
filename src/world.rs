@@ -1,10 +1,13 @@
+use std::path::Path;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::ChunkData;
 use jumpblocks_voxel::chunk_lod::{ChunkDitherMaterial, DitherFadeExtension, LodDebugMaterials};
-use jumpblocks_voxel::coords::ChunkPos;
+use jumpblocks_voxel::coords::{ChunkPos, RegionId};
+use jumpblocks_voxel::persistence;
 use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
-use jumpblocks_voxel::streaming::ChunkMaterial;
+use jumpblocks_voxel::streaming::{ChunkMaterial, WorldSavePath};
 use jumpblocks_voxel::world_grid::WorldGrid;
 
 use crate::layers::GameLayer;
@@ -37,6 +40,7 @@ fn setup_world(
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     dither_materials: Option<ResMut<Assets<ChunkDitherMaterial>>>,
     mut world_grid: ResMut<WorldGrid>,
+    save_path: Option<Res<WorldSavePath>>,
 ) {
     let has_rendering = meshes.is_some() && materials.is_some();
 
@@ -132,43 +136,148 @@ fn setup_world(
         }
     }
 
-    // --- Populate the region with demo chunk data ---
-    // The streaming system will handle spawning chunk entities.
+    // --- Create a region and load chunk data ---
     let region_id = world_grid.create_region(Vec3::new(-5.0, 0.0, 5.0));
     world_grid.active_region = region_id;
 
+    let loaded_from_disk = if let Some(ref save) = save_path {
+        load_region_from_disk(&save.0, region_id, &mut world_grid)
+    } else {
+        false
+    };
+
+    if !loaded_from_disk {
+        // No saved world — populate with demo data in memory
+        populate_demo_chunks(region_id, &mut world_grid);
+
+        // Save the demo chunks to disk if we have a save path
+        if let Some(ref save) = save_path {
+            save_region_to_disk(&save.0, region_id, &mut world_grid);
+        }
+    }
+
+    let chunk_count = world_grid
+        .get_region(region_id)
+        .map(|r| r.chunk_count())
+        .unwrap_or(0);
+    info!(
+        "[world] Region {} with {} chunks ({})",
+        region_id,
+        chunk_count,
+        if loaded_from_disk { "loaded from disk" } else { "generated" }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Disk I/O
+// ---------------------------------------------------------------------------
+
+/// Load all chunks for a region from disk into the WorldGrid.
+fn load_region_from_disk(
+    world_dir: &Path,
+    region_id: RegionId,
+    world_grid: &mut WorldGrid,
+) -> bool {
+    let chunks_dir = persistence::region_chunks_dir(world_dir, region_id);
+    let Ok(entries) = std::fs::read_dir(&chunks_dir) else {
+        return false;
+    };
+
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if path.extension().and_then(|e| e.to_str()) != Some("chunk") {
+            continue;
+        }
+
+        // Parse "x_y_z" from filename
+        let parts: Vec<&str> = stem.split('_').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let Ok(x) = parts[0].parse::<i32>() else { continue };
+        let Ok(y) = parts[1].parse::<i32>() else { continue };
+        let Ok(z) = parts[2].parse::<i32>() else { continue };
+        let pos = ChunkPos::new(x, y, z);
+
+        match persistence::load_chunk_from_disk(world_dir, region_id, pos) {
+            Ok(Some(data)) => {
+                if let Some(region) = world_grid.get_region_mut(region_id) {
+                    region.set_chunk(pos, data);
+                    count += 1;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error!("[world] Failed to load chunk {}: {}", pos, e);
+            }
+        }
+    }
+
+    count > 0
+}
+
+/// Save all chunks in a region to disk.
+fn save_region_to_disk(
+    world_dir: &Path,
+    region_id: RegionId,
+    world_grid: &mut WorldGrid,
+) {
+    let Some(region) = world_grid.get_region_mut(region_id) else {
+        return;
+    };
+    match persistence::save_dirty_chunks(world_dir, region) {
+        Ok(n) => info!("[world] Saved {} chunks to disk", n),
+        Err(e) => error!("[world] Failed to save chunks: {}", e),
+    }
+}
+
+/// Populate a region with demo chunks (in-memory only).
+fn populate_demo_chunks(region_id: RegionId, world_grid: &mut WorldGrid) {
+    let shapes = ShapeTable::default();
     let region = world_grid.get_region_mut(region_id).unwrap();
 
-    // Chunk (0,0,0): Main demo chunk
-    let chunk_data = build_main_demo_chunk();
-    let shapes = ShapeTable::default();
-    let errors = chunk_data.validate(&shapes);
-    for e in &errors {
-        error!("[world] main: {}", e);
-    }
-    region.set_chunk(ChunkPos::new(0, 0, 0), chunk_data);
+    let chunks: Vec<(ChunkPos, ChunkData)> = vec![
+        (ChunkPos::new(0, 0, 0), build_main_demo_chunk()),
+        (ChunkPos::new(1, 0, 0), build_neighbor_demo_chunk()),
+        (ChunkPos::new(2, 0, 0), build_test_demo_chunk()),
+    ];
 
-    // Chunk (1,0,0): Neighbor chunk (+X direction)
-    let neighbor_data = build_neighbor_demo_chunk();
-    let errors = neighbor_data.validate(&shapes);
-    for e in &errors {
-        error!("[world] neighbor: {}", e);
+    for (pos, data) in chunks {
+        let errors = data.validate(&shapes);
+        for e in &errors {
+            error!("[world] chunk {}: {}", pos, e);
+        }
+        region.set_chunk(pos, data);
     }
-    region.set_chunk(ChunkPos::new(1, 0, 0), neighbor_data);
+}
 
-    // Chunk (2,0,0): Floating test blocks (offset into chunk 2 space)
-    let test_data = build_test_demo_chunk();
-    let errors = test_data.validate(&shapes);
-    for e in &errors {
-        error!("[world] test: {}", e);
+/// Build a world to disk (CLI --new-world command).
+/// Creates the demo chunks and saves them without starting the game.
+pub fn build_world_to_disk(world_dir: &Path) {
+    let mut world_grid = WorldGrid::new();
+    let region_id = world_grid.create_region(Vec3::new(-5.0, 0.0, 5.0));
+    populate_demo_chunks(region_id, &mut world_grid);
+
+    let region = world_grid.get_region_mut(region_id).unwrap();
+    match persistence::save_dirty_chunks(world_dir, region) {
+        Ok(n) => println!("Saved {} chunks", n),
+        Err(e) => eprintln!("Failed to save: {}", e),
     }
-    region.set_chunk(ChunkPos::new(2, 0, 0), test_data);
 
-    info!(
-        "[world] Region {} created with {} chunks, streaming will handle spawning",
-        region_id,
-        region.chunk_count()
-    );
+    // Save region metadata
+    let meta = persistence::RegionMeta {
+        region_id: region_id.0,
+        world_origin: [-5.0, 0.0, 5.0],
+        chunk_count: region.chunk_count() as u32,
+        data_generation: region.dirty.data_gen.0,
+    };
+    if let Err(e) = persistence::save_region_meta_to_disk(world_dir, &meta) {
+        eprintln!("Failed to save region metadata: {}", e);
+    }
 }
 
 // ---------------------------------------------------------------------------
