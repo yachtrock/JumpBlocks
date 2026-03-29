@@ -225,15 +225,23 @@ fn face_is_occluded(
     true // all coverage entries are occluded
 }
 
-const NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
-    (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+const NEIGHBOR_OFFSETS_WITH_SIDE: [(i32, i32, i32, FaceSide); 6] = [
+    (1, 0, 0, FaceSide::East),
+    (-1, 0, 0, FaceSide::West),
+    (0, 1, 0, FaceSide::Top),
+    (0, -1, 0, FaceSide::Bottom),
+    (0, 0, 1, FaceSide::North),
+    (0, 0, -1, FaceSide::South),
 ];
 
-/// Check if a block is fully interior (every occupied cell has all 6 neighbors occupied).
-/// If true, all faces would be occluded so the block can be skipped entirely.
+/// Check if a block is fully interior (every occupied cell has all 6 neighbors
+/// fully occluded). If true, all faces would be occluded so the block can be
+/// skipped entirely. Uses coverage checks so that partial-coverage neighbors
+/// (e.g. wedge slopes) don't incorrectly mark a block as interior.
 fn block_is_fully_interior(
     data: &ChunkData,
     neighbors: &ChunkNeighbors,
+    shapes: &ShapeTable,
     block: &Block,
     shape: &BlockShape,
     facing: Facing,
@@ -244,8 +252,11 @@ fn block_is_fully_interior(
         let cx = ox as i32 + rotated.0 as i32;
         let cy = oy as i32 + rotated.1 as i32;
         let cz = oz as i32 + rotated.2 as i32;
-        for (dx, dy, dz) in NEIGHBOR_OFFSETS {
-            if !is_cell_occupied(data, neighbors, cx + dx, cy + dy, cz + dz) {
+        for (dx, dy, dz, side) in NEIGHBOR_OFFSETS_WITH_SIDE {
+            let nx = cx + dx;
+            let ny = cy + dy;
+            let nz = cz + dz;
+            if !neighbor_cell_occludes(data, neighbors, shapes, nx, ny, nz, side.opposite(), Coverage::Full) {
                 return false;
             }
         }
@@ -403,7 +414,7 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
         if !has_cells { stats_blocks_no_cells += 1; continue; }
 
         // Skip fully interior blocks — all faces would be occluded
-        if block_is_fully_interior(data, neighbors, block, shape, facing) {
+        if block_is_fully_interior(data, neighbors, shapes, block, shape, facing) {
             stats_blocks_interior += 1;
             stats_faces_total += shape.faces.len() as u32;
             stats_faces_culled += shape.faces.len() as u32;
@@ -529,7 +540,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
         if !has_cells { stats_blocks_no_cells += 1; continue; }
 
         // Skip fully interior blocks — all faces would be occluded
-        if block_is_fully_interior(data, neighbors, block, shape, facing) {
+        if block_is_fully_interior(data, neighbors, shapes, block, shape, facing) {
             stats_blocks_interior += 1;
             stats_faces_total += shape.faces.len() as u32;
             stats_faces_culled += shape.faces.len() as u32;
