@@ -16,7 +16,7 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType, SpecializedMeshPipe
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::shader::ShaderRef;
 
-use crate::coords::{ChunkCoord, CHUNK_WORLD_SIZE};
+use crate::coords::CHUNK_WORLD_SIZE;
 use crate::meshing::{ATTRIBUTE_CHAMFER_OFFSET, ATTRIBUTE_SHARP_NORMAL};
 use crate::streaming::StreamingAnchor;
 
@@ -242,7 +242,7 @@ pub fn lod_update_system(
     anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
     mut chunks: Query<(
         Entity,
-        &ChunkCoord,
+        &GlobalTransform,
         &ChunkLodMaterials,
         &ChunkLodMesh,
         &LodChild,
@@ -260,8 +260,8 @@ pub fn lod_update_system(
     let ch_start = config.chamfer_start;
     let ch_range = (config.chamfer_end - ch_start).max(0.001);
 
-    for (entity, coord, materials, lod_mesh, lod_child, mut tier, transition_opt) in chunks.iter_mut() {
-        let chunk_center = coord.pos.to_world_offset()
+    for (entity, transform, materials, lod_mesh, lod_child, mut tier, transition_opt) in chunks.iter_mut() {
+        let chunk_center = transform.translation()
             + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
         let dist = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
         let max_dist = dist.x.max(dist.y).max(dist.z);

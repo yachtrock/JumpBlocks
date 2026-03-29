@@ -105,7 +105,7 @@ fn promote_loaded_chunks(
 /// a chunk enters close range.
 fn start_chunk_meshing(
     mut commands: Commands,
-    mut query: Query<(Entity, &mut Chunk, &ChunkCoord, Option<&ChunkMeshLevel>), Without<ChunkMeshTask>>,
+    mut query: Query<(Entity, &mut Chunk, &GlobalTransform, Option<&ChunkMeshLevel>), Without<ChunkMeshTask>>,
     shape_table: Res<ShapeTable>,
     presentation: Res<PresentationMode>,
     lod_config: Res<LodConfig>,
@@ -119,11 +119,11 @@ fn start_chunk_meshing(
         .map(|t| t.translation())
         .unwrap_or(Vec3::ZERO);
 
-    for (entity, mut chunk, coord, mesh_level) in query.iter_mut() {
+    for (entity, mut chunk, transform, mesh_level) in query.iter_mut() {
         let current_level = mesh_level.copied().unwrap_or(ChunkMeshLevel::None);
 
-        // Compute distance to decide mesh level
-        let chunk_center = coord.pos.to_world_offset() + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
+        // Use the entity's actual world position for distance calculation
+        let chunk_center = transform.translation() + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
         let dist = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
         let max_dist = dist.x.max(dist.y).max(dist.z) as i32;
         let needs_full = max_dist <= lod_config.full_radius + 1; // +1 for transition margin
