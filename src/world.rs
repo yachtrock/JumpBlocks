@@ -13,6 +13,10 @@ use jumpblocks_voxel::worldgen::{self, IslandGenConfig};
 
 use crate::layers::GameLayer;
 
+/// Resource communicating the spawn point to the player system.
+#[derive(Resource)]
+pub struct SpawnPoint(pub Vec3);
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
@@ -169,6 +173,11 @@ fn setup_world(
         chunk_count,
         if loaded_from_disk { "loaded from disk" } else { "generated" }
     );
+
+    // Compute spawn point above island surface
+    let gen_config = IslandGenConfig::default();
+    let spawn_y = worldgen::island_spawn_height(&gen_config) + 3.0; // +3 for clearance
+    commands.insert_resource(SpawnPoint(Vec3::new(0.0, spawn_y, 0.0)));
 }
 
 // ---------------------------------------------------------------------------
