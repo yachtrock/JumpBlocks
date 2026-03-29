@@ -12,11 +12,13 @@
 //! During crossfade: they animate toward each other over `transition_duration`.
 
 use bevy::prelude::*;
-use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin};
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline, MaterialPlugin};
+use bevy::render::render_resource::{AsBindGroup, ShaderType, SpecializedMeshPipelineError, RenderPipelineDescriptor};
+use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::shader::ShaderRef;
 
 use crate::coords::{ChunkCoord, CHUNK_WORLD_SIZE};
+use crate::meshing::ATTRIBUTE_CHAMFER_OFFSET;
 use crate::streaming::StreamingAnchor;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +60,9 @@ impl From<&DitherFadeExtension> for DitherFadeUniform {
     }
 }
 
+/// Shader location for the custom ChamferOffset vertex attribute.
+pub const CHAMFER_OFFSET_LOCATION: u32 = 10;
+
 impl MaterialExtension for DitherFadeExtension {
     fn vertex_shader() -> ShaderRef {
         "shaders/chunk_vertex.wgsl".into()
@@ -65,6 +70,39 @@ impl MaterialExtension for DitherFadeExtension {
 
     fn fragment_shader() -> ShaderRef {
         "shaders/dither_fade.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // Rebuild the vertex buffer layout to include our custom chamfer offset
+        // attribute. The base material already set up standard attributes (0-5).
+        // We add ATTRIBUTE_CHAMFER_OFFSET at location 10 if the mesh has it.
+        let mut attrs = vec![
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(2),
+        ];
+        if layout.0.contains(Mesh::ATTRIBUTE_UV_1) {
+            attrs.push(Mesh::ATTRIBUTE_UV_1.at_shader_location(3));
+        }
+        if layout.0.contains(Mesh::ATTRIBUTE_TANGENT) {
+            attrs.push(Mesh::ATTRIBUTE_TANGENT.at_shader_location(4));
+        }
+        if layout.0.contains(Mesh::ATTRIBUTE_COLOR) {
+            attrs.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(5));
+        }
+
+        if layout.0.contains(ATTRIBUTE_CHAMFER_OFFSET) {
+            attrs.push(ATTRIBUTE_CHAMFER_OFFSET.at_shader_location(CHAMFER_OFFSET_LOCATION));
+            descriptor.vertex.shader_defs.push("HAS_CHAMFER_OFFSET".into());
+        }
+
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
+        Ok(())
     }
 }
 

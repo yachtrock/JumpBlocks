@@ -1,12 +1,11 @@
 // Vertex shader for chunk meshes with chamfer amount control.
-// Reads the chamfer offset from vertex color (RGB) and scales it
-// by chamfer_amount (0 = flat/no chamfer, 1 = full chamfer).
-// This allows smooth fillet fade-out with distance.
+// Reads the ChamferOffset custom vertex attribute (@location(10))
+// and scales it by chamfer_amount (0 = flat, 1 = full chamfer).
 
 #import bevy_pbr::{
     mesh_bindings::mesh,
     mesh_functions,
-    forward_io::{Vertex, VertexOutput},
+    forward_io::VertexOutput,
     view_transformations::position_world_to_clip,
 }
 
@@ -20,59 +19,85 @@ struct DitherFadeUniform {
 @group(#{MATERIAL_BIND_GROUP}) @binding(200)
 var<uniform> dither_fade: DitherFadeUniform;
 
-@vertex
-fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
-    var out: VertexOutput;
-    var vertex = vertex_no_morph;
-
-    let mesh_world_from_local = mesh_functions::get_world_from_local(vertex_no_morph.instance_index);
-    var world_from_local = mesh_world_from_local;
-
-    // Chamfer offset is stored in vertex color RGB.
-    // Scale it back: at chamfer_amount=1 use authored positions (full chamfer),
-    // at chamfer_amount=0 subtract the offset to flatten.
-#ifdef VERTEX_COLORS
-    let chamfer_offset = vertex.color.xyz;
-    let undo = (1.0 - dither_fade.chamfer_amount) * chamfer_offset;
-    vertex.position = vertex.position - undo;
+// Custom vertex input that includes the chamfer offset attribute.
+struct ChunkVertex {
+    @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) index: u32,
+    @location(0) position: vec3<f32>,
+#ifdef VERTEX_NORMALS
+    @location(1) normal: vec3<f32>,
 #endif
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
+#ifdef VERTEX_TANGENTS
+    @location(4) tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(5) color: vec4<f32>,
+#endif
+#ifdef HAS_CHAMFER_OFFSET
+    @location(10) chamfer_offset: vec3<f32>,
+#endif
+};
+
+@vertex
+fn vertex(in: ChunkVertex) -> VertexOutput {
+    var out: VertexOutput;
+
+    var position = in.position;
+
+    // Scale back the chamfer offset: at chamfer_amount=1 the mesh is fully
+    // chamfered (as authored), at chamfer_amount=0 the chamfer is removed.
+#ifdef HAS_CHAMFER_OFFSET
+    let undo = (1.0 - dither_fade.chamfer_amount) * in.chamfer_offset;
+    position = position - undo;
+#endif
+
+    let mesh_world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    var world_from_local = mesh_world_from_local;
 
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
-        vertex.normal,
-        vertex_no_morph.instance_index
+        in.normal,
+        in.instance_index
     );
 #endif
 
 #ifdef VERTEX_POSITIONS
-    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
+    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(position, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
 #endif
 
 #ifdef VERTEX_UVS_A
-    out.uv = vertex.uv;
+    out.uv = in.uv;
 #endif
 #ifdef VERTEX_UVS_B
-    out.uv_b = vertex.uv_b;
+    out.uv_b = in.uv_b;
 #endif
 
 #ifdef VERTEX_TANGENTS
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         world_from_local,
-        vertex.tangent,
-        vertex_no_morph.instance_index
+        in.tangent,
+        in.instance_index
     );
 #endif
 
-    // Don't pass vertex color through — it's used for chamfer data, not actual color.
+#ifdef VERTEX_COLORS
+    out.color = in.color;
+#endif
 
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    out.instance_index = vertex_no_morph.instance_index;
+    out.instance_index = in.instance_index;
 #endif
 
 #ifdef VISIBILITY_RANGE_DITHER
     out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
-        vertex_no_morph.instance_index, mesh_world_from_local[3]);
+        in.instance_index, mesh_world_from_local[3]);
 #endif
 
     return out;
