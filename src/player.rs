@@ -74,7 +74,7 @@ fn spawn_player(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
-    spawn_point: Option<Res<SpawnPoint>>,
+    spawn_point: Res<SpawnPoint>,
 ) {
     let player_height = 1.0;
     let player_radius = 0.35;
@@ -121,7 +121,7 @@ fn spawn_player(
         LeanState::default(),
         EdgeDetectionSettings::default(),
         PrecariousEdge::default(),
-        Transform::from_translation(spawn_point.map(|s| s.0).unwrap_or(Vec3::new(0.0, 10.0, 0.0))),
+        Transform::from_translation(spawn_point.0),
         Visibility::default(),
     ));
     player.insert((
