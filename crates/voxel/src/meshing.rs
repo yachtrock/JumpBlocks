@@ -666,9 +666,15 @@ pub fn build_lod_mesh(data: &ChunkMeshData) -> Mesh {
         PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
     );
+    let n = data.positions.len();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
+    // Include zero-filled chamfer attributes so the LOD mesh has the same
+    // vertex layout as the full-res mesh. This avoids pipeline re-specialization
+    // which causes flashes during LOD transitions.
+    mesh.insert_attribute(ATTRIBUTE_CHAMFER_OFFSET, vec![[0.0f32; 3]; n]);
+    mesh.insert_attribute(ATTRIBUTE_SHARP_NORMAL, data.normals.clone());
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     // Generate tangents so IBL specular reflections match the full-res mesh.
     let _ = mesh.generate_tangents();
