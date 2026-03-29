@@ -98,8 +98,8 @@ pub struct LodConfig {
 impl Default for LodConfig {
     fn default() -> Self {
         Self {
-            full_radius: 4,
-            reduced_radius: 8,
+            full_radius: 2,
+            reduced_radius: 6,
             transition_duration: 0.4,
         }
     }
@@ -383,16 +383,7 @@ fn final_material_for_tier(
     let fade = if visible { 0.0 } else { 1.0 };
     let base_tier = if is_main { LodTier::Full } else { LodTier::Reduced };
 
-    // Use debug material handle if available and visible
-    if visible {
-        if let Some(mats) = debug_mats {
-            return match base_tier {
-                LodTier::Full => mats.full.clone(),
-                _ => mats.reduced.clone(),
-            };
-        }
-    }
-
+    // Always create a material with the correct fade value
     dither_materials.add(ChunkDitherMaterial {
         base: base_material_for_tier(base_tier, debug_mats),
         extension: DitherFadeExtension { fade },
