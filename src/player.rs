@@ -9,6 +9,7 @@ use crate::player_state::PlayerState;
 use crate::UiInputBlock;
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dSensorShape;
+use crate::world::SpawnPoint;
 use jumpblocks_voxel::streaming::StreamingAnchor;
 
 pub struct PlayerPlugin;
@@ -74,10 +75,13 @@ fn spawn_player(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
     debug_start: Option<Res<crate::DebugStart>>,
+    spawn_point: Option<Res<SpawnPoint>>,
 ) {
+    // --warp overrides everything; otherwise spawn above the island surface.
     let spawn_pos = debug_start
         .as_ref()
         .and_then(|d| d.warp)
+        .or(spawn_point.map(|s| s.0))
         .unwrap_or(Vec3::new(0.0, 10.0, 0.0));
     let player_height = 1.0;
     let player_radius = 0.35;
