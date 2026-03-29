@@ -65,6 +65,10 @@ impl MaterialExtension for DitherFadeExtension {
         "shaders/dither_fade.wgsl".into()
     }
 
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/dither_prepass.wgsl".into()
+    }
+
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
