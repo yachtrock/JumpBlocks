@@ -40,7 +40,7 @@ struct DitherFadeUniform {
     fade: f32,
 };
 
-@group(2) @binding(200)
+@group(#{MATERIAL_BIND_GROUP}) @binding(200)
 var<uniform> dither_fade: DitherFadeUniform;
 
 // 4x4 Bayer ordered dithering matrix (values 0..15, normalized to 0..1)
