@@ -122,18 +122,12 @@ fn setup_world(
                 },
                 extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },
             });
-            commands.insert_resource(ChunkMaterial(chunk_mat.clone()));
+            commands.insert_resource(ChunkMaterial(chunk_mat));
 
             // Debug materials for LOD tier visualization
             commands.insert_resource(LodDebugMaterials {
-                full: chunk_mat,
-                reduced: dither_mats.add(ChunkDitherMaterial {
-                    base: StandardMaterial {
-                        base_color: Color::srgb(0.3, 0.7, 0.9),
-                        ..default()
-                    },
-                    extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },
-                }),
+                full_color: Color::srgb(0.6, 0.5, 0.4),
+                reduced_color: Color::srgb(0.3, 0.7, 0.9),
             });
         }
     }

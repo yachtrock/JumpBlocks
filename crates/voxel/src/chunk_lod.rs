@@ -1,15 +1,14 @@
 //! LOD tier management with dither-fade transitions.
 //!
-//! Each chunk entity always has a permanent child holding the alternate LOD mesh.
-//! During transitions, both meshes are visible with complementary dither patterns.
-//! No entities are spawned or despawned during transitions.
+//! Immediate-mode: every frame, compute the desired LOD state from distance
+//! and write fade/chamfer values directly to persistent material handles.
+//! No deferred material swaps, no pipeline re-specialization races.
 //!
 //! Structure:
-//!   Chunk entity:  Mesh3d(full_res) + dither material (fade_a)
-//!     └─ LodChild: Mesh3d(lod)      + dither material (fade_b)
+//!   Chunk entity:  Mesh3d(full_res) + ChunkDitherMaterial (persistent handle)
+//!     └─ LodChild: Mesh3d(lod)      + ChunkDitherMaterial (persistent handle)
 //!
-//! At rest: one has fade=0 (visible), the other fade=1 (invisible).
-//! During crossfade: they animate toward each other over `transition_duration`.
+//! Both materials are created once and mutated in place every frame.
 
 use bevy::prelude::*;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline, MaterialPlugin};
@@ -25,19 +24,13 @@ use crate::streaming::StreamingAnchor;
 // Dither fade material
 // ---------------------------------------------------------------------------
 
-/// Type alias for the extended material used by all chunk meshes.
 pub type ChunkDitherMaterial = ExtendedMaterial<StandardMaterial, DitherFadeExtension>;
 
-/// Material extension that adds screen-space dither fading and chamfer
-/// amount control to StandardMaterial.
 #[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
 #[uniform(200, DitherFadeUniform)]
 pub struct DitherFadeExtension {
-    /// 0.0 = fully visible, 1.0 = fully invisible.
     pub fade: f32,
-    /// If true, uses the inverted dither pattern (for the incoming mesh in a crossfade).
     pub invert: bool,
-    /// 0.0 = no chamfer (flat), 1.0 = full chamfer. Smoothly reduces fillets with distance.
     pub chamfer_amount: f32,
 }
 
@@ -60,9 +53,7 @@ impl From<&DitherFadeExtension> for DitherFadeUniform {
     }
 }
 
-/// Shader location for the custom ChamferOffset vertex attribute.
 pub const CHAMFER_OFFSET_LOCATION: u32 = 10;
-/// Shader location for the custom SharpNormal vertex attribute.
 pub const SHARP_NORMAL_LOCATION: u32 = 11;
 
 impl MaterialExtension for DitherFadeExtension {
@@ -80,9 +71,6 @@ impl MaterialExtension for DitherFadeExtension {
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        // Rebuild the vertex buffer layout to include our custom chamfer offset
-        // attribute. The base material already set up standard attributes (0-5).
-        // We add ATTRIBUTE_CHAMFER_OFFSET at location 10 if the mesh has it.
         let mut attrs = vec![
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
             Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
@@ -97,7 +85,6 @@ impl MaterialExtension for DitherFadeExtension {
         if layout.0.contains(Mesh::ATTRIBUTE_COLOR) {
             attrs.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(5));
         }
-
         if layout.0.contains(ATTRIBUTE_CHAMFER_OFFSET) {
             attrs.push(ATTRIBUTE_CHAMFER_OFFSET.at_shader_location(CHAMFER_OFFSET_LOCATION));
             descriptor.vertex.shader_defs.push("HAS_CHAMFER_OFFSET".into());
@@ -106,7 +93,6 @@ impl MaterialExtension for DitherFadeExtension {
             attrs.push(ATTRIBUTE_SHARP_NORMAL.at_shader_location(SHARP_NORMAL_LOCATION));
             descriptor.vertex.shader_defs.push("HAS_SHARP_NORMAL".into());
         }
-
         descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
         Ok(())
     }
@@ -116,7 +102,6 @@ impl MaterialExtension for DitherFadeExtension {
 // Types
 // ---------------------------------------------------------------------------
 
-/// The detail tier a chunk is currently rendered at.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LodTier {
     #[default]
@@ -125,38 +110,12 @@ pub enum LodTier {
     Hidden,
 }
 
-/// The tier the LOD system has *decided* this chunk should be at.
-/// Separate from LodTier so we can animate the transition.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LodTarget {
-    #[default]
-    Full,
-    Reduced,
-    Hidden,
-}
-
-impl LodTarget {
-    pub fn as_tier(self) -> LodTier {
-        match self {
-            LodTarget::Full => LodTier::Full,
-            LodTarget::Reduced => LodTier::Reduced,
-            LodTarget::Hidden => LodTier::Hidden,
-        }
-    }
-}
-
-/// LOD configuration resource.
 #[derive(Resource, Debug, Clone)]
 pub struct LodConfig {
-    /// Chunks within this distance (in chunk units) get full detail.
     pub full_radius: i32,
-    /// Chunks within this distance get reduced LOD. Beyond this → hidden.
     pub reduced_radius: i32,
-    /// Duration of the dither crossfade in seconds.
     pub transition_duration: f32,
-    /// Distance (in chunk units) where chamfer starts fading out. Must be <= full_radius.
     pub chamfer_start: f32,
-    /// Distance (in chunk units) where chamfer is fully gone. Must be >= chamfer_start.
     pub chamfer_end: f32,
 }
 
@@ -172,124 +131,57 @@ impl Default for LodConfig {
     }
 }
 
-/// Holds the LOD mesh handles generated during meshing.
 #[derive(Component)]
 pub struct ChunkLodMesh {
     pub full_res: Option<Handle<Mesh>>,
     pub lod: Option<Handle<Mesh>>,
 }
 
-/// Permanent child entity that holds the alternate LOD mesh.
+/// Persistent material handles, created once per chunk.
+#[derive(Component)]
+pub struct ChunkLodMaterials {
+    pub main_handle: Handle<ChunkDitherMaterial>,
+    pub child_handle: Handle<ChunkDitherMaterial>,
+}
+
 #[derive(Component)]
 pub struct LodChild(pub Entity);
 
-/// Marker on the child entity so we can query it.
 #[derive(Component)]
 pub struct LodChildMarker;
 
-/// Active transition state on a chunk entity.
+/// Tracks an in-progress LOD crossfade.
 #[derive(Component)]
 pub struct LodTransition {
-    /// What we're transitioning to.
+    pub from: LodTier,
     pub to: LodTier,
-    /// Progress 0.0 → 1.0.
-    pub progress: f32,
-    /// Duration in seconds.
-    pub duration: f32,
-    /// Material handle for the main mesh (parent).
-    pub main_material: Handle<ChunkDitherMaterial>,
-    /// Material handle for the child LOD mesh.
-    pub child_material: Handle<ChunkDitherMaterial>,
+    pub blend: f32,
 }
 
-/// Optional debug materials for visualizing LOD tiers.
+/// Optional debug coloring for LOD tiers.
 #[derive(Resource)]
 pub struct LodDebugMaterials {
-    pub full: Handle<ChunkDitherMaterial>,
-    pub reduced: Handle<ChunkDitherMaterial>,
+    pub full_color: Color,
+    pub reduced_color: Color,
 }
 
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
 
-/// Assigns LodTarget based on distance to the streaming anchor.
-pub fn lod_target_assignment_system(
-    config: Res<LodConfig>,
-    anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
-    mut chunks: Query<(&ChunkCoord, &mut LodTarget)>,
-) {
-    let Ok(anchor_transform) = anchor_query.single() else {
-        return;
-    };
-    let anchor_pos = anchor_transform.translation();
-
-    for (coord, mut target) in chunks.iter_mut() {
-        let chunk_center = coord.pos.to_world_offset()
-            + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
-
-        let dist_chunks = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
-        let max_dist = dist_chunks.x.max(dist_chunks.y).max(dist_chunks.z) as i32;
-
-        let new_target = if max_dist <= config.full_radius {
-            LodTarget::Full
-        } else if max_dist <= config.reduced_radius {
-            LodTarget::Reduced
-        } else {
-            LodTarget::Hidden
-        };
-
-        if *target != new_target {
-            *target = new_target;
-        }
-    }
-}
-
-/// Updates chamfer_amount on each chunk's material based on distance.
-/// Chamfer fades from 1→0 over the chamfer_start..chamfer_end band.
-pub fn chamfer_fade_system(
-    config: Res<LodConfig>,
-    anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
-    chunks: Query<(&ChunkCoord, &MeshMaterial3d<ChunkDitherMaterial>)>,
-    mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
-) {
-    let Ok(anchor_transform) = anchor_query.single() else {
-        return;
-    };
-    let anchor_pos = anchor_transform.translation();
-    let start = config.chamfer_start;
-    let end = config.chamfer_end;
-    let range = (end - start).max(0.001);
-
-    for (coord, mat_handle) in chunks.iter() {
-        let chunk_center = coord.pos.to_world_offset()
-            + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
-
-        let dist_chunks = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
-        let max_dist = dist_chunks.x.max(dist_chunks.y).max(dist_chunks.z);
-
-        let chamfer = 1.0 - ((max_dist - start) / range).clamp(0.0, 1.0);
-
-        if let Some(mat) = dither_materials.get_mut(&mat_handle.0) {
-            mat.extension.chamfer_amount = chamfer;
-        }
-    }
-}
-
-/// Creates the permanent LodChild when a chunk first gets its meshes.
-/// The child starts invisible (fade=1).
-pub fn lod_child_setup_system(
+/// One-time setup: creates the LOD child entity and persistent material handles.
+pub fn lod_setup_system(
     mut commands: Commands,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
-    chunks: Query<(Entity, &ChunkLodMesh, &MeshMaterial3d<ChunkDitherMaterial>), Added<ChunkLodMesh>>,
+    chunks: Query<
+        (Entity, &ChunkLodMesh, &MeshMaterial3d<ChunkDitherMaterial>),
+        (Added<ChunkLodMesh>, Without<LodChild>),
+    >,
+    debug_mats: Option<Res<LodDebugMaterials>>,
 ) {
     for (entity, lod_mesh, parent_mat) in chunks.iter() {
-        let Some(ref lod_handle) = lod_mesh.lod else {
-            continue;
-        };
+        let Some(ref lod_handle) = lod_mesh.lod else { continue };
 
-        // Clone the parent's base StandardMaterial so the child has identical PBR
-        // properties (roughness, reflectance, etc.) — only the fade value differs.
         let base = dither_materials
             .get(&parent_mat.0)
             .map(|m| m.base.clone())
@@ -297,154 +189,132 @@ pub fn lod_child_setup_system(
                 base_color: Color::srgb(0.6, 0.5, 0.4),
                 ..default()
             });
-        let child_mat = dither_materials.add(ChunkDitherMaterial {
-            base,
+
+        let main_base = if let Some(ref dbg) = debug_mats {
+            StandardMaterial { base_color: dbg.full_color, ..base.clone() }
+        } else {
+            base.clone()
+        };
+        let child_base = if let Some(ref dbg) = debug_mats {
+            StandardMaterial { base_color: dbg.reduced_color, ..base }
+        } else {
+            base
+        };
+
+        let main_handle = dither_materials.add(ChunkDitherMaterial {
+            base: main_base,
+            extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },
+        });
+        let child_handle = dither_materials.add(ChunkDitherMaterial {
+            base: child_base,
             extension: DitherFadeExtension { fade: 1.0, invert: false, chamfer_amount: 0.0 },
         });
 
         let child = commands.spawn((
             LodChildMarker,
             Mesh3d(lod_handle.clone()),
-            MeshMaterial3d(child_mat),
+            MeshMaterial3d(child_handle.clone()),
             Transform::default(),
             Visibility::default(),
         )).id();
 
-        commands.entity(entity).add_child(child);
+        commands.entity(entity)
+            .insert((
+                MeshMaterial3d(main_handle.clone()),
+                ChunkLodMaterials { main_handle, child_handle },
+                LodTier::Full,
+            ))
+            .add_child(child);
         commands.entity(entity).insert(LodChild(child));
     }
 }
 
-/// Starts transitions when LodTarget differs from LodTier.
-pub fn lod_transition_start_system(
-    mut commands: Commands,
+/// Immediate-mode LOD update. Runs every frame for every chunk that has
+/// materials set up. Computes distance, desired tier, chamfer, fade values
+/// and writes them directly to the persistent material assets.
+pub fn lod_update_system(
     config: Res<LodConfig>,
-    mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
-    chunks: Query<
-        (Entity, &LodTier, &LodTarget, &LodChild),
-        (Changed<LodTarget>, Without<LodTransition>),
-    >,
-    debug_mats: Option<Res<LodDebugMaterials>>,
-) {
-    for (entity, current_tier, target, lod_child) in chunks.iter() {
-        let target_tier = target.as_tier();
-        if *current_tier == target_tier {
-            continue;
-        }
-
-        // Determine which is "main" (parent mesh) and which is "child" (LOD mesh)
-        // Parent always has full_res, child always has lod.
-        //
-        // Full → Reduced: main fades out (0→1), child fades in (1→0)
-        // Reduced → Full: main fades in (1→0), child fades out (0→1)
-        // Any → Hidden:   both fade out
-        // Hidden → Any:   appropriate one fades in
-
-        // (main_start_fade, main_invert, child_start_fade, child_invert)
-        // The outgoing mesh uses normal dither (invert=false), fading 0→1
-        // The incoming mesh uses inverted dither (invert=true), fading 1→0
-        // This ensures complementary pixel coverage at all times.
-        let (main_start, main_inv, child_start, child_inv) = match (*current_tier, target_tier) {
-            (LodTier::Full, LodTier::Reduced) => (0.0, false, 1.0, true),   // main out, child in
-            (LodTier::Reduced, LodTier::Full) => (1.0, true, 0.0, false),   // main in, child out
-            (LodTier::Full, LodTier::Hidden) => (0.0, false, 1.0, false),   // main out, child stays hidden
-            (LodTier::Reduced, LodTier::Hidden) => (1.0, false, 0.0, false),// child out, main stays hidden
-            (LodTier::Hidden, LodTier::Full) => (1.0, true, 1.0, false),    // main in from hidden
-            (LodTier::Hidden, LodTier::Reduced) => (1.0, false, 1.0, true), // child in from hidden
-            _ => continue,
-        };
-
-        let main_mat = dither_materials.add(ChunkDitherMaterial {
-            base: base_material_for_tier(LodTier::Full, &debug_mats),
-            extension: DitherFadeExtension { fade: main_start, invert: main_inv, chamfer_amount: 1.0 },
-        });
-
-        let child_mat = dither_materials.add(ChunkDitherMaterial {
-            base: base_material_for_tier(LodTier::Reduced, &debug_mats),
-            extension: DitherFadeExtension { fade: child_start, invert: child_inv, chamfer_amount: 0.0 },
-        });
-
-        // Apply crossfade materials to both meshes.
-        // Both always have Mesh3d — visibility is controlled purely by fade values.
-        commands.entity(entity).insert(MeshMaterial3d(main_mat.clone()));
-        commands.entity(lod_child.0).insert(MeshMaterial3d(child_mat.clone()));
-
-        commands.entity(entity).insert(LodTransition {
-            to: target_tier,
-            progress: 0.0,
-            duration: config.transition_duration,
-            main_material: main_mat,
-            child_material: child_mat,
-        });
-    }
-}
-
-/// Animates active LOD transitions: updates dither fade values on both meshes.
-pub fn lod_transition_update_system(
-    mut commands: Commands,
     time: Res<Time>,
+    anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
+    mut chunks: Query<(
+        Entity,
+        &ChunkCoord,
+        &ChunkLodMaterials,
+        &mut LodTier,
+        Option<&mut LodTransition>,
+    )>,
+    mut commands: Commands,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
-    mut chunks: Query<(Entity, &mut LodTransition, &mut LodTier, &LodChild)>,
-    debug_mats: Option<Res<LodDebugMaterials>>,
 ) {
+    let Ok(anchor_transform) = anchor_query.single() else { return };
+    let anchor_pos = anchor_transform.translation();
     let dt = time.delta_secs();
 
-    for (entity, mut transition, mut tier, lod_child) in chunks.iter_mut() {
-        transition.progress = (transition.progress + dt / transition.duration).min(1.0);
-        let t = transition.progress;
+    let ch_start = config.chamfer_start;
+    let ch_range = (config.chamfer_end - ch_start).max(0.001);
 
-        // Compute fade values based on transition direction
-        let (main_fade, child_fade) = match (*tier, transition.to) {
-            (LodTier::Full, LodTier::Reduced) => {
-                // main: 0→1 (fading out), child: 1→0 (fading in)
-                (t, 1.0 - t)
-            }
-            (LodTier::Reduced, LodTier::Full) => {
-                // main: 1→0 (fading in), child: 0→1 (fading out)
-                (1.0 - t, t)
-            }
-            (LodTier::Full, LodTier::Hidden) => {
-                // main: 0→1 (fading out), child stays invisible
-                (t, 1.0)
-            }
-            (LodTier::Reduced, LodTier::Hidden) => {
-                // child: 0→1 (fading out), main stays invisible
-                (1.0, t)
-            }
-            (LodTier::Hidden, LodTier::Full) => {
-                // main: 1→0 (fading in), child stays invisible
-                (1.0 - t, 1.0)
-            }
-            (LodTier::Hidden, LodTier::Reduced) => {
-                // child: 1→0 (fading in), main stays invisible
-                (1.0, 1.0 - t)
-            }
-            _ => (0.0, 1.0),
+    for (entity, coord, materials, mut tier, transition_opt) in chunks.iter_mut() {
+        let chunk_center = coord.pos.to_world_offset()
+            + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
+        let dist = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
+        let max_dist = dist.x.max(dist.y).max(dist.z);
+
+        // --- Desired tier ---
+        let desired = if (max_dist as i32) <= config.full_radius {
+            LodTier::Full
+        } else if (max_dist as i32) <= config.reduced_radius {
+            LodTier::Reduced
+        } else {
+            LodTier::Hidden
         };
 
-        // Update fade values on both materials
-        if let Some(mat) = dither_materials.get_mut(&transition.main_material) {
+        // --- Chamfer amount (only affects the main/full-res mesh) ---
+        let chamfer = 1.0 - ((max_dist - ch_start) / ch_range).clamp(0.0, 1.0);
+
+        // --- Compute fade values ---
+        let (main_fade, main_inv, child_fade, child_inv) = if desired == *tier {
+            // At rest — remove any leftover transition
+            if transition_opt.is_some() {
+                commands.entity(entity).remove::<LodTransition>();
+            }
+            rest_fades(*tier)
+        } else if let Some(mut trans) = transition_opt {
+            // Mid-transition — check if target changed
+            if trans.to != desired {
+                // Retarget: start fresh toward new desired
+                trans.from = *tier;
+                trans.to = desired;
+                trans.blend = 0.0;
+            }
+            trans.blend = (trans.blend + dt / config.transition_duration).min(1.0);
+            let result = transition_fades(trans.from, trans.to, trans.blend);
+
+            if trans.blend >= 1.0 {
+                *tier = trans.to;
+                commands.entity(entity).remove::<LodTransition>();
+            }
+            result
+        } else {
+            // Start new transition
+            commands.entity(entity).insert(LodTransition {
+                from: *tier,
+                to: desired,
+                blend: 0.0,
+            });
+            // First frame: still show current state
+            rest_fades(*tier)
+        };
+
+        // --- Write to materials ---
+        if let Some(mat) = dither_materials.get_mut(&materials.main_handle) {
             mat.extension.fade = main_fade;
+            mat.extension.invert = main_inv;
+            mat.extension.chamfer_amount = chamfer;
         }
-        if let Some(mat) = dither_materials.get_mut(&transition.child_material) {
+        if let Some(mat) = dither_materials.get_mut(&materials.child_handle) {
             mat.extension.fade = child_fade;
-        }
-
-        // Transition complete
-        if t >= 1.0 {
-            *tier = transition.to;
-
-            // Set final materials and hide the invisible mesh
-            let final_main_mat = final_material_for_tier(transition.to, true, &debug_mats, &mut dither_materials);
-            let final_child_mat = final_material_for_tier(transition.to, false, &debug_mats, &mut dither_materials);
-
-            // Set final materials with fade=0 or fade=1. No Mesh3d removal
-            // or Visibility toggling — the shader discards all fragments at fade=1.
-            commands.entity(entity)
-                .insert(MeshMaterial3d(final_main_mat))
-                .remove::<LodTransition>();
-            commands.entity(lod_child.0)
-                .insert(MeshMaterial3d(final_child_mat));
+            mat.extension.invert = child_inv;
+            mat.extension.chamfer_amount = 0.0; // LOD mesh has no chamfer data
         }
     }
 }
@@ -453,52 +323,32 @@ pub fn lod_transition_update_system(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn base_material_for_tier(
-    tier: LodTier,
-    debug_mats: &Option<Res<LodDebugMaterials>>,
-) -> StandardMaterial {
-    if debug_mats.is_some() {
-        match tier {
-            LodTier::Full => StandardMaterial {
-                base_color: Color::srgb(0.6, 0.5, 0.4),
-                ..default()
-            },
-            LodTier::Reduced | LodTier::Hidden => StandardMaterial {
-                base_color: Color::srgb(0.3, 0.7, 0.9),
-                ..default()
-            },
-        }
-    } else {
-        StandardMaterial {
-            base_color: Color::srgb(0.6, 0.5, 0.4),
-            ..default()
-        }
+/// Fade values when at rest in a given tier (no transition).
+fn rest_fades(tier: LodTier) -> (f32, bool, f32, bool) {
+    match tier {
+        LodTier::Full    => (0.0, false, 1.0, false), // main visible, child hidden
+        LodTier::Reduced => (1.0, false, 0.0, false), // main hidden, child visible
+        LodTier::Hidden  => (1.0, false, 1.0, false), // both hidden
     }
 }
 
-/// Returns the final material for a tier after transition completes.
-/// `is_main` = true for the parent (full_res mesh), false for the child (lod mesh).
-fn final_material_for_tier(
-    tier: LodTier,
-    is_main: bool,
-    debug_mats: &Option<Res<LodDebugMaterials>>,
-    dither_materials: &mut Assets<ChunkDitherMaterial>,
-) -> Handle<ChunkDitherMaterial> {
-    // Main (parent) is visible when tier == Full, child is visible when tier == Reduced
-    let visible = match tier {
-        LodTier::Full => is_main,
-        LodTier::Reduced => !is_main,
-        LodTier::Hidden => false,
-    };
-
-    let fade = if visible { 0.0 } else { 1.0 };
-    let base_tier = if is_main { LodTier::Full } else { LodTier::Reduced };
-
-    // Always create a material with the correct fade value (no invert at rest)
-    dither_materials.add(ChunkDitherMaterial {
-        base: base_material_for_tier(base_tier, debug_mats),
-        extension: DitherFadeExtension { fade, invert: false, chamfer_amount: if is_main { 1.0 } else { 0.0 } },
-    })
+/// Fade values during a transition at blend `t` (0→1).
+fn transition_fades(from: LodTier, to: LodTier, t: f32) -> (f32, bool, f32, bool) {
+    match (from, to) {
+        // Full → Reduced: main fades out (normal), child fades in (inverted)
+        (LodTier::Full, LodTier::Reduced) => (t, false, 1.0 - t, true),
+        // Reduced → Full: main fades in (inverted), child fades out (normal)
+        (LodTier::Reduced, LodTier::Full) => (1.0 - t, true, t, false),
+        // Full → Hidden: main fades out
+        (LodTier::Full, LodTier::Hidden) => (t, false, 1.0, false),
+        // Reduced → Hidden: child fades out
+        (LodTier::Reduced, LodTier::Hidden) => (1.0, false, t, false),
+        // Hidden → Full: main fades in
+        (LodTier::Hidden, LodTier::Full) => (1.0 - t, true, 1.0, false),
+        // Hidden → Reduced: child fades in
+        (LodTier::Hidden, LodTier::Reduced) => (1.0, false, 1.0 - t, true),
+        _ => rest_fades(to),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,13 +362,8 @@ impl Plugin for LodPlugin {
         app.add_plugins(MaterialPlugin::<ChunkDitherMaterial>::default())
             .init_resource::<LodConfig>()
             .add_systems(Update, (
-                lod_target_assignment_system,
-                chamfer_fade_system,
-                lod_child_setup_system,
-                lod_transition_start_system
-                    .after(lod_target_assignment_system)
-                    .after(lod_child_setup_system),
-                lod_transition_update_system.after(lod_transition_start_system),
+                lod_setup_system,
+                lod_update_system.after(lod_setup_system),
             ));
     }
 }

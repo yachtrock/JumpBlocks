@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use std::path::PathBuf;
 
 use crate::chunk::{Chunk, ChunkNeighbors};
-use crate::chunk_lod::{ChunkDitherMaterial, LodTarget, LodTier};
+use crate::chunk_lod::{ChunkDitherMaterial, LodTier};
 use crate::coords::{ChunkCoord, ChunkPos};
 use crate::world_grid::WorldGrid;
 
@@ -162,7 +162,6 @@ pub fn chunk_streaming_system(
             Chunk::new(chunk_data),
             ChunkCoord { region: active_id, pos: *pos },
             LodTier::default(),
-            LodTarget::default(),
             Transform::from_translation(*world_pos),
         ));
 
