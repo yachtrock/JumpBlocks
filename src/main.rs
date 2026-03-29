@@ -467,6 +467,7 @@ fn main() {
             jumpblocks_voxel::VoxelPlugin,
             jumpblocks_voxel::streaming::StreamingPlugin,
             jumpblocks_voxel::chunk_lod::LodPlugin,
+            jumpblocks_voxel::cluster::ClusterPlugin,
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
             action_state::ActionStatePlugin,

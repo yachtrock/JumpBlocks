@@ -1,5 +1,6 @@
 pub mod chunk;
 pub mod chunk_lod;
+pub mod cluster;
 pub mod coords;
 pub mod cut_offset_chamfer;
 pub mod meshing;
