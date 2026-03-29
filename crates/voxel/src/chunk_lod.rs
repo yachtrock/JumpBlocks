@@ -223,12 +223,12 @@ pub fn lod_transition_start_system(
     config: Res<LodConfig>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
     chunks: Query<
-        (Entity, &LodTier, &LodTarget, &LodChild),
+        (Entity, &LodTier, &LodTarget, &LodChild, &ChunkLodMesh),
         (Changed<LodTarget>, Without<LodTransition>),
     >,
     debug_mats: Option<Res<LodDebugMaterials>>,
 ) {
-    for (entity, current_tier, target, lod_child) in chunks.iter() {
+    for (entity, current_tier, target, lod_child, lod_mesh) in chunks.iter() {
         let target_tier = target.as_tier();
         if *current_tier == target_tier {
             continue;
@@ -266,7 +266,12 @@ pub fn lod_transition_start_system(
             extension: DitherFadeExtension { fade: child_start, invert: child_inv },
         });
 
-        // Apply materials and make both visible for the crossfade
+        // Make both meshes visible for the crossfade.
+        // Parent: re-insert Mesh3d in case it was removed (e.g. was in Reduced/Hidden).
+        // Child: set Visibility::Inherited so it renders.
+        if let Some(ref full_handle) = lod_mesh.full_res {
+            commands.entity(entity).insert(Mesh3d(full_handle.clone()));
+        }
         commands.entity(entity).insert(MeshMaterial3d(main_mat.clone()));
         commands.entity(lod_child.0).insert((
             MeshMaterial3d(child_mat.clone()),
@@ -345,9 +350,15 @@ pub fn lod_transition_update_system(
             let main_visible = matches!(transition.to, LodTier::Full);
             let child_visible = matches!(transition.to, LodTier::Reduced);
 
-            commands.entity(entity)
-                .insert(MeshMaterial3d(final_main_mat))
+            // Parent: remove Mesh3d to stop rendering when not the active tier.
+            // (Can't use Visibility on parent — it cascades to children.)
+            let mut ecmds = commands.entity(entity);
+            ecmds.insert(MeshMaterial3d(final_main_mat))
                 .remove::<LodTransition>();
+            if !main_visible {
+                ecmds.remove::<Mesh3d>();
+            }
+
             commands.entity(lod_child.0)
                 .insert((
                     MeshMaterial3d(final_child_mat),
