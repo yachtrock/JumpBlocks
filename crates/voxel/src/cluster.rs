@@ -154,7 +154,6 @@ pub fn cluster_management_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
     debug_mode: Res<LodDebugMode>,
-    mesh_assets: Res<Assets<Mesh>>,
 ) {
     let Ok(anchor_tf) = anchor_query.single() else { return };
     let anchor_pos = anchor_tf.translation();
@@ -224,7 +223,7 @@ pub fn cluster_management_system(
 
         // Merge LOD meshes into a single mesh
         let members = &cluster_map[key];
-        let merged = merge_lod_meshes(members, &mesh_assets);
+        let merged = merge_lod_meshes(members, &meshes);
 
         if merged.positions.is_empty() {
             continue;
