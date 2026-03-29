@@ -21,6 +21,12 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
+        // Insert default spawn point immediately so it's available even if
+        // setup_world hasn't run yet. setup_world overwrites with the real value.
+        let gen_config = IslandGenConfig::default();
+        let spawn_y = worldgen::island_spawn_height(&gen_config) + 3.0;
+        app.insert_resource(SpawnPoint(Vec3::new(0.0, spawn_y, 0.0)));
+
         app.init_resource::<WorldGrid>()
             .add_systems(Startup, setup_world)
             .add_systems(Update, attach_chunk_collision_layers);

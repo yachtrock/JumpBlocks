@@ -75,14 +75,13 @@ fn spawn_player(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
     debug_start: Option<Res<crate::DebugStart>>,
-    spawn_point: Option<Res<SpawnPoint>>,
+    spawn_point: Res<SpawnPoint>,
 ) {
     // --warp overrides everything; otherwise spawn above the island surface.
     let spawn_pos = debug_start
         .as_ref()
         .and_then(|d| d.warp)
-        .or(spawn_point.map(|s| s.0))
-        .unwrap_or(Vec3::new(0.0, 10.0, 0.0));
+        .unwrap_or(spawn_point.0);
     let player_height = 1.0;
     let player_radius = 0.35;
 
