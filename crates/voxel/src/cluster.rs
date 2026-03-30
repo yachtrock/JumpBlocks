@@ -233,8 +233,8 @@ pub fn cluster_management_system(
 
         let merged_handle = meshes.add(build_cluster_mesh(&merged));
 
-        // Compute cluster center for transform
-        let min_pos = members.iter().map(|m| m.2).reduce(|a, b| a.min(b)).unwrap();
+        // Cluster origin matches the merge origin (first member's world position)
+        let cluster_origin = members.first().map(|m| m.2).unwrap_or(Vec3::ZERO);
 
         let cluster_color = match *debug_mode {
             LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
@@ -257,7 +257,7 @@ pub fn cluster_management_system(
             },
             Mesh3d(merged_handle),
             MeshMaterial3d(mat),
-            Transform::from_translation(min_pos),
+            Transform::from_translation(cluster_origin),
             Visibility::default(),
         ));
 
