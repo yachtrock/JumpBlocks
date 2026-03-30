@@ -167,19 +167,19 @@ fn check_level_ready(
     }
 
     // We need at least one chunk to exist before we can say "ready"
-    let mut any_chunks = false;
-    let mut all_ready = true;
+    // Wait for a minimum number of chunks to be meshed, not all of them.
+    // Distant chunks will finish meshing while the player is already playing.
+    let min_ready = 8;
+    let mut ready_count = 0;
 
     for chunk in chunks.iter() {
-        any_chunks = true;
-        if chunk.state != ChunkState::Ready {
-            all_ready = false;
-            break;
+        if chunk.state == ChunkState::Ready {
+            ready_count += 1;
         }
     }
 
-    if any_chunks && all_ready {
-        info!("All chunks ready — raising the curtain");
+    if ready_count >= min_ready {
+        info!("{} chunks ready — raising the curtain", ready_count);
         curtain.chunks_ready = true;
         curtain.revealing = true;
     }

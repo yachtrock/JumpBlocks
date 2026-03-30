@@ -127,7 +127,7 @@ pub struct LodConfig {
 impl Default for LodConfig {
     fn default() -> Self {
         Self {
-            full_radius: 2,
+            full_radius: 1,
             reduced_radius: 32,
             transition_duration: 0.4,
             chamfer_start: 1.0,
