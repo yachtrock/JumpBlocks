@@ -17,7 +17,7 @@ use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::shader::ShaderRef;
 
 use crate::cluster::Clustered;
-use crate::coords::CHUNK_WORLD_SIZE;
+use crate::coords::{ChunkCoord, CHUNK_WORLD_SIZE};
 use crate::meshing::{ATTRIBUTE_CHAMFER_OFFSET, ATTRIBUTE_SHARP_NORMAL};
 use crate::streaming::StreamingAnchor;
 
@@ -251,6 +251,7 @@ pub fn lod_update_system(
     mut chunks: Query<(
         Entity,
         &GlobalTransform,
+        &ChunkCoord,
         &ChunkLodMaterials,
         &ChunkLodMesh,
         &LodChild,
@@ -269,7 +270,7 @@ pub fn lod_update_system(
     let ch_start = config.chamfer_start;
     let ch_range = (config.chamfer_end - ch_start).max(0.001);
 
-    for (entity, transform, materials, lod_mesh, lod_child, mut tier, transition_opt, clustered) in chunks.iter_mut() {
+    for (entity, transform, coord, materials, lod_mesh, lod_child, mut tier, transition_opt, clustered) in chunks.iter_mut() {
         // Skip chunks that are part of an active cluster — the cluster
         // entity handles rendering. Don't touch their materials or visibility.
         if clustered.is_some() {
@@ -333,13 +334,21 @@ pub fn lod_update_system(
         };
 
         // --- Write to materials ---
+        // Checkerboard: alternate brightness based on chunk XZ+Y parity
+        let checker = ((coord.pos.x + coord.pos.y + coord.pos.z) & 1) == 0;
+
         let normal_color = Color::srgb(0.6, 0.5, 0.4);
         let (main_color, child_color) = match *debug_mode {
             LodDebugMode::Normal => (normal_color, normal_color),
-            LodDebugMode::Tinted => (
-                normal_color,                      // LOD0: normal
-                Color::srgb(0.3, 0.5, 0.9),       // LOD1: blue
-            ),
+            LodDebugMode::Tinted => {
+                let bright = if checker { 1.0 } else { 0.7 };
+                (
+                    // LOD0: normal with checkerboard brightness
+                    Color::srgb(0.6 * bright, 0.5 * bright, 0.4 * bright),
+                    // LOD1: blue with checkerboard brightness
+                    Color::srgb(0.3 * bright, 0.5 * bright, 0.9 * bright),
+                )
+            },
         };
 
         if let Some(mat) = dither_materials.get_mut(&materials.main_handle) {
