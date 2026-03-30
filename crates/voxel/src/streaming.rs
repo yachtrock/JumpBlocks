@@ -170,7 +170,7 @@ pub fn chunk_streaming_system(
         let mut entity_commands = commands.spawn((
             Chunk::new(chunk_data),
             ChunkCoord { region: active_id, pos: *pos },
-            LodTier::default(),
+            LodTier::Reduced,
             Transform::from_translation(*world_pos),
             chunk_aabb,
         ));
