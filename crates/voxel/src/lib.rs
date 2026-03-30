@@ -127,7 +127,7 @@ fn start_chunk_meshing(
         let chunk_center = transform.translation() + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
         let dist = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();
         let max_dist = dist.x.max(dist.y).max(dist.z) as i32;
-        let needs_full = max_dist <= lod_config.full_radius + 1; // +1 for transition margin
+        let needs_full = max_dist <= lod_config.full_radius;
 
         let desired_level = if needs_full {
             MeshLevel::Full
