@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy::mesh::{Indices, PrimitiveTopology};
 
-use crate::chunk_lod::{ChunkDitherMaterial, ChunkLodMaterials, ChunkLodMesh, DitherFadeExtension, LodDebugMode, LodTier, LodConfig};
+use crate::chunk_lod::{ChunkDitherMaterial, ChunkLodMaterials, ChunkLodMesh, DitherFadeExtension, LodDebugMode, LodTier, LodConfig, LodTransition};
 use crate::coords::{ChunkCoord, ChunkPos, CHUNK_WORLD_SIZE};
 use crate::streaming::StreamingAnchor;
 
@@ -90,7 +90,7 @@ struct Member {
     has_lod_mesh: bool,
     lod_mesh_handle: Option<Handle<Mesh>>,
     tier: LodTier,
-    /// True if this chunk has block data (not an empty chunk).
+    transitioning: bool,
     has_blocks: bool,
 }
 
@@ -157,7 +157,7 @@ pub fn cluster_management_system(
     mut commands: Commands,
     config: Res<ClusterConfig>,
     anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
-    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, Option<&ChunkLodMesh>, &LodTier, Option<&Clustered>, &crate::chunk::Chunk)>,
+    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, Option<&ChunkLodMesh>, &LodTier, Option<&Clustered>, &crate::chunk::Chunk, Option<&LodTransition>)>,
     existing_clusters: Query<(Entity, &ChunkCluster)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
@@ -172,7 +172,7 @@ pub fn cluster_management_system(
     // We need to compute the region offset from the first chunk we see
     let mut region_offset: Option<Vec3> = None;
 
-    for (entity, coord, tf, lod_mesh, tier, _clustered, chunk) in chunks.iter() {
+    for (entity, coord, tf, lod_mesh, tier, _clustered, chunk, transition) in chunks.iter() {
         if region_offset.is_none() {
             region_offset = Some(tf.translation() - coord.pos.to_world_offset());
         }
@@ -184,6 +184,7 @@ pub fn cluster_management_system(
             has_lod_mesh: lod_mesh.map(|m| m.lod.is_some()).unwrap_or(false),
             lod_mesh_handle: lod_mesh.and_then(|m| m.lod.clone()),
             tier: *tier,
+            transitioning: transition.is_some(),
             has_blocks: !chunk.data.blocks.is_empty(),
         });
     }
@@ -214,14 +215,14 @@ pub fn cluster_management_system(
             continue; // Too close — render individually
         }
 
-        // Readiness check:
-        // - Every chunk with blocks must have an LOD mesh
-        // - Empty chunks (no blocks) are fine
-        // - Distance check already ensures we're far enough
-        // - At least one chunk must have geometry
+        // Cluster eligibility:
+        // - Every chunk with blocks must have an LOD mesh, be at Reduced tier,
+        //   and NOT be in an active LOD transition (to or from Full)
+        // - If ANY chunk is Full or transitioning, the whole cluster breaks apart
+        // - Empty chunks (no blocks) are always fine
         let all_ready = members.iter().all(|m| {
             if m.has_blocks {
-                m.has_lod_mesh
+                m.has_lod_mesh && m.tier == LodTier::Reduced && !m.transitioning
             } else {
                 true
             }
