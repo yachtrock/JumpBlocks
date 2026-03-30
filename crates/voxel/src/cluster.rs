@@ -90,6 +90,8 @@ struct Member {
     has_lod_mesh: bool,
     lod_mesh_handle: Option<Handle<Mesh>>,
     tier: LodTier,
+    /// True if this chunk has block data (not an empty chunk).
+    has_blocks: bool,
 }
 
 /// Collects render stats every frame.
@@ -155,7 +157,7 @@ pub fn cluster_management_system(
     mut commands: Commands,
     config: Res<ClusterConfig>,
     anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
-    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, Option<&ChunkLodMesh>, &LodTier, Option<&Clustered>)>,
+    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, Option<&ChunkLodMesh>, &LodTier, Option<&Clustered>, &crate::chunk::Chunk)>,
     existing_clusters: Query<(Entity, &ChunkCluster)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
@@ -170,7 +172,7 @@ pub fn cluster_management_system(
     // We need to compute the region offset from the first chunk we see
     let mut region_offset: Option<Vec3> = None;
 
-    for (entity, coord, tf, lod_mesh, tier, _clustered) in chunks.iter() {
+    for (entity, coord, tf, lod_mesh, tier, _clustered, chunk) in chunks.iter() {
         if region_offset.is_none() {
             region_offset = Some(tf.translation() - coord.pos.to_world_offset());
         }
@@ -182,6 +184,7 @@ pub fn cluster_management_system(
             has_lod_mesh: lod_mesh.map(|m| m.lod.is_some()).unwrap_or(false),
             lod_mesh_handle: lod_mesh.and_then(|m| m.lod.clone()),
             tier: *tier,
+            has_blocks: !chunk.data.blocks.is_empty(),
         });
     }
 
@@ -211,20 +214,20 @@ pub fn cluster_management_system(
             continue; // Too close — render individually
         }
 
-        // Check: do all members with geometry have LOD meshes and are at Reduced tier?
+        // Check readiness:
+        // - Every chunk with blocks must have an LOD mesh AND be at Reduced tier
+        // - Empty chunks (no blocks) are fine — they contribute no geometry
+        // - At least one chunk must have geometry
         let all_ready = members.iter().all(|m| {
-            // Chunks without LOD mesh are either empty or still meshing — can't cluster
-            if !m.has_lod_mesh {
-                // Accept chunks that simply have no mesh data at all (empty chunks)
-                // They contribute no geometry anyway
-                true
+            if m.has_blocks {
+                // Has block data — must have LOD mesh and be at Reduced tier
+                m.has_lod_mesh && m.tier == LodTier::Reduced
             } else {
-                // Has a mesh — must be at Reduced tier (not Full, not in transition)
-                m.tier == LodTier::Reduced
+                // Empty chunk — always OK
+                true
             }
         });
 
-        // Need at least one member with actual geometry
         let has_geometry = members.iter().any(|m| m.has_lod_mesh);
 
         if all_ready && has_geometry {
@@ -232,9 +235,24 @@ pub fn cluster_management_system(
         }
     }
 
-    // --- Step 3: Dissolve clusters that shouldn't exist ---
+    // --- Step 3: Dissolve clusters that shouldn't exist or have stale membership ---
     for (key, cluster_entity) in &current_clusters {
-        if !should_be_active.contains_key(key) {
+        let should_dissolve = if let Some(desired_members) = should_be_active.get(key) {
+            // Check if membership changed (new chunks loaded into this group)
+            if let Ok((_, cluster)) = existing_clusters.get(*cluster_entity) {
+                let mut current_set: Vec<Entity> = cluster.members.clone();
+                let mut desired_set: Vec<Entity> = desired_members.clone();
+                current_set.sort();
+                desired_set.sort();
+                current_set != desired_set
+            } else {
+                true
+            }
+        } else {
+            true // Not in desired set at all
+        };
+
+        if should_dissolve {
             if let Ok((_, cluster)) = existing_clusters.get(*cluster_entity) {
                 for &member in &cluster.members {
                     if let Ok(mut ec) = commands.get_entity(member) {
@@ -247,10 +265,14 @@ pub fn cluster_management_system(
         }
     }
 
-    // --- Step 4: Create clusters that should exist ---
+    // --- Step 4: Create clusters that should exist and don't yet ---
     for (key, member_entities) in &should_be_active {
-        if current_clusters.contains_key(key) {
-            continue; // Already exists
+        // Skip if a valid cluster already exists (wasn't dissolved in step 3)
+        if let Some(&ce) = current_clusters.get(key) {
+            if commands.get_entity(ce).is_ok() {
+                // Entity still exists (wasn't despawned) — cluster is current
+                continue;
+            }
         }
 
         let members = &groups[key];
