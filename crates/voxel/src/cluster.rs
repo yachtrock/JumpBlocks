@@ -214,16 +214,15 @@ pub fn cluster_management_system(
             continue; // Too close — render individually
         }
 
-        // Check readiness:
-        // - Every chunk with blocks must have an LOD mesh AND be at Reduced tier
-        // - Empty chunks (no blocks) are fine — they contribute no geometry
+        // Readiness check:
+        // - Every chunk with blocks must have an LOD mesh
+        // - Empty chunks (no blocks) are fine
+        // - Distance check already ensures we're far enough
         // - At least one chunk must have geometry
         let all_ready = members.iter().all(|m| {
             if m.has_blocks {
-                // Has block data — must have LOD mesh and be at Reduced tier
-                m.has_lod_mesh && m.tier == LodTier::Reduced
+                m.has_lod_mesh
             } else {
-                // Empty chunk — always OK
                 true
             }
         });
@@ -232,6 +231,17 @@ pub fn cluster_management_system(
 
         if all_ready && has_geometry {
             should_be_active.insert(*key, members.iter().map(|m| m.entity).collect());
+        } else if has_geometry && !all_ready {
+            // Debug: log why this group can't cluster
+            let not_ready: Vec<_> = members.iter()
+                .filter(|m| m.has_blocks && !m.has_lod_mesh)
+                .collect();
+            if !not_ready.is_empty() {
+                trace!(
+                    "Cluster ({},{}) blocked: {} chunks with blocks but no LOD mesh",
+                    key.cx, key.cz, not_ready.len()
+                );
+            }
         }
     }
 
