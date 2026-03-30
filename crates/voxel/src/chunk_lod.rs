@@ -16,6 +16,7 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType, SpecializedMeshPipe
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::shader::ShaderRef;
 
+use crate::cluster::Clustered;
 use crate::coords::CHUNK_WORLD_SIZE;
 use crate::meshing::{ATTRIBUTE_CHAMFER_OFFSET, ATTRIBUTE_SHARP_NORMAL};
 use crate::streaming::StreamingAnchor;
@@ -127,7 +128,7 @@ impl Default for LodConfig {
     fn default() -> Self {
         Self {
             full_radius: 2,
-            reduced_radius: 6,
+            reduced_radius: 32,
             transition_duration: 0.4,
             chamfer_start: 1.0,
             chamfer_end: 2.0,
@@ -256,6 +257,7 @@ pub fn lod_update_system(
         &LodChild,
         &mut LodTier,
         Option<&mut LodTransition>,
+        Option<&Clustered>,
     )>,
     mut child_vis: Query<&mut Visibility, With<LodChildMarker>>,
     mut commands: Commands,
@@ -268,7 +270,13 @@ pub fn lod_update_system(
     let ch_start = config.chamfer_start;
     let ch_range = (config.chamfer_end - ch_start).max(0.001);
 
-    for (entity, transform, materials, lod_mesh, lod_child, mut tier, transition_opt) in chunks.iter_mut() {
+    for (entity, transform, materials, lod_mesh, lod_child, mut tier, transition_opt, clustered) in chunks.iter_mut() {
+        // Skip chunks that are part of an active cluster — the cluster
+        // entity handles rendering. Don't touch their materials or visibility.
+        if clustered.is_some() {
+            continue;
+        }
+
         let chunk_center = transform.translation()
             + Vec3::splat(CHUNK_WORLD_SIZE * 0.5);
         let dist = ((anchor_pos - chunk_center) / CHUNK_WORLD_SIZE).abs();

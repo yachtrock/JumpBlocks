@@ -42,10 +42,10 @@ pub struct StreamingConfig {
 impl Default for StreamingConfig {
     fn default() -> Self {
         Self {
-            load_radius_xz: 8,
-            load_radius_y: 4,
-            unload_padding: 2,
-            load_budget: 4,
+            load_radius_xz: 32,
+            load_radius_y: 8,
+            unload_padding: 4,
+            load_budget: 16,
             unload_budget: 4,
         }
     }

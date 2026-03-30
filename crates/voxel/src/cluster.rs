@@ -1,9 +1,12 @@
 //! Chunk cluster system: merges distant chunks into 4×4 XZ groups
 //! for reduced draw calls at distance.
 //!
-//! When all chunks in a 4×4 XZ cluster are beyond the `reduced_radius`,
-//! their LOD meshes are merged into a single combined mesh entity.
-//! Individual chunk meshes are hidden while the cluster is active.
+//! Rules:
+//! - If all chunks in a 4×4 XZ cluster are beyond `cluster_radius` and
+//!   have LOD meshes, merge them into a single cluster entity
+//! - Clustered chunks are marked with `Clustered` and set Hidden
+//! - LOD1 only renders for chunks NOT in an active cluster
+//! - When approaching, cluster is destroyed and members are un-clustered
 
 use std::collections::HashMap;
 
@@ -17,9 +20,6 @@ use crate::streaming::StreamingAnchor;
 /// Size of a cluster in chunks along each XZ axis.
 pub const CLUSTER_SIZE: i32 = 4;
 
-/// World-space size of a cluster.
-pub const CLUSTER_WORLD_SIZE: f32 = CLUSTER_SIZE as f32 * CHUNK_WORLD_SIZE;
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -27,9 +27,7 @@ pub const CLUSTER_WORLD_SIZE: f32 = CLUSTER_SIZE as f32 * CHUNK_WORLD_SIZE;
 /// XZ cluster key — identifies a 4×4 group of chunk columns.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ClusterKey {
-    /// Cluster X index (chunk_x / CLUSTER_SIZE).
     pub cx: i32,
-    /// Cluster Z index (chunk_z / CLUSTER_SIZE).
     pub cz: i32,
 }
 
@@ -40,30 +38,25 @@ impl ClusterKey {
             cz: pos.z.div_euclid(CLUSTER_SIZE),
         }
     }
-
-    /// World-space origin of this cluster (min corner).
-    pub fn world_origin(&self, region_origin: Vec3) -> Vec3 {
-        region_origin + Vec3::new(
-            self.cx as f32 * CLUSTER_WORLD_SIZE,
-            0.0,
-            self.cz as f32 * CLUSTER_WORLD_SIZE,
-        )
-    }
 }
+
+/// Marker on chunks that are part of an active cluster.
+/// When present, the LOD system should NOT render this chunk.
+#[derive(Component)]
+pub struct Clustered;
 
 /// Component on a cluster entity.
 #[derive(Component)]
 pub struct ChunkCluster {
     pub key: ClusterKey,
-    /// Chunk entities that are part of this cluster (and currently hidden).
     pub members: Vec<Entity>,
 }
 
-/// Marker so we can query cluster entities.
+/// Marker for cluster entities.
 #[derive(Component)]
 pub struct ClusterMarker;
 
-/// Resource tracking render stats for the debug panel.
+/// Resource tracking render stats.
 #[derive(Resource, Default)]
 pub struct RenderStats {
     pub lod0_count: usize,
@@ -72,25 +65,185 @@ pub struct RenderStats {
     pub impostor_count: usize,
 }
 
-/// Config for the cluster system.
 #[derive(Resource, Debug, Clone)]
 pub struct ClusterConfig {
-    /// Minimum distance (chunk units) before clusters activate.
-    /// Should be >= reduced_radius from LodConfig.
     pub cluster_radius: i32,
 }
 
 impl Default for ClusterConfig {
     fn default() -> Self {
-        Self {
-            cluster_radius: 5,
-        }
+        Self { cluster_radius: 5 }
     }
+}
+
+struct ChunkInfo {
+    entity: Entity,
+    #[allow(dead_code)]
+    pos: ChunkPos,
+    world_pos: Vec3,
+    lod_mesh: Option<Handle<Mesh>>,
 }
 
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
+
+/// Collects render stats every frame.
+pub fn render_stats_system(
+    chunks: Query<(&LodTier, &ChunkLodMaterials, Option<&Clustered>), With<ChunkCoord>>,
+    clusters: Query<&ChunkCluster>,
+    mut stats: ResMut<RenderStats>,
+    dither_materials: Res<Assets<ChunkDitherMaterial>>,
+) {
+    let mut lod0 = 0usize;
+    let mut lod1 = 0usize;
+
+    for (tier, mats, clustered) in chunks.iter() {
+        // Clustered chunks don't render individually
+        if clustered.is_some() {
+            continue;
+        }
+
+        let main_visible = dither_materials
+            .get(&mats.main_handle)
+            .map(|m| m.extension.fade < 0.99)
+            .unwrap_or(false);
+        let child_visible = dither_materials
+            .get(&mats.child_handle)
+            .map(|m| m.extension.fade < 0.99)
+            .unwrap_or(false);
+
+        if main_visible { lod0 += 1; }
+        if child_visible { lod1 += 1; }
+    }
+
+    stats.lod0_count = lod0;
+    stats.lod1_count = lod1;
+    stats.cluster_count = clusters.iter().count();
+    stats.impostor_count = 0;
+}
+
+/// Main cluster management system.
+pub fn cluster_management_system(
+    mut commands: Commands,
+    config: Res<ClusterConfig>,
+    anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
+    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, &ChunkLodMesh, &LodTier, Option<&Clustered>)>,
+    existing_clusters: Query<(Entity, &ChunkCluster)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
+    debug_mode: Res<LodDebugMode>,
+) {
+    let Ok(anchor_tf) = anchor_query.single() else { return };
+    let anchor_pos = anchor_tf.translation();
+
+    // Group chunks by cluster key
+
+    let mut cluster_map: HashMap<ClusterKey, Vec<ChunkInfo>> = HashMap::new();
+
+    for (entity, coord, tf, lod_mesh, _tier, _clustered) in chunks.iter() {
+        let key = ClusterKey::from_chunk(coord.pos);
+        cluster_map.entry(key).or_default().push(ChunkInfo {
+            entity,
+            pos: coord.pos,
+            world_pos: tf.translation(),
+            lod_mesh: lod_mesh.lod.clone(),
+        });
+    }
+
+    // Determine which clusters should be active
+    let mut desired_clusters: HashMap<ClusterKey, Vec<Entity>> = HashMap::new();
+
+    for (key, members) in &cluster_map {
+        // All members need LOD meshes
+        if !members.iter().all(|m| m.lod_mesh.is_some()) {
+            continue;
+        }
+
+        // Check distance — use average position
+        let avg_pos = members.iter().map(|m| m.world_pos).sum::<Vec3>() / members.len() as f32;
+        let dist = ((anchor_pos - avg_pos) / CHUNK_WORLD_SIZE).abs();
+        let max_dist = dist.x.max(dist.y).max(dist.z) as i32;
+
+        if max_dist < config.cluster_radius {
+            continue;
+        }
+
+        desired_clusters.insert(*key, members.iter().map(|m| m.entity).collect());
+    }
+
+    // Build set of currently active cluster keys
+    let current_clusters: HashMap<ClusterKey, Entity> = existing_clusters
+        .iter()
+        .map(|(e, c)| (c.key, e))
+        .collect();
+
+    // Remove clusters that should no longer exist
+    for (key, cluster_entity) in &current_clusters {
+        if !desired_clusters.contains_key(key) {
+            // Un-cluster members
+            if let Ok((_, cluster)) = existing_clusters.get(*cluster_entity) {
+                for &member in &cluster.members {
+                    if let Ok(mut ec) = commands.get_entity(member) {
+                        ec.remove::<Clustered>();
+                        ec.insert(Visibility::Inherited);
+                    }
+                }
+            }
+            commands.entity(*cluster_entity).despawn();
+        }
+    }
+
+    // Create clusters that don't exist yet
+    for (key, member_entities) in &desired_clusters {
+        if current_clusters.contains_key(key) {
+            continue;
+        }
+
+        let members = &cluster_map[key];
+
+        // Merge meshes
+        let origin = members.first().map(|m| m.world_pos).unwrap_or(Vec3::ZERO);
+        let merged = merge_lod_meshes(members, origin, &meshes);
+
+        if merged.positions.is_empty() {
+            continue;
+        }
+
+        let merged_handle = meshes.add(build_cluster_mesh(&merged));
+
+        let cluster_color = match *debug_mode {
+            LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
+            LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3),
+        };
+        let mat = dither_materials.add(ChunkDitherMaterial {
+            base: StandardMaterial {
+                base_color: cluster_color,
+                ..default()
+            },
+            extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 0.0 },
+        });
+
+        commands.spawn((
+            ClusterMarker,
+            ChunkCluster {
+                key: *key,
+                members: member_entities.clone(),
+            },
+            Mesh3d(merged_handle),
+            MeshMaterial3d(mat),
+            Transform::from_translation(origin),
+            Visibility::default(),
+        ));
+
+        // Mark members as clustered and hide them
+        for &entity in member_entities {
+            if let Ok(mut ec) = commands.get_entity(entity) {
+                ec.insert((Clustered, Visibility::Hidden));
+            }
+        }
+    }
+}
 
 /// Updates cluster material colors when debug mode changes.
 pub fn cluster_debug_color_system(
@@ -112,164 +265,6 @@ pub fn cluster_debug_color_system(
     }
 }
 
-/// Collects render stats every frame.
-pub fn render_stats_system(
-    chunks: Query<(&LodTier, &ChunkLodMaterials), With<ChunkCoord>>,
-    clusters: Query<&ChunkCluster>,
-    mut stats: ResMut<RenderStats>,
-    dither_materials: Res<Assets<ChunkDitherMaterial>>,
-) {
-    let mut lod0 = 0usize;
-    let mut lod1 = 0usize;
-
-    for (tier, mats) in chunks.iter() {
-        // Check if the main mesh is actually visible (fade < 1)
-        let main_visible = dither_materials
-            .get(&mats.main_handle)
-            .map(|m| m.extension.fade < 0.99)
-            .unwrap_or(false);
-        let child_visible = dither_materials
-            .get(&mats.child_handle)
-            .map(|m| m.extension.fade < 0.99)
-            .unwrap_or(false);
-
-        if main_visible { lod0 += 1; }
-        if child_visible { lod1 += 1; }
-    }
-
-    stats.lod0_count = lod0;
-    stats.lod1_count = lod1;
-    stats.cluster_count = clusters.iter().count();
-    stats.impostor_count = 0;
-}
-
-/// Manages cluster lifecycle: creates, updates, and destroys cluster entities.
-pub fn cluster_management_system(
-    mut commands: Commands,
-    config: Res<ClusterConfig>,
-    lod_config: Res<LodConfig>,
-    anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
-    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, &ChunkLodMesh, &LodTier)>,
-    mut existing_clusters: Query<(Entity, &mut ChunkCluster)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
-    debug_mode: Res<LodDebugMode>,
-) {
-    let Ok(anchor_tf) = anchor_query.single() else { return };
-    let anchor_pos = anchor_tf.translation();
-
-    // Group chunks by cluster key
-    let mut cluster_map: HashMap<ClusterKey, Vec<(Entity, ChunkPos, Vec3, Option<Handle<Mesh>>, LodTier)>> = HashMap::new();
-
-    for (entity, coord, tf, lod_mesh, tier) in chunks.iter() {
-        let key = ClusterKey::from_chunk(coord.pos);
-        cluster_map.entry(key).or_default().push((
-            entity,
-            coord.pos,
-            tf.translation(),
-            lod_mesh.lod.clone(),
-            *tier,
-        ));
-    }
-
-    // Track which cluster keys should exist
-    let mut active_keys: HashMap<ClusterKey, Vec<Entity>> = HashMap::new();
-
-    for (key, members) in &cluster_map {
-        // Check if all members are far enough for clustering
-        let cluster_center = Vec3::new(
-            members.iter().map(|m| m.2.x).sum::<f32>() / members.len() as f32,
-            members.iter().map(|m| m.2.y).sum::<f32>() / members.len() as f32,
-            members.iter().map(|m| m.2.z).sum::<f32>() / members.len() as f32,
-        );
-        let dist = ((anchor_pos - cluster_center) / CHUNK_WORLD_SIZE).abs();
-        let max_dist = dist.x.max(dist.y).max(dist.z) as i32;
-
-        if max_dist < config.cluster_radius {
-            continue; // Too close — don't cluster
-        }
-
-        // All members need LOD meshes to merge
-        let all_have_lod = members.iter().all(|m| m.3.is_some());
-        if !all_have_lod {
-            continue;
-        }
-
-        let entities: Vec<Entity> = members.iter().map(|m| m.0).collect();
-        active_keys.insert(*key, entities);
-    }
-
-    // Remove clusters that are no longer needed
-    for (cluster_entity, cluster) in existing_clusters.iter() {
-        if !active_keys.contains_key(&cluster.key) {
-            // Un-hide member chunks
-            for &member in &cluster.members {
-                if let Ok(mut ec) = commands.get_entity(member) {
-                    ec.insert(Visibility::Inherited);
-                }
-            }
-            commands.entity(cluster_entity).despawn();
-        }
-    }
-
-    // Create or update clusters
-    let existing_keys: HashMap<ClusterKey, Entity> = existing_clusters
-        .iter()
-        .map(|(e, c)| (c.key, e))
-        .collect();
-
-    for (key, member_entities) in &active_keys {
-        if existing_keys.contains_key(key) {
-            continue; // Already exists
-        }
-
-        // Merge LOD meshes into a single mesh
-        let members = &cluster_map[key];
-        let merged = merge_lod_meshes(members, &meshes);
-
-        if merged.positions.is_empty() {
-            continue;
-        }
-
-        let merged_handle = meshes.add(build_cluster_mesh(&merged));
-
-        // Cluster origin matches the merge origin (first member's world position)
-        let cluster_origin = members.first().map(|m| m.2).unwrap_or(Vec3::ZERO);
-
-        let cluster_color = match *debug_mode {
-            LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
-            LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3), // red tint
-        };
-        let mat = dither_materials.add(ChunkDitherMaterial {
-            base: StandardMaterial {
-                base_color: cluster_color,
-                ..default()
-            },
-            extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 0.0 },
-        });
-
-        // Spawn cluster entity
-        commands.spawn((
-            ClusterMarker,
-            ChunkCluster {
-                key: *key,
-                members: member_entities.clone(),
-            },
-            Mesh3d(merged_handle),
-            MeshMaterial3d(mat),
-            Transform::from_translation(cluster_origin),
-            Visibility::default(),
-        ));
-
-        // Hide individual chunks
-        for &entity in member_entities {
-            if let Ok(mut ec) = commands.get_entity(entity) {
-                ec.insert(Visibility::Hidden);
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Mesh merging
 // ---------------------------------------------------------------------------
@@ -282,7 +277,8 @@ struct MergedMeshData {
 }
 
 fn merge_lod_meshes(
-    members: &[(Entity, ChunkPos, Vec3, Option<Handle<Mesh>>, LodTier)],
+    members: &[ChunkInfo],
+    origin: Vec3,
     mesh_assets: &Assets<Mesh>,
 ) -> MergedMeshData {
     let mut positions = Vec::new();
@@ -290,11 +286,8 @@ fn merge_lod_meshes(
     let mut uvs = Vec::new();
     let mut indices = Vec::new();
 
-    // Use the first member's position as the origin offset
-    let origin = members.first().map(|m| m.2).unwrap_or(Vec3::ZERO);
-
-    for (_, _, world_pos, mesh_handle, _) in members {
-        let Some(handle) = mesh_handle else { continue };
+    for member in members {
+        let Some(ref handle) = member.lod_mesh else { continue };
         let Some(mesh) = mesh_assets.get(handle) else { continue };
 
         let Some(pos_attr) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { continue };
@@ -307,7 +300,7 @@ fn merge_lod_meshes(
         let bevy::mesh::VertexAttributeValues::Float32x2(uv_data) = uv_attr else { continue };
 
         let base_idx = positions.len() as u32;
-        let offset = *world_pos - origin;
+        let offset = member.world_pos - origin;
 
         for p in pos_data {
             positions.push([p[0] + offset.x, p[1] + offset.y, p[2] + offset.z]);
@@ -317,14 +310,10 @@ fn merge_lod_meshes(
 
         match mesh_indices {
             Indices::U32(idx) => {
-                for &i in idx {
-                    indices.push(base_idx + i);
-                }
+                for &i in idx { indices.push(base_idx + i); }
             }
             Indices::U16(idx) => {
-                for &i in idx {
-                    indices.push(base_idx + i as u32);
-                }
+                for &i in idx { indices.push(base_idx + i as u32); }
             }
         }
     }
@@ -337,11 +326,10 @@ fn build_cluster_mesh(data: &MergedMeshData) -> Mesh {
         PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
     );
+    let n = data.positions.len();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
-    // Add zero-filled custom attributes to match chunk vertex layout
-    let n = data.positions.len();
     mesh.insert_attribute(crate::meshing::ATTRIBUTE_CHAMFER_OFFSET, vec![[0.0f32; 3]; n]);
     mesh.insert_attribute(crate::meshing::ATTRIBUTE_SHARP_NORMAL, data.normals.clone());
     mesh.insert_indices(Indices::U32(data.indices.clone()));
