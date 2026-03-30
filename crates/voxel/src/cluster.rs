@@ -1,12 +1,10 @@
-//! Chunk cluster system: merges distant chunks into 4×4 XZ groups
-//! for reduced draw calls at distance.
+//! Chunk cluster system: merges distant chunk columns into 4×4 XZ groups.
 //!
-//! Rules:
-//! - If all chunks in a 4×4 XZ cluster are beyond `cluster_radius` and
-//!   have LOD meshes, merge them into a single cluster entity
-//! - Clustered chunks are marked with `Clustered` and set Hidden
-//! - LOD1 only renders for chunks NOT in an active cluster
-//! - When approaching, cluster is destroyed and members are un-clustered
+//! Top-down rendering decision:
+//! 1. Group all chunks by 4×4 XZ cluster key
+//! 2. For each cluster: is every chunk in the group at Reduced tier?
+//!    - Yes → render the merged cluster mesh, hide all individual members
+//!    - No → render individual chunks (LOD0/LOD1 per the LOD system)
 
 use std::collections::HashMap;
 
@@ -25,6 +23,7 @@ pub const CLUSTER_SIZE: i32 = 4;
 // ---------------------------------------------------------------------------
 
 /// XZ cluster key — identifies a 4×4 group of chunk columns.
+/// Always aligned: chunk x=0..3 → cluster 0, x=4..7 → cluster 1, etc.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ClusterKey {
     pub cx: i32,
@@ -41,7 +40,6 @@ impl ClusterKey {
 }
 
 /// Marker on chunks that are part of an active cluster.
-/// When present, the LOD system should NOT render this chunk.
 #[derive(Component)]
 pub struct Clustered;
 
@@ -52,7 +50,6 @@ pub struct ChunkCluster {
     pub members: Vec<Entity>,
 }
 
-/// Marker for cluster entities.
 #[derive(Component)]
 pub struct ClusterMarker;
 
@@ -63,42 +60,37 @@ pub struct RenderStats {
     pub lod1_count: usize,
     pub cluster_count: usize,
     pub impostor_count: usize,
-    /// Chunks with full-res mesh generated.
     pub mesh_full_count: usize,
-    /// Chunks with LOD-only mesh generated.
     pub mesh_lod_only_count: usize,
-    /// Chunks with no mesh yet.
     pub mesh_none_count: usize,
-    /// Chunks currently being meshed.
     pub meshing_count: usize,
-    /// Total loaded chunk entities.
     pub total_chunks: usize,
-    /// Chunks marked as clustered.
     pub clustered_count: usize,
 }
 
 #[derive(Resource, Debug, Clone)]
 pub struct ClusterConfig {
+    /// XZ distance (in chunk units) beyond which clusters activate.
     pub cluster_radius: i32,
 }
 
 impl Default for ClusterConfig {
     fn default() -> Self {
-        Self { cluster_radius: 5 }
+        Self { cluster_radius: 3 }
     }
-}
-
-struct ChunkInfo {
-    entity: Entity,
-    #[allow(dead_code)]
-    pos: ChunkPos,
-    world_pos: Vec3,
-    lod_mesh: Option<Handle<Mesh>>,
 }
 
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
+
+struct Member {
+    entity: Entity,
+    world_pos: Vec3,
+    has_lod_mesh: bool,
+    lod_mesh_handle: Option<Handle<Mesh>>,
+    tier: LodTier,
+}
 
 /// Collects render stats every frame.
 pub fn render_stats_system(
@@ -116,8 +108,7 @@ pub fn render_stats_system(
     let mut clustered = 0usize;
     let mut meshing = 0usize;
 
-    for (tier, mats, is_clustered, mesh_level) in chunks.iter() {
-        // Count mesh levels
+    for (_tier, mats, is_clustered, mesh_level) in chunks.iter() {
         match mesh_level.copied().unwrap_or(crate::ChunkMeshLevel::None) {
             crate::ChunkMeshLevel::Full => mesh_full += 1,
             crate::ChunkMeshLevel::LodOnly => mesh_lod_only += 1,
@@ -130,24 +121,15 @@ pub fn render_stats_system(
         }
 
         if let Some(mats) = mats {
-            let main_visible = dither_materials
-                .get(&mats.main_handle)
-                .map(|m| m.extension.fade < 0.99)
-                .unwrap_or(false);
-            let child_visible = dither_materials
-                .get(&mats.child_handle)
-                .map(|m| m.extension.fade < 0.99)
-                .unwrap_or(false);
-
-            if main_visible { lod0 += 1; }
-            if child_visible { lod1 += 1; }
+            let main_vis = dither_materials.get(&mats.main_handle).map(|m| m.extension.fade < 0.99).unwrap_or(false);
+            let child_vis = dither_materials.get(&mats.child_handle).map(|m| m.extension.fade < 0.99).unwrap_or(false);
+            if main_vis { lod0 += 1; }
+            if child_vis { lod1 += 1; }
         }
     }
 
     for chunk in all_chunks.iter() {
-        if chunk.state == crate::chunk::ChunkState::Meshing {
-            meshing += 1;
-        }
+        if chunk.state == crate::chunk::ChunkState::Meshing { meshing += 1; }
     }
 
     stats.lod0_count = lod0;
@@ -162,12 +144,18 @@ pub fn render_stats_system(
     stats.clustered_count = clustered;
 }
 
-/// Main cluster management system.
+/// Unified cluster management. Runs every frame.
+///
+/// Decision tree per cluster group:
+/// 1. Compute XZ distance from anchor to cluster center
+/// 2. If close (< cluster_radius): dissolve cluster, show individual chunks
+/// 3. If far (>= cluster_radius): check if all members have LOD meshes and
+///    are at Reduced tier. If yes → activate cluster, hide members.
 pub fn cluster_management_system(
     mut commands: Commands,
     config: Res<ClusterConfig>,
     anchor_query: Query<&GlobalTransform, With<StreamingAnchor>>,
-    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, &ChunkLodMesh, &LodTier, Option<&Clustered>)>,
+    chunks: Query<(Entity, &ChunkCoord, &GlobalTransform, Option<&ChunkLodMesh>, &LodTier, Option<&Clustered>)>,
     existing_clusters: Query<(Entity, &ChunkCluster)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
@@ -176,67 +164,77 @@ pub fn cluster_management_system(
     let Ok(anchor_tf) = anchor_query.single() else { return };
     let anchor_pos = anchor_tf.translation();
 
-    // Group chunks by cluster key (4×4 XZ, all Y levels)
-    let mut cluster_map: HashMap<ClusterKey, Vec<ChunkInfo>> = HashMap::new();
+    // --- Step 1: Group all chunks by cluster key ---
 
-    for (entity, coord, tf, lod_mesh, _tier, _clustered) in chunks.iter() {
+    let mut groups: HashMap<ClusterKey, Vec<Member>> = HashMap::new();
+    // We need to compute the region offset from the first chunk we see
+    let mut region_offset: Option<Vec3> = None;
+
+    for (entity, coord, tf, lod_mesh, tier, _clustered) in chunks.iter() {
+        if region_offset.is_none() {
+            region_offset = Some(tf.translation() - coord.pos.to_world_offset());
+        }
+
         let key = ClusterKey::from_chunk(coord.pos);
-        cluster_map.entry(key).or_default().push(ChunkInfo {
+        groups.entry(key).or_default().push(Member {
             entity,
-            pos: coord.pos,
             world_pos: tf.translation(),
-            lod_mesh: lod_mesh.lod.clone(),
+            has_lod_mesh: lod_mesh.map(|m| m.lod.is_some()).unwrap_or(false),
+            lod_mesh_handle: lod_mesh.and_then(|m| m.lod.clone()),
+            tier: *tier,
         });
     }
 
-    // Determine which clusters should be active.
-    // A cluster activates when:
-    // - The 4×4 XZ column group is beyond cluster_radius
-    // - At least some members have LOD meshes (skip empty ones)
-    let mut desired_clusters: HashMap<ClusterKey, Vec<Entity>> = HashMap::new();
+    let region_off = region_offset.unwrap_or(Vec3::ZERO);
 
-    for (key, members) in &cluster_map {
-        // Only consider members that actually have geometry
-        let with_mesh: Vec<&ChunkInfo> = members.iter().filter(|m| m.lod_mesh.is_some()).collect();
-        if with_mesh.is_empty() {
-            continue;
-        }
-
-        // Distance check: use the XZ center of the cluster at y=0
-        let cluster_world_x = (key.cx as f32 * CLUSTER_SIZE as f32 + CLUSTER_SIZE as f32 * 0.5) * CHUNK_WORLD_SIZE;
-        let cluster_world_z = (key.cz as f32 * CLUSTER_SIZE as f32 + CLUSTER_SIZE as f32 * 0.5) * CHUNK_WORLD_SIZE;
-        // Use the first member's world pos to get the region offset right
-        let region_offset_y = with_mesh[0].world_pos.y - with_mesh[0].pos.y as f32 * CHUNK_WORLD_SIZE;
-        let region_offset_x = with_mesh[0].world_pos.x - with_mesh[0].pos.x as f32 * CHUNK_WORLD_SIZE;
-        let region_offset_z = with_mesh[0].world_pos.z - with_mesh[0].pos.z as f32 * CHUNK_WORLD_SIZE;
-        let cluster_center = Vec3::new(
-            region_offset_x + cluster_world_x,
-            region_offset_y,
-            region_offset_z + cluster_world_z,
-        );
-
-        let dist = ((anchor_pos - cluster_center) / CHUNK_WORLD_SIZE).abs();
-        let max_dist = dist.x.max(dist.z) as i32; // XZ distance only
-
-        if max_dist < config.cluster_radius {
-            continue;
-        }
-
-        // Include ALL members (even empty ones) so they get hidden.
-        // Only those with meshes will contribute geometry.
-        desired_clusters.insert(*key, members.iter().map(|m| m.entity).collect());
-    }
-
-    // Build set of currently active cluster keys
+    // --- Step 2: Decide per cluster group ---
     let current_clusters: HashMap<ClusterKey, Entity> = existing_clusters
         .iter()
         .map(|(e, c)| (c.key, e))
         .collect();
 
-    // Remove clusters that should no longer exist
+    let mut should_be_active: HashMap<ClusterKey, Vec<Entity>> = HashMap::new();
+
+    for (key, members) in &groups {
+        // Compute cluster center in world space (XZ center of the 4×4 group)
+        let cluster_center = region_off + Vec3::new(
+            (key.cx * CLUSTER_SIZE) as f32 * CHUNK_WORLD_SIZE + CLUSTER_SIZE as f32 * CHUNK_WORLD_SIZE * 0.5,
+            0.0,
+            (key.cz * CLUSTER_SIZE) as f32 * CHUNK_WORLD_SIZE + CLUSTER_SIZE as f32 * CHUNK_WORLD_SIZE * 0.5,
+        );
+
+        let dx = ((anchor_pos.x - cluster_center.x) / CHUNK_WORLD_SIZE).abs();
+        let dz = ((anchor_pos.z - cluster_center.z) / CHUNK_WORLD_SIZE).abs();
+        let xz_dist = dx.max(dz) as i32;
+
+        if xz_dist < config.cluster_radius {
+            continue; // Too close — render individually
+        }
+
+        // Check: do all members with geometry have LOD meshes and are at Reduced tier?
+        let all_ready = members.iter().all(|m| {
+            // Chunks without LOD mesh are either empty or still meshing — can't cluster
+            if !m.has_lod_mesh {
+                // Accept chunks that simply have no mesh data at all (empty chunks)
+                // They contribute no geometry anyway
+                true
+            } else {
+                // Has a mesh — must be at Reduced tier (not Full, not in transition)
+                m.tier == LodTier::Reduced
+            }
+        });
+
+        // Need at least one member with actual geometry
+        let has_geometry = members.iter().any(|m| m.has_lod_mesh);
+
+        if all_ready && has_geometry {
+            should_be_active.insert(*key, members.iter().map(|m| m.entity).collect());
+        }
+    }
+
+    // --- Step 3: Dissolve clusters that shouldn't exist ---
     for (key, cluster_entity) in &current_clusters {
-        if !desired_clusters.contains_key(key) {
-            // Un-cluster members
+        if !should_be_active.contains_key(key) {
             if let Ok((_, cluster)) = existing_clusters.get(*cluster_entity) {
                 for &member in &cluster.members {
                     if let Ok(mut ec) = commands.get_entity(member) {
@@ -249,18 +247,30 @@ pub fn cluster_management_system(
         }
     }
 
-    // Create clusters that don't exist yet
-    for (key, member_entities) in &desired_clusters {
+    // --- Step 4: Create clusters that should exist ---
+    for (key, member_entities) in &should_be_active {
         if current_clusters.contains_key(key) {
-            continue;
+            continue; // Already exists
         }
 
-        let members = &cluster_map[key];
+        let members = &groups[key];
 
-        // Merge meshes
-        let origin = members.first().map(|m| m.world_pos).unwrap_or(Vec3::ZERO);
+        // Compute origin for the merged mesh (min corner of the cluster in world space)
+        let origin = region_off + Vec3::new(
+            (key.cx * CLUSTER_SIZE) as f32 * CHUNK_WORLD_SIZE,
+            0.0,
+            (key.cz * CLUSTER_SIZE) as f32 * CHUNK_WORLD_SIZE,
+        );
+
+        // Find the actual min Y of member world positions for proper Y offset
+        let min_y = members.iter()
+            .filter(|m| m.has_lod_mesh)
+            .map(|m| m.world_pos.y)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(0.0);
+        let origin = Vec3::new(origin.x, min_y, origin.z);
+
         let merged = merge_lod_meshes(members, origin, &meshes);
-
         if merged.positions.is_empty() {
             continue;
         }
@@ -272,26 +282,19 @@ pub fn cluster_management_system(
             LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3),
         };
         let mat = dither_materials.add(ChunkDitherMaterial {
-            base: StandardMaterial {
-                base_color: cluster_color,
-                ..default()
-            },
+            base: StandardMaterial { base_color: cluster_color, ..default() },
             extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 0.0 },
         });
 
         commands.spawn((
             ClusterMarker,
-            ChunkCluster {
-                key: *key,
-                members: member_entities.clone(),
-            },
+            ChunkCluster { key: *key, members: member_entities.clone() },
             Mesh3d(merged_handle),
             MeshMaterial3d(mat),
             Transform::from_translation(origin),
             Visibility::default(),
         ));
 
-        // Mark members as clustered and hide them
         for &entity in member_entities {
             if let Ok(mut ec) = commands.get_entity(entity) {
                 ec.insert((Clustered, Visibility::Hidden));
@@ -306,9 +309,7 @@ pub fn cluster_debug_color_system(
     clusters: Query<&MeshMaterial3d<ChunkDitherMaterial>, With<ClusterMarker>>,
     mut dither_materials: ResMut<Assets<ChunkDitherMaterial>>,
 ) {
-    if !debug_mode.is_changed() {
-        return;
-    }
+    if !debug_mode.is_changed() { return; }
     let color = match *debug_mode {
         LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
         LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3),
@@ -332,7 +333,7 @@ struct MergedMeshData {
 }
 
 fn merge_lod_meshes(
-    members: &[ChunkInfo],
+    members: &[Member],
     origin: Vec3,
     mesh_assets: &Assets<Mesh>,
 ) -> MergedMeshData {
@@ -342,17 +343,13 @@ fn merge_lod_meshes(
     let mut indices = Vec::new();
 
     for member in members {
-        let Some(ref handle) = member.lod_mesh else { continue };
+        let Some(ref handle) = member.lod_mesh_handle else { continue };
         let Some(mesh) = mesh_assets.get(handle) else { continue };
 
-        let Some(pos_attr) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { continue };
-        let Some(norm_attr) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL) else { continue };
-        let Some(uv_attr) = mesh.attribute(Mesh::ATTRIBUTE_UV_0) else { continue };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos_data)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { continue };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(norm_data)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL) else { continue };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x2(uv_data)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0) else { continue };
         let Some(mesh_indices) = mesh.indices() else { continue };
-
-        let bevy::mesh::VertexAttributeValues::Float32x3(pos_data) = pos_attr else { continue };
-        let bevy::mesh::VertexAttributeValues::Float32x3(norm_data) = norm_attr else { continue };
-        let bevy::mesh::VertexAttributeValues::Float32x2(uv_data) = uv_attr else { continue };
 
         let base_idx = positions.len() as u32;
         let offset = member.world_pos - origin;
@@ -364,12 +361,8 @@ fn merge_lod_meshes(
         uvs.extend_from_slice(uv_data);
 
         match mesh_indices {
-            Indices::U32(idx) => {
-                for &i in idx { indices.push(base_idx + i); }
-            }
-            Indices::U16(idx) => {
-                for &i in idx { indices.push(base_idx + i as u32); }
-            }
+            Indices::U32(idx) => { for &i in idx { indices.push(base_idx + i); } }
+            Indices::U16(idx) => { for &i in idx { indices.push(base_idx + i as u32); } }
         }
     }
 
