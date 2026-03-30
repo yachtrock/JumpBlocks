@@ -29,6 +29,10 @@ pub struct IslandGenConfig {
     pub ridge_height: f32,
     /// Depth of underground fill below y=0 in cells.
     pub underground_depth: usize,
+    /// How far beyond the island to fill with flat ground (in chunks from center).
+    pub flat_extent: i32,
+    /// Height of the flat ground outside the island (in cells).
+    pub flat_height: usize,
 }
 
 impl Default for IslandGenConfig {
@@ -42,6 +46,8 @@ impl Default for IslandGenConfig {
             ridge_count: 13.0,
             ridge_height: 8.0,
             underground_depth: 16,
+            flat_extent: 16,
+            flat_height: 1,
         }
     }
 }
@@ -53,10 +59,11 @@ pub fn generate_island(region: &mut Region, config: &IslandGenConfig) -> usize {
     let center_z = REGION_XZ as f32 / 2.0;
     let radius = config.radius_chunks as f32;
 
-    let min_cx = (center_x as i32 - config.radius_chunks - 1).max(0);
-    let max_cx = (center_x as i32 + config.radius_chunks + 1).min(REGION_XZ - 1);
-    let min_cz = (center_z as i32 - config.radius_chunks - 1).max(0);
-    let max_cz = (center_z as i32 + config.radius_chunks + 1).min(REGION_XZ - 1);
+    let extent = config.radius_chunks.max(config.flat_extent) + 1;
+    let min_cx = (center_x as i32 - extent).max(0);
+    let max_cx = (center_x as i32 + extent).min(REGION_XZ - 1);
+    let min_cz = (center_z as i32 - extent).max(0);
+    let max_cz = (center_z as i32 + extent).min(REGION_XZ - 1);
 
     // First pass: compute the heightmap for every block column.
     // Stored as (cx, cz) → array of heights per block column in that chunk.
@@ -172,6 +179,11 @@ fn compute_height(
     let effective_radius = radius * bump;
 
     if dist > effective_radius {
+        // Outside island — flat ground if within flat_extent
+        let flat_radius = config.flat_extent as f32;
+        if dist <= flat_radius {
+            return config.flat_height as i32;
+        }
         return 0;
     }
 
