@@ -204,7 +204,9 @@ pub fn cluster_management_system(
         if !active_keys.contains_key(&cluster.key) {
             // Un-hide member chunks
             for &member in &cluster.members {
-                commands.entity(member).insert(Visibility::Inherited);
+                if let Ok(mut ec) = commands.get_entity(member) {
+                    ec.insert(Visibility::Inherited);
+                }
             }
             commands.entity(cluster_entity).despawn();
         }
@@ -261,7 +263,9 @@ pub fn cluster_management_system(
 
         // Hide individual chunks
         for &entity in member_entities {
-            commands.entity(entity).insert(Visibility::Hidden);
+            if let Ok(mut ec) = commands.get_entity(entity) {
+                ec.insert(Visibility::Hidden);
+            }
         }
     }
 }
