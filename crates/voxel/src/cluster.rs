@@ -63,6 +63,18 @@ pub struct RenderStats {
     pub lod1_count: usize,
     pub cluster_count: usize,
     pub impostor_count: usize,
+    /// Chunks with full-res mesh generated.
+    pub mesh_full_count: usize,
+    /// Chunks with LOD-only mesh generated.
+    pub mesh_lod_only_count: usize,
+    /// Chunks with no mesh yet.
+    pub mesh_none_count: usize,
+    /// Chunks currently being meshed.
+    pub meshing_count: usize,
+    /// Total loaded chunk entities.
+    pub total_chunks: usize,
+    /// Chunks marked as clustered.
+    pub clustered_count: usize,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -90,37 +102,64 @@ struct ChunkInfo {
 
 /// Collects render stats every frame.
 pub fn render_stats_system(
-    chunks: Query<(&LodTier, &ChunkLodMaterials, Option<&Clustered>), With<ChunkCoord>>,
+    chunks: Query<(&LodTier, Option<&ChunkLodMaterials>, Option<&Clustered>, Option<&crate::ChunkMeshLevel>), With<ChunkCoord>>,
+    all_chunks: Query<&crate::chunk::Chunk, With<ChunkCoord>>,
     clusters: Query<&ChunkCluster>,
     mut stats: ResMut<RenderStats>,
     dither_materials: Res<Assets<ChunkDitherMaterial>>,
 ) {
     let mut lod0 = 0usize;
     let mut lod1 = 0usize;
+    let mut mesh_full = 0usize;
+    let mut mesh_lod_only = 0usize;
+    let mut mesh_none = 0usize;
+    let mut clustered = 0usize;
+    let mut meshing = 0usize;
 
-    for (tier, mats, clustered) in chunks.iter() {
-        // Clustered chunks don't render individually
-        if clustered.is_some() {
+    for (tier, mats, is_clustered, mesh_level) in chunks.iter() {
+        // Count mesh levels
+        match mesh_level.copied().unwrap_or(crate::ChunkMeshLevel::None) {
+            crate::ChunkMeshLevel::Full => mesh_full += 1,
+            crate::ChunkMeshLevel::LodOnly => mesh_lod_only += 1,
+            crate::ChunkMeshLevel::None => mesh_none += 1,
+        }
+
+        if is_clustered.is_some() {
+            clustered += 1;
             continue;
         }
 
-        let main_visible = dither_materials
-            .get(&mats.main_handle)
-            .map(|m| m.extension.fade < 0.99)
-            .unwrap_or(false);
-        let child_visible = dither_materials
-            .get(&mats.child_handle)
-            .map(|m| m.extension.fade < 0.99)
-            .unwrap_or(false);
+        if let Some(mats) = mats {
+            let main_visible = dither_materials
+                .get(&mats.main_handle)
+                .map(|m| m.extension.fade < 0.99)
+                .unwrap_or(false);
+            let child_visible = dither_materials
+                .get(&mats.child_handle)
+                .map(|m| m.extension.fade < 0.99)
+                .unwrap_or(false);
 
-        if main_visible { lod0 += 1; }
-        if child_visible { lod1 += 1; }
+            if main_visible { lod0 += 1; }
+            if child_visible { lod1 += 1; }
+        }
+    }
+
+    for chunk in all_chunks.iter() {
+        if chunk.state == crate::chunk::ChunkState::Meshing {
+            meshing += 1;
+        }
     }
 
     stats.lod0_count = lod0;
     stats.lod1_count = lod1;
     stats.cluster_count = clusters.iter().count();
     stats.impostor_count = 0;
+    stats.mesh_full_count = mesh_full;
+    stats.mesh_lod_only_count = mesh_lod_only;
+    stats.mesh_none_count = mesh_none;
+    stats.meshing_count = meshing;
+    stats.total_chunks = chunks.iter().count();
+    stats.clustered_count = clustered;
 }
 
 /// Main cluster management system.

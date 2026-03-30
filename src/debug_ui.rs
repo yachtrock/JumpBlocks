@@ -212,13 +212,25 @@ fn debug_ui_system(
             ui.add(egui::Slider::new(&mut cluster_config.cluster_radius, 2..=16).text("Cluster radius"));
 
             ui.separator();
-            ui.label("Render Stats");
-            ui.label(format!("  LOD0 (full):    {}", render_stats.lod0_count));
-            ui.label(format!("  LOD1 (reduced): {}", render_stats.lod1_count));
-            ui.label(format!("  Clusters:       {}", render_stats.cluster_count));
-            ui.label(format!("  Impostors:      {}", render_stats.impostor_count));
+            ui.label("Rendering");
+            ui.label(format!("  LOD0 (chamfer):  {}", render_stats.lod0_count));
+            ui.label(format!("  LOD1 (flat):     {}", render_stats.lod1_count));
+            ui.label(format!("  Clusters:        {}", render_stats.cluster_count));
+            ui.label(format!("  Impostors:       {}", render_stats.impostor_count));
+            let draw_total = render_stats.lod0_count + render_stats.lod1_count + render_stats.cluster_count;
+            ui.label(format!("  Draw calls:      ~{}", draw_total));
 
             ui.separator();
+            ui.label("Mesh Generation");
+            ui.label(format!("  Full (chamfer):  {}", render_stats.mesh_full_count));
+            ui.label(format!("  LOD-only:        {}", render_stats.mesh_lod_only_count));
+            ui.label(format!("  No mesh:         {}", render_stats.mesh_none_count));
+            ui.label(format!("  Meshing now:     {}", render_stats.meshing_count));
+
+            ui.separator();
+            ui.label("Chunks");
+            ui.label(format!("  Total entities:  {}", render_stats.total_chunks));
+            ui.label(format!("  Clustered:       {}", render_stats.clustered_count));
             let mut full_count = 0;
             let mut reduced_count = 0;
             let mut hidden_count = 0;
@@ -229,9 +241,7 @@ fn debug_ui_system(
                     LodTier::Hidden => hidden_count += 1,
                 }
             }
-            let total = full_count + reduced_count + hidden_count;
-            ui.label(format!("Chunk entities: {} total", total));
-            ui.label(format!("  Full: {}  Reduced: {}  Hidden: {}", full_count, reduced_count, hidden_count));
+            ui.label(format!("  LOD tier: Full={}  Reduced={}  Hidden={}", full_count, reduced_count, hidden_count));
         });
 
         ui.separator();
