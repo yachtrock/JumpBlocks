@@ -76,7 +76,7 @@ pub struct ClusterConfig {
 
 impl Default for ClusterConfig {
     fn default() -> Self {
-        Self { cluster_radius: 3 }
+        Self { cluster_radius: 2 }
     }
 }
 
@@ -231,15 +231,14 @@ pub fn cluster_management_system(
 
         if all_ready && has_geometry {
             should_be_active.insert(*key, members.iter().map(|m| m.entity).collect());
-        } else if has_geometry && !all_ready {
-            // Debug: log why this group can't cluster
-            let not_ready: Vec<_> = members.iter()
-                .filter(|m| m.has_blocks && !m.has_lod_mesh)
-                .collect();
-            if !not_ready.is_empty() {
-                trace!(
-                    "Cluster ({},{}) blocked: {} chunks with blocks but no LOD mesh",
-                    key.cx, key.cz, not_ready.len()
+        } else if xz_dist >= config.cluster_radius {
+            let no_mesh_count = members.iter().filter(|m| m.has_blocks && !m.has_lod_mesh).count();
+            let total_with_blocks = members.iter().filter(|m| m.has_blocks).count();
+            let total_with_lod = members.iter().filter(|m| m.has_lod_mesh).count();
+            if no_mesh_count > 0 {
+                warn!(
+                    "Cluster ({},{}) blocked: {}/{} chunks with blocks missing LOD mesh ({} have LOD, {} members total)",
+                    key.cx, key.cz, no_mesh_count, total_with_blocks, total_with_lod, members.len()
                 );
             }
         }
