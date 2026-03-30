@@ -176,8 +176,7 @@ pub fn cluster_management_system(
     let Ok(anchor_tf) = anchor_query.single() else { return };
     let anchor_pos = anchor_tf.translation();
 
-    // Group chunks by cluster key
-
+    // Group chunks by cluster key (4×4 XZ, all Y levels)
     let mut cluster_map: HashMap<ClusterKey, Vec<ChunkInfo>> = HashMap::new();
 
     for (entity, coord, tf, lod_mesh, _tier, _clustered) in chunks.iter() {
@@ -190,24 +189,41 @@ pub fn cluster_management_system(
         });
     }
 
-    // Determine which clusters should be active
+    // Determine which clusters should be active.
+    // A cluster activates when:
+    // - The 4×4 XZ column group is beyond cluster_radius
+    // - At least some members have LOD meshes (skip empty ones)
     let mut desired_clusters: HashMap<ClusterKey, Vec<Entity>> = HashMap::new();
 
     for (key, members) in &cluster_map {
-        // All members need LOD meshes
-        if !members.iter().all(|m| m.lod_mesh.is_some()) {
+        // Only consider members that actually have geometry
+        let with_mesh: Vec<&ChunkInfo> = members.iter().filter(|m| m.lod_mesh.is_some()).collect();
+        if with_mesh.is_empty() {
             continue;
         }
 
-        // Check distance — use average position
-        let avg_pos = members.iter().map(|m| m.world_pos).sum::<Vec3>() / members.len() as f32;
-        let dist = ((anchor_pos - avg_pos) / CHUNK_WORLD_SIZE).abs();
-        let max_dist = dist.x.max(dist.y).max(dist.z) as i32;
+        // Distance check: use the XZ center of the cluster at y=0
+        let cluster_world_x = (key.cx as f32 * CLUSTER_SIZE as f32 + CLUSTER_SIZE as f32 * 0.5) * CHUNK_WORLD_SIZE;
+        let cluster_world_z = (key.cz as f32 * CLUSTER_SIZE as f32 + CLUSTER_SIZE as f32 * 0.5) * CHUNK_WORLD_SIZE;
+        // Use the first member's world pos to get the region offset right
+        let region_offset_y = with_mesh[0].world_pos.y - with_mesh[0].pos.y as f32 * CHUNK_WORLD_SIZE;
+        let region_offset_x = with_mesh[0].world_pos.x - with_mesh[0].pos.x as f32 * CHUNK_WORLD_SIZE;
+        let region_offset_z = with_mesh[0].world_pos.z - with_mesh[0].pos.z as f32 * CHUNK_WORLD_SIZE;
+        let cluster_center = Vec3::new(
+            region_offset_x + cluster_world_x,
+            region_offset_y,
+            region_offset_z + cluster_world_z,
+        );
+
+        let dist = ((anchor_pos - cluster_center) / CHUNK_WORLD_SIZE).abs();
+        let max_dist = dist.x.max(dist.z) as i32; // XZ distance only
 
         if max_dist < config.cluster_radius {
             continue;
         }
 
+        // Include ALL members (even empty ones) so they get hidden.
+        // Only those with meshes will contribute geometry.
         desired_clusters.insert(*key, members.iter().map(|m| m.entity).collect());
     }
 
