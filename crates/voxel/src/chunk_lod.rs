@@ -234,7 +234,6 @@ pub fn lod_setup_system(
             .insert((
                 MeshMaterial3d(main_handle.clone()),
                 ChunkLodMaterials { main_handle, child_handle },
-                LodTier::Full,
             ))
             .add_child(child);
         commands.entity(entity).insert(LodChild(child));
