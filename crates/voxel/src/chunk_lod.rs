@@ -335,7 +335,7 @@ pub fn lod_update_system(
 
         // --- Write to materials ---
         // Checkerboard: alternate brightness based on chunk XZ+Y parity
-        let checker = ((coord.pos.x + coord.pos.y + coord.pos.z) & 1) == 0;
+        let checker = ((coord.pos.x + coord.pos.z) & 1) == 0;
 
         let normal_color = Color::srgb(0.6, 0.5, 0.4);
         let (main_color, child_color) = match *debug_mode {
