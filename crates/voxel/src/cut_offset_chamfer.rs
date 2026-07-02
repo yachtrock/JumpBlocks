@@ -498,6 +498,41 @@ pub fn generate_cut_offset_chamfer(
                     }
                 }
             }
+            // Mixed corner (both convex and concave incident edges): no
+            // single sphere is tangent to all faces — a signed solve pushes
+            // the vertex against the concave crest and pinches.  Instead,
+            // place the vertex where the incident edges' fillet CREST LINES
+            // meet: each sharp edge's crest is the edge translated by its
+            // own push vector (already correctly signed per edge).  Least
+            // squares over crest lines:  min Σ_e |(I - d dᵀ)(δ - push_e)|².
+            if convex_edges > 0 && concave_edges > 0 {
+                let mut a = bevy::math::Mat3::ZERO;
+                let mut rhs = Vec3::ZERO;
+                let mut bis_sum = Vec3::ZERO;
+                for &(ea, eb) in &sharp_edges {
+                    if ea != v && eb != v {
+                        continue;
+                    }
+                    let ek = edge_key(ea, eb);
+                    let Some(&push) = edge_push.get(&ek) else { continue };
+                    let d = (solid.positions[eb as usize] - solid.positions[ea as usize])
+                        .normalize_or_zero();
+                    // Projector onto the plane perpendicular to the edge.
+                    let outer = bevy::math::Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+                    let proj = bevy::math::Mat3::IDENTITY - outer;
+                    a += proj;
+                    rhs += proj * push;
+                    if let Some(&bis) = edge_bisector.get(&ek) {
+                        bis_sum += bis;
+                    }
+                }
+                if a.determinant().abs() > 1e-6 {
+                    vert_push.insert(v, a.inverse() * rhs);
+                    vert_bisector.insert(v, bis_sum.normalize_or_zero());
+                }
+                continue;
+            }
+
             let sign = if convex_edges >= concave_edges { -1.0 } else { 1.0 };
 
             // Solve N δ = sign * r for the sphere center offset δ.  With a

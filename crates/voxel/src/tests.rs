@@ -1032,6 +1032,97 @@ fn debug_concave_l_shape() {
         "Expected triangles spanning into the concavity, found none");
 }
 
+// ---------------------------------------------------------------------------
+// Mixed convex/concave corner tests (3 blocks meeting at one vertex)
+// ---------------------------------------------------------------------------
+
+/// Run the "not broken" checks on a mesh with concave geometry: watertight,
+/// manifold, no coplanar overlaps, no intersecting triangles.
+fn assert_concave_mesh_clean(mesh: &ChunkMeshData, label: &str) {
+    assert_mesh_valid(mesh, label);
+    assert_no_degenerate_triangles(mesh, label);
+
+    let (boundary, _interior, non_manifold) = count_edge_sharing(mesh);
+    let overlapping = count_coplanar_overlapping_tris(mesh);
+    let intersecting = count_intersecting_triangle_pairs(mesh);
+    eprintln!("{}: boundary={}, non_manifold={}, overlaps={}, intersections={}",
+        label, boundary, non_manifold, overlapping, intersecting);
+    if boundary > 0 {
+        dump_boundary_edges(mesh, label);
+    }
+    if non_manifold > 0 {
+        dump_non_manifold_edges(mesh, label);
+    }
+    assert!(boundary == 0, "{}: {} boundary edges (holes)", label, boundary);
+    assert!(non_manifold == 0, "{}: {} non-manifold edges", label, non_manifold);
+    assert!(overlapping == 0, "{}: {} coplanar overlapping triangles", label, overlapping);
+    assert!(intersecting == 0, "{}: {} intersecting triangle pairs", label, intersecting);
+}
+
+/// Three cubes at the same level forming an L. The inner (reflex) corner is a
+/// vertex where TWO CONVEX top edges and ONE CONCAVE vertical edge meet —
+/// the classic mixed corner where 3 blocks meet at one vertex.
+#[test]
+fn mixed_corner_l_plateau() {
+    use bevy::math::Vec3;
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);   // A
+    data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1);  // B (east)
+    data.place_std(8, 14, 10, SHAPE_CUBE, Facing::North, 1);  // C (north)
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    let mesh = &result.full_res;
+
+    assert_concave_mesh_clean(mesh, "l_plateau");
+
+    // The reflex corner vertex sits at (5, 7.5, 5): tops at y=7.5, the notch
+    // is the quadrant x>5, z>5.  Mesh vertices derived from the corner must
+    // not be pushed INTO the walls (x<5 AND z<5 while near the top) — the
+    // old sphere solve pushed it diagonally into the solid, pinching the
+    // fillet against the concave edge crest which bulges outward (x,z > 5).
+    let corner = Vec3::new(5.0, 7.5, 5.0);
+    for p in &mesh.positions {
+        let v = Vec3::from_array(*p);
+        // Vertices that came from the corner vertex (within chamfer reach).
+        if (v - corner).length() < CHAMFER_WIDTH * 0.9 {
+            let pushed_into_both_walls = v.x < 4.995 && v.z < 4.995 && v.y < 7.495;
+            assert!(!pushed_into_both_walls,
+                "l_plateau: corner-derived vertex {:?} pushed into the solid (pinch)", v);
+        }
+    }
+}
+
+/// Staircase profile: two stacked cubes beside one — the concave edge's
+/// ENDPOINTS are mixed corners (2 convex + 1 concave edges each).
+#[test]
+fn mixed_corner_staircase_clean() {
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    assert_concave_mesh_clean(&result.full_res, "staircase");
+}
+
+/// The world's wedge-ramp-on-platform showcase: a platform of cubes with a
+/// wedge ramp on top.  The ramp base meets the platform rim at mixed corners.
+#[test]
+fn mixed_corner_ramp_on_platform() {
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    for bx in 0..3 {
+        for bz in 0..3 {
+            data.place_std(6 + bx * 2, 10, 14 + bz * 2, SHAPE_CUBE, Facing::North, 1);
+        }
+    }
+    for bz in 0..3 {
+        data.place_wedge(6, 11, 14 + bz * 2, Facing::West, 1);
+    }
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    assert_concave_mesh_clean(&result.full_res, "ramp_on_platform");
+}
+
 #[test]
 fn single_wedge_edge_sharing() {
     let shapes = make_shapes();
