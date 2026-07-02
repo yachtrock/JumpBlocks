@@ -44,8 +44,8 @@ fn assert_no_degenerate_triangles(mesh: &ChunkMeshData, label: &str) {
         let cross = (pb - pa).cross(pc - pa);
         let area = cross.length() * 0.5;
         assert!(area > 1e-10,
-            "{}: degenerate triangle at index {} (verts {},{},{}, area={})",
-            label, i / 3, a, b, c, area);
+            "{}: degenerate triangle at index {} (verts {},{},{}, area={}) at {:?} {:?} {:?}",
+            label, i / 3, a, b, c, area, positions[a], positions[b], positions[c]);
     }
 }
 
@@ -1123,6 +1123,70 @@ fn mixed_corner_ramp_on_platform() {
     assert_concave_mesh_clean(&result.full_res, "ramp_on_platform");
 }
 
+/// The world's rotation-test wedges sit against the wedge ramp's north wall
+/// with partial face contacts at varying heights — wedge-back-to-wedge,
+/// wedge-front-to-cube.  Reproduces the demo world's rough junctions.
+#[test]
+fn showcase_wedges_against_ramp() {
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+
+    // Ground strip under the ramp area
+    for bx in 0..8 {
+        for bz in 7..11 {
+            data.place_std(bx * 2, 0, bz * 2, SHAPE_CUBE, Facing::North, 1);
+        }
+    }
+    // Wedge ramp columns (z cells 14..19), ascending east
+    for step in 0..8usize {
+        let wedge_y = 1 + step;
+        for bz in 0..3 {
+            data.place_wedge(step * 2, wedge_y, 14 + bz * 2, Facing::East, 1);
+        }
+        for y in 1..wedge_y {
+            for bz in 0..3 {
+                data.place_std(step * 2, y, 14 + bz * 2, SHAPE_CUBE, Facing::North, 1);
+            }
+        }
+    }
+    // Rotation-test wedges against the ramp's north side
+    data.place_wedge(0, 2, 20, Facing::North, 1);
+    data.place_wedge(4, 2, 20, Facing::East, 1);
+    data.place_wedge(8, 2, 20, Facing::South, 1);
+    data.place_wedge(12, 2, 20, Facing::West, 1);
+
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    let mesh = &result.full_res;
+    assert_mesh_valid(mesh, "showcase_vs_ramp");
+    assert_no_degenerate_triangles(mesh, "showcase_vs_ramp");
+    let (boundary, _, non_manifold) = count_edge_sharing(mesh);
+    let overlapping = count_coplanar_overlapping_tris(mesh);
+    let intersecting = count_intersecting_triangle_pairs(mesh);
+    eprintln!("showcase_vs_ramp: boundary={}, non_manifold={}, overlaps={}, intersections={}",
+        boundary, non_manifold, overlapping, intersecting);
+    assert!(non_manifold == 0, "showcase_vs_ramp: {} non-manifold edges", non_manifold);
+    assert!(overlapping == 0, "showcase_vs_ramp: {} coplanar overlaps", overlapping);
+    assert!(intersecting == 0, "showcase_vs_ramp: {} intersecting pairs", intersecting);
+    // Known limitation: when a block's contact region is fully enclosed
+    // within a larger coplanar wall (donut topology), the coplanar merge
+    // can't produce a single ring and a hairline sliver (4 boundary edges)
+    // remains at one corner of the unmerged seam.
+    assert!(boundary <= 4,
+        "showcase_vs_ramp: {} boundary edges (expected <= 4, see donut-hole limitation)", boundary);
+}
+
+/// Minimal pair: a wedge whose back wall rests against another wedge one
+/// cell lower (the first showcase junction).
+#[test]
+fn wedge_back_against_lower_wedge() {
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    data.place_wedge(8, 13, 8, Facing::East, 1);
+    data.place_wedge(8, 14, 10, Facing::North, 1);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    assert_concave_mesh_clean(&result.full_res, "wedge_back_lower_wedge");
+}
+
 #[test]
 fn single_wedge_edge_sharing() {
     let shapes = make_shapes();
@@ -1268,25 +1332,14 @@ fn wedge_wall_upper_cube_face_not_culled() {
     // Place a wedge and a 2-high wall of cubes on the slope side.
     // The lower cube's face toward the wedge SHOULD be culled (behind solid base).
     // The upper cube's face toward the wedge SHOULD NOT be culled (slope exposes it).
-    //
-    // We test by comparing:
-    //   - tris with just wedge + upper cube (upper face definitely visible)
-    //   - tris with wedge + both cubes (lower face may be culled)
-    //   - tris with just wedge + lower cube (to isolate lower face culling)
     let shapes = make_shapes();
     let cube_shape = shapes.get(SHAPE_CUBE).unwrap();
     let cube_tris: usize = cube_shape.faces.iter().map(|f| f.triangles.len()).sum();
     let wedge_shape = shapes.get(SHAPE_WEDGE).unwrap();
     let wedge_tris: usize = wedge_shape.faces.iter().map(|f| f.triangles.len()).sum();
 
-    // Test each wedge facing. The slope side (front) rotates with facing:
-    //   North → slope faces +Z → wall at z+2
-    //   East  → slope faces -X → wall at x-2
-    //   South → slope faces -Z → wall at z-2
-    //   West  → slope faces +X → wall at x+2
     struct TestCase {
         facing: Facing,
-        // Offset from wedge origin to place the wall cubes
         wall_dx: i32,
         wall_dz: i32,
     }
@@ -1304,43 +1357,61 @@ fn wedge_wall_upper_cube_face_not_culled() {
         let cx = (wx as i32 + tc.wall_dx) as usize;
         let cz = (wz as i32 + tc.wall_dz) as usize;
 
-        // Wedge alone
         let mut data_wedge_only = ChunkData::new();
         data_wedge_only.place_wedge(wx, wy, wz, tc.facing, 1);
         let tris_wedge_only = lod_tri_count(&data_wedge_only);
         assert_eq!(tris_wedge_only, wedge_tris,
             "{:?}: isolated wedge should emit all faces", tc.facing);
 
-        // Wedge + upper cube only (at wedge y + 1, which is upper cell level)
         let mut data_upper = ChunkData::new();
         data_upper.place_wedge(wx, wy, wz, tc.facing, 1);
         data_upper.place_std(cx, wy + 1, cz, SHAPE_CUBE, Facing::North, 1);
         let tris_upper = lod_tri_count(&data_upper);
 
-        // The upper cube is at y=wy+1 which is the wedge's upper cell row.
-        // The wedge should NOT fully occlude the upper cube's face (slope exposes it).
-        // So the upper cube should have all 6 faces minus at most 0-1 culled by the wedge.
-        // If the upper cube face IS incorrectly culled, we'd see fewer tris than expected.
         let upper_cube_tris = tris_upper - tris_wedge_only;
-        // Upper cube should have at least cube_tris - 2 (at most 1 face = 2 tris culled by wedge top)
-        // But since wedge has no Top coverage, no face should be culled at all.
         assert_eq!(upper_cube_tris, cube_tris,
             "{:?}: upper cube next to wedge slope should have ALL faces visible (got {} tris, expected {}). \
              This means the wedge is incorrectly occluding the upper cube.",
             tc.facing, upper_cube_tris, cube_tris);
 
-        // Wedge + lower cube (at same y as wedge, bottom cell level)
         let mut data_lower = ChunkData::new();
         data_lower.place_wedge(wx, wy, wz, tc.facing, 1);
         data_lower.place_std(cx, wy, cz, SHAPE_CUBE, Facing::North, 1);
         let tris_lower = lod_tri_count(&data_lower);
 
-        // Lower cube IS behind the wedge's solid base, so its face toward the wedge
-        // SHOULD be culled (2 tris). The wedge's front face at bottom should also be
-        // culled by the cube (2 tris). So we expect 2+2=4 fewer tris.
         let expected_lower = wedge_tris + cube_tris - 4;
         assert_eq!(tris_lower, expected_lower,
             "{:?}: wedge + lower cube should have {} tris (mutual culling of 2 faces), got {}",
             tc.facing, expected_lower, tris_lower);
+    }
+}
+
+/// Ear clipping must preserve collinear T-vertices on triangle boundaries
+/// for every ring rotation — bridging over them cracks the mesh against
+/// per-sub-edge strips (regression test for the merged-face triangulation).
+#[test]
+fn ear_clip_preserves_collinear_boundary() {
+    use bevy::math::Vec3;
+    let base: Vec<Vec3> = vec![
+        Vec3::new(0.0, 0.5, 7.0), Vec3::new(0.0, 0.5, 8.0), Vec3::new(0.0, 0.5, 9.0), Vec3::new(0.0, 0.5, 10.0),
+        Vec3::new(1.0, 0.5, 10.0), Vec3::new(1.0, 0.5, 9.0), Vec3::new(1.0, 0.5, 8.0), Vec3::new(1.0, 0.5, 7.0),
+    ];
+    let normal = Vec3::new(0.0, -1.0, 0.0);
+    for rot in 0..8 {
+        for rev in [false, true] {
+            let mut ring: Vec<Vec3> = (0..8).map(|i| base[(i + rot) % 8]).collect();
+            if rev { ring.reverse(); }
+            let tris = crate::meshing::ear_clip_triangulate_public(&ring, normal);
+            assert_eq!(tris.len(), 6,
+                "rot={} rev={}: expected 6 triangles (T-verts on boundaries), got {}", rot, rev, tris.len());
+            // Every ring edge must appear in exactly one triangle.
+            for i in 0..8 {
+                let (a, b) = (i, (i + 1) % 8);
+                let count = tris.iter().filter(|t| {
+                    (0..3).any(|k| (t[k] == a && t[(k + 1) % 3] == b) || (t[k] == b && t[(k + 1) % 3] == a))
+                }).count();
+                assert_eq!(count, 1, "rot={} rev={}: ring edge {}-{} in {} triangles", rot, rev, a, b, count);
+            }
+        }
     }
 }

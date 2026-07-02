@@ -98,6 +98,8 @@ struct QuadRecord {
 }
 
 /// Emit a quad as two triangles and record it for post-push re-triangulation.
+/// Quads with coincident corners (cut points can coincide at T-vertices on
+/// contact seams) collapse to a single triangle.
 fn emit_quad(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
@@ -110,6 +112,33 @@ fn emit_quad(
     v3: Vec3,
     expected_normal: Vec3,
 ) {
+    const EPS_SQ: f32 = 1e-10;
+    let mut poly: Vec<Vec3> = Vec::with_capacity(4);
+    for v in [v0, v1, v2, v3] {
+        if poly.last().map_or(true, |l: &Vec3| l.distance_squared(v) > EPS_SQ) {
+            poly.push(v);
+        }
+    }
+    if poly.len() >= 2 && poly[0].distance_squared(*poly.last().unwrap()) <= EPS_SQ {
+        poly.pop();
+    }
+    match poly.len() {
+        0..=2 => return,
+        3 => {
+            emit_tri(positions, normals, uvs, indices, poly[0], poly[1], poly[2], expected_normal);
+            return;
+        }
+        _ => {
+            // Diagonal coincidence: a zero-width butterfly, nothing to emit.
+            if poly[0].distance_squared(poly[2]) <= EPS_SQ
+                || poly[1].distance_squared(poly[3]) <= EPS_SQ
+            {
+                return;
+            }
+        }
+    }
+    let (v0, v1, v2, v3) = (poly[0], poly[1], poly[2], poly[3]);
+
     let base = positions.len() as u32;
     positions.extend_from_slice(&[v0.into(), v1.into(), v2.into(), v3.into()]);
     let n: [f32; 3] = expected_normal.into();
@@ -194,8 +223,19 @@ pub fn generate_cut_offset_chamfer(
     // chamfer together. We union-find blocks by face-adjacency so that edges
     // between different components are suppressed.
     let block_component = {
-        // Collect unique blocks: (voxel_origin, block_size)
+        // Collect unique blocks from the chunk data — NOT from surviving
+        // faces.  Fully-occluded blocks (or blocks whose faces merged into a
+        // neighbor's) still bridge their neighbors into one component.
         let mut blocks: Vec<((usize, usize, usize), (u8, u8, u8))> = Vec::new();
+        for block in &data.blocks {
+            let Some(shape) = shapes.get(block.shape) else { continue };
+            let (ox, oy, oz) = block.origin;
+            let voxel = (ox as usize, oy as usize, oz as usize);
+            if !blocks.iter().any(|(v, _)| *v == voxel) {
+                blocks.push((voxel, shape.size));
+            }
+        }
+        // Faces may reference neighbor-chunk voxels not present in data.
         for face in &solid.faces {
             if !blocks.iter().any(|(v, _)| *v == face.voxel) {
                 blocks.push((face.voxel, face.block_size));
@@ -878,11 +918,15 @@ pub fn generate_cut_offset_chamfer(
         };
 
         // Determine which vertices will get corner patches.
+        // A collinear midpoint normally passes through untruncated, but if
+        // OTHER faces have sharp edges ending at it (e.g. a block leaning
+        // against a longer merged run), they truncate and patch there — this
+        // face must match or the boundary chains crack.
         let needs_patch: Vec<bool> = (0..n)
             .map(|i| {
                 let vi = face.verts[i];
                 chamfered_verts.contains(&vi)
-                    && !is_collinear_midpoint(i)
+                    && (!is_collinear_midpoint(i) || has_external_chamfer(i))
                     && ((prev_sharp[i] && next_sharp[i]) || has_external_chamfer(i))
             })
             .collect();
@@ -952,7 +996,7 @@ pub fn generate_cut_offset_chamfer(
             //   - both edges sharp (non-collinear), OR
             //   - vertex has external chamfering (sharp edges from other faces)
             let (outer_i, inner_i) = if needs_patch[i] {
-                let trunc = if prev_sharp[i] {
+                let trunc = if prev_sharp[i] && !is_collinear_midpoint(i) {
                     let ip = (i + n - 1) % n;
                     cuts[ip].as_ref().map_or(split_toward(i, j), |c| c.split_j)
                 } else {
@@ -965,7 +1009,7 @@ pub fn generate_cut_offset_chamfer(
 
             // --- vj end ---
             let (outer_j, inner_j) = if needs_patch[j] {
-                let trunc = if next_sharp[j] {
+                let trunc = if next_sharp[j] && !is_collinear_midpoint(j) {
                     cuts[j].as_ref().map_or(split_toward(j, i), |c| c.split_i)
                 } else {
                     split_toward(j, i)
@@ -1004,12 +1048,12 @@ pub fn generate_cut_offset_chamfer(
             let ip = (i + n - 1) % n;
             let j = (i + 1) % n;
 
-            patch_split_next[i] = Some(if prev_sharp[i] {
+            patch_split_next[i] = Some(if prev_sharp[i] && !is_collinear_midpoint(i) {
                 cuts[ip].as_ref().map_or(split_toward(i, j), |c| c.split_j)
             } else {
                 split_toward(i, j)
             });
-            patch_split_prev[i] = Some(if next_sharp[i] {
+            patch_split_prev[i] = Some(if next_sharp[i] && !is_collinear_midpoint(i) {
                 cuts[i].as_ref().map_or(split_toward(i, ip), |c| c.split_i)
             } else {
                 split_toward(i, ip)
@@ -1048,15 +1092,8 @@ pub fn generate_cut_offset_chamfer(
             // diamond-shaped gap between the split points).
             if !prev_sharp[i] {
                 if needs_patch[ip] {
-                    // Both endpoints patched — emit quad from the lower-
-                    // indexed side only to avoid double emission.
-                    if i < ip || (i == n - 1 && ip == 0) {
-                        let split_ip = patch_split_next[ip].unwrap();
-                        emit_quad(
-                            &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
-                            inner[ip], split_ip, split_on_prev_edge, inner[i], fn_,
-                        );
-                    }
+                    // Both endpoints patched — vertex ip emits this quad in
+                    // its next-edge pass; never emit from the prev side.
                 } else {
                     emit_tri(
                         &mut positions, &mut normals, &mut uvs, &mut indices,
@@ -1066,16 +1103,12 @@ pub fn generate_cut_offset_chamfer(
             }
             if !next_sharp[i] {
                 if needs_patch[j] {
-                    // Will be handled when vertex j processes its prev edge.
-                    // Only emit from one side — vertex j will handle it
-                    // unless we're the designated emitter.
-                    if i < j || (i == n - 1 && j == 0) {
-                        let split_j = patch_split_prev[j].unwrap();
-                        emit_quad(
-                            &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
-                            inner[i], split_on_next_edge, split_j, inner[j], fn_,
-                        );
-                    }
+                    // Both endpoints patched — the next side always emits.
+                    let split_j = patch_split_prev[j].unwrap();
+                    emit_quad(
+                        &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
+                        inner[i], split_on_next_edge, split_j, inner[j], fn_,
+                    );
                 } else {
                     emit_tri(
                         &mut positions, &mut normals, &mut uvs, &mut indices,
