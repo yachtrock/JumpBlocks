@@ -499,34 +499,37 @@ pub struct EdgeInfo {
 
 pub const SHARP_DOT_THRESHOLD: f32 = 0.985;
 
-/// Compute fillet offset for the center-line vertex of a chamfer strip.
-/// Places the vertex on a circular arc of radius CHAMFER_WIDTH that is
-/// tangent to both face planes at the chamfer inner vertices.
-/// Compute the fillet push: how far to push the center-line outward from the
-/// flat chamfer midpoint toward the edge, to approximate a circular arc.
-/// Returns the push vector along avg_normal.
-/// Compute the fillet push amount for a circular arc tangent to two face
-/// planes with normals `na` and `nb`.
+/// Compute the fillet push amount for a circular arc of UNIFORM radius
+/// tangent to two face planes with normals `na` and `nb`.
 ///
-/// `chamfer_width` is the SETBACK distance (how far from the edge the cut
-/// line sits along each face).  The fillet RADIUS varies by edge angle:
-///     r = setback * tan(θ/2)
+/// `radius` is the fillet radius (CHAMFER_WIDTH).  The setback (how far from
+/// the edge the cut line sits, perpendicular in each face) varies by edge
+/// angle so that the radius stays constant:
+///     setback = radius / tan(θ/2)          (see `fillet_setback_amount`)
 /// where θ is the dihedral angle.
 ///
-/// The push (distance from original edge to the arc surface):
-///     push = setback * (1 - sin(θ/2)) / cos(θ/2)
+/// The push (distance from the original edge to the arc surface, along the
+/// interior bisector) follows from the arc center sitting at radius/sin(θ/2)
+/// from the edge:
+///     push = radius * (1 - sin(θ/2)) / sin(θ/2)
 ///
-/// In terms of k = |na + nb|:  sin(θ/2) = k/2,  cos(θ/2) = √(1-(k/2)²)
-///     push = setback * (1 - k/2) / √(1 - k²/4)
-pub fn fillet_push_amount(na: Vec3, nb: Vec3, chamfer_width: f32) -> f32 {
+/// In terms of k = |na + nb|:  sin(θ/2) = k/2
+pub fn fillet_push_amount(na: Vec3, nb: Vec3, radius: f32) -> f32 {
     let k = (na + nb).length();
-    let sin_half = k / 2.0; // sin(θ/2) where θ = dihedral angle
-    let cos_half_sq = 1.0 - sin_half * sin_half;
-    if cos_half_sq < 1e-6 {
-        return 0.0; // Nearly parallel faces — no push needed.
-    }
-    let cos_half = cos_half_sq.sqrt();
-    (chamfer_width * (1.0 - sin_half) / cos_half).clamp(0.0, chamfer_width)
+    let sin_half = (k / 2.0).clamp(0.05, 1.0); // sin(θ/2), θ = dihedral angle
+    (radius * (1.0 - sin_half) / sin_half).clamp(0.0, radius * 2.0)
+}
+
+/// Compute the per-edge setback (perpendicular distance from the edge to the
+/// cut line in each face) that yields a fillet of uniform `radius`:
+///     setback = radius / tan(θ/2) = radius * cos(θ/2) / sin(θ/2)
+/// For a 90° edge this equals `radius`.  Sharper edges get larger setbacks,
+/// shallower edges smaller ones, so every rounded edge has the same radius.
+pub fn fillet_setback_amount(na: Vec3, nb: Vec3, radius: f32) -> f32 {
+    let k = (na + nb).length();
+    let sin_half = (k / 2.0).clamp(0.05, 1.0);
+    let cos_half = (1.0 - sin_half * sin_half).max(0.0).sqrt();
+    (radius * cos_half / sin_half).clamp(0.0, radius * 2.5)
 }
 
 pub fn build_edge_graph(mesh: &SolidMesh) -> HashMap<(u32, u32), EdgeInfo> {

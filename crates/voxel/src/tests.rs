@@ -937,11 +937,12 @@ fn demo_edge_sharing() {
     let intersecting = count_intersecting_triangle_pairs(&result.full_res);
     eprintln!("demo: {} coplanar overlapping, {} intersecting triangle pairs",
         overlapping, intersecting);
-    // Small number of coplanar overlaps at complex multi-block junctions (e.g. ground
-    // meeting wedge ramps) are acceptable — they're tiny same-plane triangles at chamfer
-    // seams that don't cause visible z-fighting. Simple shapes all have 0 overlaps.
-    assert!(overlapping <= 35,
-        "demo should have few coplanar overlapping triangles, got {}", overlapping);
+    assert!(overlapping == 0,
+        "demo should have no coplanar overlapping triangles, got {}", overlapping);
+    assert!(boundary == 0,
+        "demo should be watertight, got {} boundary edges", boundary);
+    assert!(non_manifold == 0,
+        "demo should have no non-manifold edges, got {}", non_manifold);
     assert!(intersecting == 0,
         "demo should have no intersecting triangles, got {}", intersecting);
 }

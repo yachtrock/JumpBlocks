@@ -33,16 +33,77 @@ fn intersect_lines_in_plane(
     Some(p1 + t * d1)
 }
 
-/// Emit a quad as two triangles.  The `expected_normal` is used to determine
-/// correct winding — the triangle normal is computed from the vertices, and
-/// if it disagrees with `expected_normal` the winding is flipped.  Also
-/// detects "bowtie" quads (vertices not in cyclic order) and switches to
-/// the v1–v3 diagonal when needed.
+/// Compute the two triangles for a quad.  Picks the diagonal (v0–v2 or
+/// v1–v3) and winding so that:
+///   - bowtie quads (vertices not in cyclic order) use the valid diagonal;
+///   - non-planar quads fold OUTWARD relative to `expected_normal` (the
+///     off-diagonal vertex behind the first triangle's plane) — quads on a
+///     convex fillet surface must fold away from the surface, not into it.
+fn quad_triangulation(
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+    v3: Vec3,
+    expected_normal: Vec3,
+    base: u32,
+) -> [u32; 6] {
+    let n02_a = (v1 - v0).cross(v2 - v0);
+    let n02_b = (v2 - v0).cross(v3 - v0);
+    let n13_a = (v2 - v1).cross(v3 - v1);
+    let n13_b = (v3 - v1).cross(v0 - v1);
+
+    let ok02 = n02_a.dot(n02_b) >= 0.0;
+    let ok13 = n13_a.dot(n13_b) >= 0.0;
+
+    // How far the opposite vertex sits IN FRONT of the outward-oriented
+    // plane of the first triangle.  Positive = convexity violation.
+    let front_dist = |n: Vec3, anchor: Vec3, other: Vec3| -> f32 {
+        let nh = n.normalize_or_zero();
+        let nh = if nh.dot(expected_normal) >= 0.0 { nh } else { -nh };
+        (other - anchor).dot(nh)
+    };
+    let front02 = front_dist(n02_a, v0, v3);
+    let front13 = front_dist(n13_a, v1, v0);
+
+    let use02 = if ok02 && ok13 {
+        front02 <= front13 + 1e-6
+    } else {
+        ok02
+    };
+
+    if use02 {
+        if n02_a.dot(expected_normal) >= 0.0 {
+            [base, base + 1, base + 2, base, base + 2, base + 3]
+        } else {
+            [base + 2, base + 1, base, base, base + 3, base + 2]
+        }
+    } else {
+        // n13_a is the normal of the first emitted triangle [v1, v2, v3].
+        if n13_a.dot(expected_normal) >= 0.0 {
+            [base + 1, base + 2, base + 3, base + 1, base + 3, base]
+        } else {
+            [base + 3, base + 2, base + 1, base, base + 3, base + 1]
+        }
+    }
+}
+
+/// A quad emitted into the mesh: where its 4 vertices and 6 indices live,
+/// plus the outward reference normal.  Quad diagonals are re-evaluated after
+/// fillet offsets are known (see `generate_cut_offset_chamfer`), since the
+/// fold direction only appears once vertices are pushed.
+struct QuadRecord {
+    base: u32,
+    index_start: usize,
+    expected_normal: Vec3,
+}
+
+/// Emit a quad as two triangles and record it for post-push re-triangulation.
 fn emit_quad(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
     indices: &mut Vec<u32>,
+    quads: &mut Vec<QuadRecord>,
     v0: Vec3,
     v1: Vec3,
     v2: Vec3,
@@ -55,32 +116,12 @@ fn emit_quad(
     normals.extend_from_slice(&[n, n, n, n]);
     uvs.extend_from_slice(&[[0.0; 2]; 4]);
 
-    // Check if the v0–v2 diagonal produces two triangles with consistent
-    // winding.  If not, the vertices form a bowtie and we need the v1–v3
-    // diagonal instead.
-    let n02_a = (v1 - v0).cross(v2 - v0);
-    let n02_b = (v2 - v0).cross(v3 - v0);
-
-    if n02_a.dot(n02_b) >= 0.0 {
-        // v0–v2 diagonal is valid.  Check winding against expected normal.
-        if n02_a.dot(expected_normal) >= 0.0 {
-            indices.extend_from_slice(&[base, base + 1, base + 2]);
-            indices.extend_from_slice(&[base, base + 2, base + 3]);
-        } else {
-            indices.extend_from_slice(&[base + 2, base + 1, base]);
-            indices.extend_from_slice(&[base, base + 3, base + 2]);
-        }
-    } else {
-        // Bowtie — use v1–v3 diagonal instead.
-        let n13 = (v0 - v1).cross(v3 - v1);
-        if n13.dot(expected_normal) >= 0.0 {
-            indices.extend_from_slice(&[base + 1, base + 2, base + 3]);
-            indices.extend_from_slice(&[base + 1, base + 3, base]);
-        } else {
-            indices.extend_from_slice(&[base + 3, base + 2, base + 1]);
-            indices.extend_from_slice(&[base, base + 3, base + 1]);
-        }
-    }
+    quads.push(QuadRecord {
+        base,
+        index_start: indices.len(),
+        expected_normal,
+    });
+    indices.extend_from_slice(&quad_triangulation(v0, v1, v2, v3, expected_normal, base));
 }
 
 /// Emit a single triangle with automatic winding correction.
@@ -119,21 +160,28 @@ fn emit_tri(
 
 /// Generate a chamfered mesh using the cut-and-offset approach.
 ///
+/// The fillet has a UNIFORM radius of `CHAMFER_WIDTH` on every edge and
+/// corner.  Each sharp edge is rounded by a cylinder of that radius tangent
+/// to both faces, and each sharp corner by a sphere tangent to all incident
+/// faces — so the setback (perpendicular distance from an edge to its cut
+/// line) varies with the dihedral angle: `setback = radius / tan(θ/2)`.
+///
 /// For each face the algorithm performs *vertex splits* along existing edges:
 ///
-/// 1. For every sharp edge on a face, each endpoint is split by sliding a copy
-///    along the *adjacent* edge by `CHAMFER_WIDTH`.  The split vertex is
-///    guaranteed to lie on an original edge of the face.
-/// 2. The split vertices on opposite ends of a sharp edge define a *cut line*
-///    across the face.
-/// 3. Where two cut lines meet (corner with two sharp edges) the intersection
+/// 1. Every sharp edge gets a *cut line* parallel to it at its per-edge
+///    setback.  Cut-line endpoints, strip truncations, and corner-patch
+///    splits lie on original edges at a per-(edge, endpoint) arc-length
+///    shared by all faces of that edge (so cross-face boundaries match).
+/// 2. Where two cut lines meet (corner with two sharp edges) the intersection
 ///    point is computed via a 2D line–line intersection in the face plane.
-/// 4. These cuts subdivide the original face into:
+/// 3. These cuts subdivide the original face into:
 ///      - **Inner polygon** (the shrunk interior)
 ///      - **Edge strips** (between each sharp edge and its cut line)
 ///      - **Corner patches** (where two strips meet at a vertex)
-/// 5. Cross-face chamfer strips bridge adjacent faces across each sharp edge,
-///    with a center-line pushed outward for a fillet profile.
+/// 4. Fillet offsets push original-edge vertices onto their edge's cylinder
+///    and original corners onto their sphere, so every emitted vertex lies
+///    exactly on the rounded surface.  Quad diagonals are then re-picked with
+///    the offsets applied so non-planar quads fold outward.
 pub fn generate_cut_offset_chamfer(
     data: &ChunkData,
     neighbors: &ChunkNeighbors,
@@ -291,10 +339,13 @@ pub fn generate_cut_offset_chamfer(
     let chamfered_verts: HashSet<u32> = vert_sharp_dirs.keys().copied().collect();
 
     // -- Precompute fillet push vectors per sharp edge and vertex ------------
-    // Each sharp edge gets a push along the bisector of its two face normals.
-    // Each sharp vertex gets an averaged push from all its incident edges.
+    // Each sharp edge gets a push along the bisector of its two face normals,
+    // plus a per-edge SETBACK so that every edge fillet has a uniform radius
+    // of CHAMFER_WIDTH regardless of dihedral angle.
+    // Each sharp vertex gets a push onto a sphere of the same radius.
     let mut edge_push: HashMap<(u32, u32), Vec3> = HashMap::new();
     let mut edge_bisector: HashMap<(u32, u32), Vec3> = HashMap::new();
+    let mut edge_setback: HashMap<(u32, u32), f32> = HashMap::new();
     for &ek in &sharp_edges {
         let Some(info) = edge_graph.get(&ek) else { continue };
         if info.faces.len() < 2 {
@@ -307,6 +358,7 @@ pub fn generate_cut_offset_chamfer(
         let nb = solid.faces[fi_b].normal;
         let avg_n = (na + nb).normalize_or_zero();
         let push_amount = fillet_push_amount(na, nb, CHAMFER_WIDTH);
+        edge_setback.insert(ek, fillet_setback_amount(na, nb, CHAMFER_WIDTH));
 
         // Detect convex vs concave using the signed dihedral angle.
         // (n1 × n2) · edge_dir gives the sine of the dihedral angle with
@@ -336,6 +388,56 @@ pub fn generate_cut_offset_chamfer(
         // Bisector always unsigned — used for surface normals (always outward).
         edge_bisector.insert(ek, avg_n);
     }
+
+    // -- Shared split arc-lengths per (edge, endpoint) ------------------------
+    // Split points (cut-line endpoints, strip truncations, corner-patch
+    // splits) lie ON original edges shared between faces.  Both faces of an
+    // edge must place them at the SAME arc-length or the mesh cracks.  For
+    // each (edge, endpoint) pair we take the max over every incident sharp
+    // edge's cut-line crossing:  arc = setback / sin(angle between edges).
+    // Edges with no request fall back to CHAMFER_WIDTH (the 90° value).
+    let split_arc: HashMap<((u32, u32), u32), f32> = {
+        let mut map: HashMap<((u32, u32), u32), f32> = HashMap::new();
+        let mut register = |sharp_v: u32, adj_v: u32, arc: f32| {
+            let e = map.entry((edge_key(sharp_v, adj_v), sharp_v)).or_insert(0.0);
+            if arc > *e {
+                *e = arc;
+            }
+        };
+        for face in &solid.faces {
+            let n = face.verts.len();
+            for i in 0..n {
+                let j = (i + 1) % n;
+                let vi = face.verts[i];
+                let vj = face.verts[j];
+                let ek = edge_key(vi, vj);
+                if !sharp_edges.contains(&ek) {
+                    continue;
+                }
+                let Some(&d) = edge_setback.get(&ek) else { continue };
+                let pi = solid.positions[vi as usize];
+                let pj = solid.positions[vj as usize];
+                let edge_dir = (pj - pi).normalize_or_zero();
+
+                // Endpoint vi: the cut line crosses the previous edge (vi→vp).
+                let vp = face.verts[(i + n - 1) % n];
+                let adj = (solid.positions[vp as usize] - pi).normalize_or_zero();
+                let sin = adj.cross(edge_dir).length();
+                if sin > 0.2 {
+                    register(vi, vp, (d / sin).min(CHAMFER_WIDTH * 2.5));
+                }
+
+                // Endpoint vj: the cut line crosses the next edge (vj→vn).
+                let vn = face.verts[(j + 1) % n];
+                let adj = (solid.positions[vn as usize] - pj).normalize_or_zero();
+                let sin = adj.cross(edge_dir).length();
+                if sin > 0.2 {
+                    register(vj, vn, (d / sin).min(CHAMFER_WIDTH * 2.5));
+                }
+            }
+        }
+        map
+    };
 
     // Per sharp vertex: compute push from a sphere of radius R tangent to
     // all incident face planes.  Direction from incident edge pushes.
@@ -398,38 +500,10 @@ pub fn generate_cut_offset_chamfer(
             }
             let sign = if convex_edges >= concave_edges { -1.0 } else { 1.0 };
 
-            // Compute effective fillet radius per face from incident edges.
-            // Each face's constraint: nj · δ = sign * rj
-            // rj = max radius of chamfered edges incident to face j.
-            let mut face_radii: Vec<f32> = vec![0.0; face_normals.len()];
-            for &(a, b) in &sharp_edges {
-                if a != v && b != v { continue; }
-                let ek = edge_key(a, b);
-                let Some(info) = edge_graph.get(&ek) else { continue };
-                if info.faces.len() < 2 { continue; }
-                let na_e = solid.faces[info.faces[0]].normal;
-                let nb_e = solid.faces[info.faces[1]].normal;
-                // Effective radius: r = setback * tan(θ/2)
-                let k = (na_e + nb_e).length();
-                let sin_half = k / 2.0;
-                let cos_half_sq = (1.0 - sin_half * sin_half).max(0.0);
-                if cos_half_sq < 1e-6 { continue; }
-                let cos_half = cos_half_sq.sqrt();
-                // tan(θ/2) = sin(θ/2) / cos(θ/2) = (k/2) / √(1 - k²/4)
-                let r_edge = r * sin_half / cos_half;
-
-                // Assign to faces that have this edge's normals
-                for &fi in &info.faces {
-                    let fn_e = solid.faces[fi].normal;
-                    for (j, fn_v) in face_normals.iter().enumerate() {
-                        if fn_e.dot(*fn_v) > 0.99 {
-                            face_radii[j] = face_radii[j].max(r_edge);
-                        }
-                    }
-                }
-            }
-
-            // Solve N δ = sign * r_vec for the sphere center offset δ.
+            // Solve N δ = sign * r for the sphere center offset δ.  With a
+            // UNIFORM fillet radius r on every edge, the corner surface is an
+            // exact sphere of radius r tangent to all incident face planes —
+            // consistent with the edge cylinders by construction.
             let delta = if face_normals.len() == 3 {
                 let n = bevy::math::Mat3::from_cols(
                     face_normals[0],
@@ -440,22 +514,23 @@ pub fn generate_cut_offset_chamfer(
                 if det.abs() < 1e-6 {
                     continue;
                 }
-                let rhs = Vec3::new(
-                    sign * face_radii[0],
-                    sign * face_radii[1],
-                    sign * face_radii[2],
-                );
-                n.inverse() * rhs
+                n.inverse() * Vec3::splat(sign * r)
+            } else if face_normals.len() == 2 {
+                // Mid-edge vertex on a straight crease: the surface is the
+                // edge CYLINDER, center at r/sin(θ/2) along the bisector.
+                // This makes the vertex push match the edge push exactly.
+                let k = (face_normals[0] + face_normals[1]).length();
+                let sin_half = (k / 2.0).clamp(0.05, 1.0);
+                avg_n * sign * (r / sin_half)
             } else {
-                // Fallback for non-3 faces: use average radius
-                let avg_r = face_radii.iter().sum::<f32>() / face_radii.len().max(1) as f32;
+                // Fallback for 4+ faces: least-squares-ish along the average.
                 let cos_a = face_normals.iter()
                     .map(|n| n.dot(avg_n))
                     .sum::<f32>() / face_normals.len() as f32;
                 let sin_sq = (1.0 - cos_a * cos_a).max(0.0);
                 if sin_sq < 1e-6 { continue; }
                 let sin_a = sin_sq.sqrt();
-                avg_n * sign * avg_r / sin_a
+                avg_n * sign * r / sin_a
             };
 
             let delta_len = delta.length();
@@ -463,13 +538,13 @@ pub fn generate_cut_offset_chamfer(
                 continue;
             }
 
-            // The vertex offset: from original to sphere surface.
-            // Use the average radius for the sphere surface distance.
-            let avg_r = face_radii.iter().sum::<f32>() / face_radii.len().max(1) as f32;
-            let offset = delta * (1.0 - avg_r / delta_len);
+            // The vertex offset: from original corner to the sphere surface.
+            let offset = delta * (1.0 - r / delta_len).max(0.0);
 
             vert_push.insert(v, offset);
-            vert_bisector.insert(v, avg_n);
+            // Exact sphere normal at the pushed point: from center toward
+            // the surface point (outward for convex, inward for concave).
+            vert_bisector.insert(v, (delta * sign).normalize_or_zero());
         }
     }
 
@@ -491,6 +566,8 @@ pub fn generate_cut_offset_chamfer(
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut chamfer_offsets: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    // Emitted quads, re-triangulated after fillet offsets are known.
+    let mut quads: Vec<QuadRecord> = Vec::new();
     // Component tag per emitted vertex — used to prevent cross-component
     // fillet push contamination at split vertices.
     let mut emitted_comp: Vec<usize> = Vec::new();
@@ -526,21 +603,37 @@ pub fn generate_cut_offset_chamfer(
             next_sharp[i] = sharp_edges.contains(&edge_key(vi, vn));
         }
 
-        // Split vertex: slide vi along an adjacent edge by CHAMFER_WIDTH.
-        // Split vertex vi by sliding toward target along the adjacent edge.
-        // Returns the split position.
-        let split_toward = |i: usize, target_idx: usize| -> Vec3 {
-            let dir = (orig[target_idx] - orig[i]).normalize_or_zero();
-            orig[i] + dir * CHAMFER_WIDTH
+        // Per-edge setback: distance from a sharp edge to its cut line.
+        let setback_of = |a: usize, b: usize| -> f32 {
+            edge_setback
+                .get(&edge_key(face.verts[a], face.verts[b]))
+                .copied()
+                .unwrap_or(CHAMFER_WIDTH)
         };
 
-        // Perpendicular offset of vertex i from the sharp edge i→j (or ip→i),
-        // used when the adjacent edge is collinear with the sharp edge (midpoint
-        // vertex) so there is no non-parallel edge to split along.
+        // Shared split arc-length from vertex i along the edge toward target.
+        let arc_of = |i: usize, target_idx: usize| -> f32 {
+            split_arc
+                .get(&(edge_key(face.verts[i], face.verts[target_idx]), face.verts[i]))
+                .copied()
+                .unwrap_or(CHAMFER_WIDTH)
+        };
+
+        // Split vertex vi by sliding toward target along the adjacent edge.
+        // Uses the shared per-(edge, endpoint) arc-length so both faces of
+        // the edge place the split at the same position.
+        let split_toward = |i: usize, target_idx: usize| -> Vec3 {
+            let dir = (orig[target_idx] - orig[i]).normalize_or_zero();
+            orig[i] + dir * arc_of(i, target_idx)
+        };
+
+        // Point at the sharp edge's exact cut line: perpendicular offset of
+        // vertex i from the edge (edge_start→edge_end) by that edge's setback.
+        // Used for exact cut lines and for collinear midpoint vertices.
         let perp_offset = |i: usize, edge_start: usize, edge_end: usize| -> Vec3 {
             let edge_dir = (orig[edge_end] - orig[edge_start]).normalize_or_zero();
             let inward = edge_dir.cross(fn_).normalize_or_zero();
-            orig[i] + inward * CHAMFER_WIDTH
+            orig[i] + inward * setback_of(edge_start, edge_end)
         };
 
         // Check if the adjacent edge at vertex i (toward target_idx) is
@@ -664,22 +757,31 @@ pub fn generate_cut_offset_chamfer(
                 let next_dir = (orig[j] - orig[i]).normalize_or_zero();
                 if prev_dir.dot(next_dir).abs() > 0.99 {
                     let inward = prev_dir.cross(fn_).normalize_or_zero();
-                    inner.push(orig[i] + inward * CHAMFER_WIDTH);
+                    inner.push(orig[i] + inward * setback_of(ip, i));
                     continue;
                 }
             }
 
             if needs_full_offset {
-                // Full intersection of cut lines from both edges.
+                // Full intersection of the cut lines from both edges.  Sharp
+                // edges use their EXACT cut line (parallel at the per-edge
+                // setback); non-sharp edges (external chamfer) use a pseudo
+                // cut through the shared split point on the opposite edge.
                 let d_prev = (orig[i] - orig[ip]).normalize_or_zero();
                 let d_next = (orig[j] - orig[i]).normalize_or_zero();
 
-                let sp = if prev_sharp[i] && is_collinear(i, ip, i, j) {
+                // Point on the NEXT edge's cut line (parallel to d_next).
+                let sp = if next_sharp[i] {
+                    perp_offset(i, i, j)
+                } else if is_collinear(i, ip, i, j) {
                     perp_offset(i, i, j)
                 } else {
                     split_toward(i, ip)
                 };
-                let sn = if next_sharp[i] && is_collinear(i, j, ip, i) {
+                // Point on the PREV edge's cut line (parallel to d_prev).
+                let sn = if prev_sharp[i] {
+                    perp_offset(i, ip, i)
+                } else if is_collinear(i, j, ip, i) {
                     perp_offset(i, ip, i)
                 } else {
                     split_toward(i, j)
@@ -689,7 +791,7 @@ pub fn generate_cut_offset_chamfer(
                     inner.push(pt);
                 } else {
                     let inward = d_prev.cross(fn_).normalize_or_zero();
-                    inner.push(orig[i] + inward * CHAMFER_WIDTH);
+                    inner.push(orig[i] + inward * setback_of(ip, i));
                 }
             } else if prev_sharp[i] {
                 // Only prev edge sharp, no external chamfer — simple split.
@@ -761,7 +863,7 @@ pub fn generate_cut_offset_chamfer(
             );
         } else if n == 4 {
             emit_quad(
-                &mut positions, &mut normals, &mut uvs, &mut indices,
+                &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
                 inner[0], inner[1], inner[2], inner[3], fn_,
             );
         } else if !face.orig_triangles.is_empty() {
@@ -844,6 +946,7 @@ pub fn generate_cut_offset_chamfer(
                 &mut normals,
                 &mut uvs,
                 &mut indices,
+                &mut quads,
                 outer_i,
                 inner_i,
                 inner_j,
@@ -896,6 +999,7 @@ pub fn generate_cut_offset_chamfer(
                 &mut normals,
                 &mut uvs,
                 &mut indices,
+                &mut quads,
                 orig[i],
                 split_on_prev_edge,
                 inner[i],
@@ -914,7 +1018,7 @@ pub fn generate_cut_offset_chamfer(
                     if i < ip || (i == n - 1 && ip == 0) {
                         let split_ip = patch_split_next[ip].unwrap();
                         emit_quad(
-                            &mut positions, &mut normals, &mut uvs, &mut indices,
+                            &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
                             inner[ip], split_ip, split_on_prev_edge, inner[i], fn_,
                         );
                     }
@@ -933,7 +1037,7 @@ pub fn generate_cut_offset_chamfer(
                     if i < j || (i == n - 1 && j == 0) {
                         let split_j = patch_split_prev[j].unwrap();
                         emit_quad(
-                            &mut positions, &mut normals, &mut uvs, &mut indices,
+                            &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
                             inner[i], split_on_next_edge, split_j, inner[j], fn_,
                         );
                     }
@@ -1015,6 +1119,26 @@ pub fn generate_cut_offset_chamfer(
                 break;
             }
         }
+    }
+
+    // -- Re-triangulate quads with the fillet offsets applied -----------------
+    // Quads are planar at emission time (they lie in their face plane); the
+    // fillet pushes fold them.  Re-pick each quad's diagonal using the pushed
+    // positions so the fold goes outward instead of cutting into the surface.
+    for quad in &quads {
+        let b = quad.base as usize;
+        let pushed = |k: usize| -> Vec3 {
+            Vec3::from_array(positions[b + k]) + Vec3::from_array(chamfer_offsets[b + k])
+        };
+        let tri = quad_triangulation(
+            pushed(0),
+            pushed(1),
+            pushed(2),
+            pushed(3),
+            quad.expected_normal,
+            quad.base,
+        );
+        indices[quad.index_start..quad.index_start + 6].copy_from_slice(&tri);
     }
 
     // Apply offsets to positions so we see the filleted version.
