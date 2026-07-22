@@ -72,7 +72,12 @@ fn spawn_player(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
+    debug_start: Option<Res<crate::DebugStart>>,
 ) {
+    let spawn_pos = debug_start
+        .as_ref()
+        .and_then(|d| d.warp)
+        .unwrap_or(Vec3::new(0.0, 2.0, 0.0));
     let player_height = 1.0;
     let player_radius = 0.35;
 
@@ -117,7 +122,7 @@ fn spawn_player(
         LeanState::default(),
         EdgeDetectionSettings::default(),
         PrecariousEdge::default(),
-        Transform::from_xyz(0.0, 2.0, 0.0),
+        Transform::from_translation(spawn_pos),
         Visibility::default(),
     ));
     player.insert((

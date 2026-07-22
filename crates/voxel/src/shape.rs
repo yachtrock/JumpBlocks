@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
-/// Global chamfer width in world units.
+/// Global chamfer fillet radius in world units.  Every rounded edge and
+/// corner has this radius; the setback (cut distance along each face) is
+/// derived from it per edge based on the dihedral angle.
 pub const CHAMFER_WIDTH: f32 = 0.12;
 
 /// Cardinal facing direction for blocks.

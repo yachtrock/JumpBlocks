@@ -300,6 +300,43 @@ struct Cli {
     /// Run without a window (headless mode for testing).
     #[arg(long)]
     headless: bool,
+
+    /// Debug: spawn the player at this world position, e.g. --warp 3.5,2.0,13.5
+    #[arg(long, value_name = "X,Y,Z", allow_hyphen_values = true)]
+    warp: Option<String>,
+
+    /// Debug: initial camera yaw,pitch in degrees, e.g. --look 45,-20
+    /// (yaw 0 looks toward -Z, 90 toward -X; pitch negative looks down).
+    #[arg(long, value_name = "YAW,PITCH", allow_hyphen_values = true)]
+    look: Option<String>,
+
+    /// Debug: initial camera distance from the player.
+    #[arg(long, value_name = "DIST")]
+    cam_dist: Option<f32>,
+}
+
+/// Debug start overrides from the CLI (--warp / --look / --cam-dist).
+/// Used to jump straight to a spot in the world when debugging visuals.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DebugStart {
+    pub warp: Option<Vec3>,
+    /// Camera (yaw, pitch) in radians.
+    pub look: Option<Vec2>,
+    pub cam_dist: Option<f32>,
+}
+
+fn parse_floats<const N: usize>(s: &str, flag: &str) -> [f32; N] {
+    let parts: Vec<f32> = s
+        .split(',')
+        .map(|p| p.trim().parse::<f32>().unwrap_or_else(|_| {
+            panic!("Invalid {} value '{}': expected {} comma-separated numbers", flag, s, N)
+        }))
+        .collect();
+    assert!(parts.len() == N,
+        "Invalid {} value '{}': expected {} comma-separated numbers", flag, s, N);
+    let mut out = [0.0; N];
+    out.copy_from_slice(&parts);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +386,18 @@ fn main() {
     app.insert_resource(ServerPort {
         port: cli.port,
         explicit: port_explicit,
+    });
+
+    app.insert_resource(DebugStart {
+        warp: cli.warp.as_deref().map(|s| {
+            let [x, y, z] = parse_floats::<3>(s, "--warp");
+            Vec3::new(x, y, z)
+        }),
+        look: cli.look.as_deref().map(|s| {
+            let [yaw, pitch] = parse_floats::<2>(s, "--look");
+            Vec2::new(yaw.to_radians(), pitch.to_radians())
+        }),
+        cam_dist: cli.cam_dist,
     });
 
     if is_headless {

@@ -184,12 +184,30 @@ fn spawn_camera(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    debug_start: Option<Res<crate::DebugStart>>,
 ) {
     let diffuse_map = images.add(create_ibl_cubemap(32));
     let specular_map = images.add(create_ibl_cubemap(64));
 
+    let mut orbit = OrbitCamera::default();
+    if let Some(ds) = debug_start.as_ref() {
+        if let Some(look) = ds.look {
+            orbit.yaw = look.x;
+            orbit.target_yaw = look.x;
+            orbit.pitch = look.y;
+            orbit.target_pitch = look.y;
+        }
+        if let Some(dist) = ds.cam_dist {
+            orbit.min_distance = orbit.min_distance.min(dist);
+            orbit.max_distance = orbit.max_distance.max(dist);
+            orbit.distance = dist;
+            orbit.target_distance = dist;
+            orbit.effective_distance = dist;
+        }
+    }
+
     commands.spawn((
-        OrbitCamera::default(),
+        orbit,
         Camera3d::default(),
         Camera {
             is_active: false, // disabled until curtain is ready
