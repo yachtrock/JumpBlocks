@@ -1,15 +1,45 @@
+use std::path::Path;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use jumpblocks_voxel::chunk::{Chunk, ChunkData, ChunkNeighbors};
-use jumpblocks_voxel::shape::{Facing, ShapeTable, SHAPE_CUBE};
+use jumpblocks_voxel::chunk_lod::{ChunkDitherMaterial, DitherFadeExtension};
+use jumpblocks_voxel::coords::{ChunkPos, RegionId};
+use jumpblocks_voxel::persistence;
+use jumpblocks_voxel::streaming::{ChunkMaterial, WorldSavePath};
+use jumpblocks_voxel::world_grid::WorldGrid;
+use jumpblocks_voxel::worldgen::{self, IslandGenConfig};
 
 use crate::layers::GameLayer;
+
+/// Resource communicating the spawn point to the player system.
+#[derive(Resource)]
+pub struct SpawnPoint(pub Vec3);
 
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_world);
+        // Insert default spawn point immediately so it's available even if
+        // setup_world hasn't run yet. setup_world overwrites with the real value.
+        let gen_config = IslandGenConfig::default();
+        let spawn_y = worldgen::island_spawn_height(&gen_config) + 3.0;
+        app.insert_resource(SpawnPoint(Vec3::new(0.0, spawn_y, 0.0)));
+
+        app.init_resource::<WorldGrid>()
+            .add_systems(Startup, setup_world)
+            .add_systems(Update, attach_chunk_collision_layers);
+    }
+}
+
+/// Attaches CollisionLayers to newly spawned chunk entities that don't have them yet.
+fn attach_chunk_collision_layers(
+    mut commands: Commands,
+    chunks: Query<Entity, (With<jumpblocks_voxel::chunk::Chunk>, Without<CollisionLayers>)>,
+) {
+    for entity in chunks.iter() {
+        commands.entity(entity).insert(
+            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
+        );
     }
 }
 
@@ -17,6 +47,9 @@ fn setup_world(
     mut commands: Commands,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
+    dither_materials: Option<ResMut<Assets<ChunkDitherMaterial>>>,
+    mut world_grid: ResMut<WorldGrid>,
+    save_path: Option<Res<WorldSavePath>>,
 ) {
     let has_rendering = meshes.is_some() && materials.is_some();
 
@@ -26,9 +59,6 @@ fn setup_world(
         Collider::half_space(Vec3::Y),
         CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
     ));
-    if has_rendering {
-        // Visuals will be added below after we create handles
-    }
     let ground_entity = ground.id();
 
     let platforms = [
@@ -96,213 +126,154 @@ fn setup_world(
             ..default()
         });
 
-        // Demo voxel chunk
-        // All blocks are 2x2x2 cells. Each block = 1x1x1 world units (VOXEL_SIZE=0.5).
-        // Block origins must be at even-aligned coordinates (0, 2, 4, ...).
-        let mut chunk_data = ChunkData::new();
+    }
 
-        // Ground layer: a 10x10 block platform (each block = 2x2x2 cells)
-        for bx in 0..10 {
-            for bz in 0..10 {
-                chunk_data.place_std(bx * 2, 0, bz * 2, SHAPE_CUBE, Facing::North, 1);
-            }
-        }
-
-        // Staircase: 8 steps, each 1 cell tall, 2 blocks wide in X, 3 blocks deep in Z
-        // Each step goes 1 cell higher and 1 block (2 cells) further in X
-        for step in 0..8usize {
-            let y_top = 1 + step; // top of this step
-            for bx in 0..2 {
-                // bx=0 when step>0 shares its column with bx=1 of the previous step,
-                // which already filled up to y=(step). Only place the new top layer.
-                let y_start = if bx == 0 && step > 0 { y_top } else { 1 };
-                for bz in 0..3 {
-                    for y in y_start..=y_top {
-                        chunk_data.place_std(bx * 2 + step * 2, y, bz * 2 + 6, SHAPE_CUBE, Facing::North, 1);
-                    }
-                }
-            }
-        }
-
-        // A small tower at the top
-        for by in 0..5 {
-            for bx in 0..3 {
-                for bz in 0..3 {
-                    chunk_data.place_std(16 + bx * 2, 9 + by, 6 + bz * 2, SHAPE_CUBE, Facing::North, 1);
-                }
-            }
-        }
-
-        // Wedge ramp alongside the stairs
-        // Each wedge is 2 cells tall (solid base + slope), steps up by 1 cell
-        // Step 0: wedge at y=1, Step 1: wedge at y=2, etc.
-        for step in 0..8usize {
-            let wedge_y = 1 + step; // wedge occupies y..y+2
-            for bz in 0..3 {
-                chunk_data.place_wedge(step * 2, wedge_y, 14 + bz * 2, Facing::East, 1);
-            }
-            // Fill cubes underneath (each cube is 1 cell tall)
-            for y in 1..wedge_y {
-                for bz in 0..3 {
-                    chunk_data.place_std(step * 2, y, 14 + bz * 2, SHAPE_CUBE, Facing::North, 1);
-                }
-            }
-        }
-
-        // A row of wedges facing each direction for testing rotation
-        chunk_data.place_wedge(0, 2, 20, Facing::North, 1);
-        chunk_data.place_wedge(4, 2, 20, Facing::East, 1);
-        chunk_data.place_wedge(8, 2, 20, Facing::South, 1);
-        chunk_data.place_wedge(12, 2, 20, Facing::West, 1);
-
-        // Bridge platform reaching the +X boundary
-        for bx in 0..6 {
-            for bz in 0..3 {
-                chunk_data.place_std(20 + bx * 2, 0, 6 + bz * 2, SHAPE_CUBE, Facing::North, 1);
-            }
-        }
-        // A column at the boundary edge (x=30)
-        for by in 0..2 {
-            chunk_data.place_std(30, 1 + by, 8, SHAPE_CUBE, Facing::North, 1);
-        }
-        // Wedge at boundary top
-        chunk_data.place_wedge(30, 3, 8, Facing::West, 1);
-
-        // Row of cubes along boundary at ground level
-        for bz in 0..3 {
-            chunk_data.place_std(30, 0, 14 + bz * 2, SHAPE_CUBE, Facing::North, 1);
-        }
-
-        let chunk_material = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.6, 0.5, 0.4),
-            ..default()
+    // Default dither material for streamed chunks (must be outside the
+    // rendering block — streaming needs this even before meshes are ready)
+    if let Some(mut dither_mats) = dither_materials {
+        let chunk_mat = dither_mats.add(ChunkDitherMaterial {
+            base: StandardMaterial {
+                base_color: Color::srgb(0.6, 0.5, 0.4),
+                ..default()
+            },
+            extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },
         });
+        commands.insert_resource(ChunkMaterial(chunk_mat));
+    }
 
-        // ---- Neighbor chunk (+X direction) ----
-        // Positioned so its x=0 face meets chunk 1's x=31 face
-        let neighbor_material = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.4, 0.55, 0.7),
-            ..default()
-        });
+    // --- Create a region and load chunk data ---
+    let region_id = world_grid.create_region(Vec3::new(-2048.0, 0.0, -2048.0));
+    world_grid.active_region = region_id;
 
-        let mut neighbor_data = ChunkData::new();
+    let loaded_from_disk = if let Some(ref save) = save_path {
+        load_region_from_disk(&save.0, region_id, &mut world_grid)
+    } else {
+        false
+    };
 
-        // Continuation of the bridge platform
-        for bx in 0..6 {
-            for bz in 0..3 {
-                neighbor_data.place_std(bx * 2, 0, 6 + bz * 2, SHAPE_CUBE, Facing::North, 1);
+    if !loaded_from_disk {
+        // No saved world — populate with demo data in memory
+        populate_region(region_id, &mut world_grid);
+
+        // Save the demo chunks to disk if we have a save path
+        if let Some(ref save) = save_path {
+            save_region_to_disk(&save.0, region_id, &mut world_grid);
+        }
+    }
+
+    let chunk_count = world_grid
+        .get_region(region_id)
+        .map(|r| r.chunk_count())
+        .unwrap_or(0);
+    info!(
+        "[world] Region {} with {} chunks ({})",
+        region_id,
+        chunk_count,
+        if loaded_from_disk { "loaded from disk" } else { "generated" }
+    );
+
+    // Compute spawn point above island surface
+    let gen_config = IslandGenConfig::default();
+    let spawn_y = worldgen::island_spawn_height(&gen_config) + 3.0; // +3 for clearance
+    commands.insert_resource(SpawnPoint(Vec3::new(0.0, spawn_y, 0.0)));
+}
+
+// ---------------------------------------------------------------------------
+// Disk I/O
+// ---------------------------------------------------------------------------
+
+/// Load all chunks for a region from disk into the WorldGrid.
+fn load_region_from_disk(
+    world_dir: &Path,
+    region_id: RegionId,
+    world_grid: &mut WorldGrid,
+) -> bool {
+    let chunks_dir = persistence::region_chunks_dir(world_dir, region_id);
+    let Ok(entries) = std::fs::read_dir(&chunks_dir) else {
+        return false;
+    };
+
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if path.extension().and_then(|e| e.to_str()) != Some("chunk") {
+            continue;
+        }
+
+        // Parse "x_y_z" from filename
+        let parts: Vec<&str> = stem.split('_').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let Ok(x) = parts[0].parse::<i32>() else { continue };
+        let Ok(y) = parts[1].parse::<i32>() else { continue };
+        let Ok(z) = parts[2].parse::<i32>() else { continue };
+        let pos = ChunkPos::new(x, y, z);
+
+        match persistence::load_chunk_from_disk(world_dir, region_id, pos) {
+            Ok(Some(data)) => {
+                if let Some(region) = world_grid.get_region_mut(region_id) {
+                    region.set_chunk(pos, data);
+                    count += 1;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error!("[world] Failed to load chunk {}: {}", pos, e);
             }
         }
-        // Matching column on this side
-        for by in 0..2 {
-            neighbor_data.place_std(0, 1 + by, 8, SHAPE_CUBE, Facing::North, 1);
-        }
-        // Wedge pointing back
-        neighbor_data.place_wedge(0, 3, 8, Facing::East, 1);
+    }
 
-        // Matching row of cubes along boundary
-        for bz in 0..3 {
-            neighbor_data.place_std(0, 0, 14 + bz * 2, SHAPE_CUBE, Facing::North, 1);
-        }
+    count > 0
+}
 
-        // A small structure only in the neighbor chunk
-        for bx in 0..3 {
-            for bz in 0..3 {
-                neighbor_data.place_std(6 + bx * 2, 0, 14 + bz * 2, SHAPE_CUBE, Facing::North, 1);
-            }
-        }
-        // Wedge ramp on top
-        for bz in 0..3 {
-            neighbor_data.place_wedge(6, 1, 14 + bz * 2, Facing::West, 1);
-        }
+/// Save all chunks in a region to disk.
+fn save_region_to_disk(
+    world_dir: &Path,
+    region_id: RegionId,
+    world_grid: &mut WorldGrid,
+) {
+    let Some(region) = world_grid.get_region_mut(region_id) else {
+        return;
+    };
+    match persistence::save_dirty_chunks(world_dir, region) {
+        Ok(n) => info!("[world] Saved {} chunks to disk", n),
+        Err(e) => error!("[world] Failed to save chunks: {}", e),
+    }
+}
 
-        // Wire up neighbor references
-        let mut chunk1_neighbors = ChunkNeighbors::empty();
-        chunk1_neighbors.set(1, 0, 0, neighbor_data.clone());
+/// Generate island terrain for a region.
+fn populate_region(region_id: RegionId, world_grid: &mut WorldGrid) {
+    let region = world_grid.get_region_mut(region_id).unwrap();
+    let config = IslandGenConfig::default();
+    let count = worldgen::generate_island(region, &config);
+    info!("[world] Generated island with {} chunks", count);
+}
 
-        let mut chunk2_neighbors = ChunkNeighbors::empty();
-        chunk2_neighbors.set(-1, 0, 0, chunk_data.clone());
+/// Build a world to disk (CLI --new-world command).
+/// Creates the demo chunks and saves them without starting the game.
+pub fn build_world_to_disk(world_dir: &Path) {
+    let mut world_grid = WorldGrid::new();
+    let region_id = world_grid.create_region(Vec3::new(-2048.0, 0.0, -2048.0));
+    populate_region(region_id, &mut world_grid);
 
-        // Validate chunk data before creating chunks
-        let shapes = ShapeTable::default();
-        for (label, data) in [("main", &chunk_data), ("neighbor", &neighbor_data)] {
-            let errors = data.validate(&shapes);
-            for e in &errors {
-                error!("[world] {}: {}", label, e);
-            }
-        }
+    let region = world_grid.get_region_mut(region_id).unwrap();
+    match persistence::save_dirty_chunks(world_dir, region) {
+        Ok(n) => println!("Saved {} chunks", n),
+        Err(e) => eprintln!("Failed to save: {}", e),
+    }
 
-        let mut chunk1 = Chunk::new(chunk_data);
-        chunk1.neighbors = chunk1_neighbors;
-
-        let mut chunk2 = Chunk::new(neighbor_data);
-        chunk2.neighbors = chunk2_neighbors;
-
-        commands.spawn((
-            chunk1,
-            MeshMaterial3d(chunk_material.clone()),
-            Transform::from_translation(Vec3::new(-5.0, 0.0, 5.0)),
-            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
-        ));
-
-        commands.spawn((
-            chunk2,
-            MeshMaterial3d(neighbor_material),
-            Transform::from_translation(Vec3::new(11.0, 0.0, 5.0)),
-            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
-        ));
-
-        // ---- Floating test blocks ----
-        let mut test_data = ChunkData::new();
-
-        // Single cube
-        test_data.place_std(4, 4, 4, SHAPE_CUBE, Facing::North, 1);
-
-        // Single smooth cube
-        test_data.place_std(10, 4, 4, SHAPE_CUBE, Facing::North, 1);
-
-        // Single wedge (each facing)
-        test_data.place_wedge(4, 4, 10, Facing::North, 1);
-        test_data.place_wedge(10, 4, 10, Facing::East, 1);
-        test_data.place_wedge(16, 4, 10, Facing::South, 1);
-        test_data.place_wedge(22, 4, 10, Facing::West, 1);
-
-        // Single smooth wedge
-        test_data.place_wedge(4, 4, 16, Facing::North, 1);
-        test_data.place_wedge(10, 4, 16, Facing::East, 1);
-
-        // Wedge on cube
-        test_data.place_std(16, 2, 4, SHAPE_CUBE, Facing::North, 1);
-        test_data.place_wedge(16, 3, 4, Facing::East, 1);
-
-        // Two adjacent cubes
-        test_data.place_std(22, 4, 4, SHAPE_CUBE, Facing::North, 1);
-        test_data.place_std(24, 4, 4, SHAPE_CUBE, Facing::North, 1);
-
-        // Staircase (concave fillet test):  [B]
-        //                                 [A][C]
-        test_data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);  // A: bottom-left
-        test_data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1); // C: bottom-right
-        test_data.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1); // B: top-right
-
-        // Diagonal cubes sharing only a single vertex (offset in X, Y, and Z)
-        test_data.place_std(4, 4, 22, SHAPE_CUBE, Facing::North, 1);
-        test_data.place_std(6, 5, 24, SHAPE_CUBE, Facing::North, 1);
-
-        // Diagonal cubes sharing only a single edge (stacked vertically)
-        test_data.place_std(10, 4, 22, SHAPE_CUBE, Facing::North, 1);
-        test_data.place_std(12, 5, 22, SHAPE_CUBE, Facing::North, 1);
-
-        let test_errors = test_data.validate(&shapes);
-        for e in &test_errors {
-            error!("[world] test: {}", e);
-        }
-
-        commands.spawn((
-            Chunk::new(test_data),
-            MeshMaterial3d(chunk_material),
-            Transform::from_translation(Vec3::new(10.0, 0.0, -10.0)),
-            CollisionLayers::new([GameLayer::Default, GameLayer::CameraBlocking], LayerMask::ALL),
-        ));
+    // Save region metadata
+    let meta = persistence::RegionMeta {
+        region_id: region_id.0,
+        world_origin: [-2048.0, 0.0, -2048.0],
+        chunk_count: region.chunk_count() as u32,
+        data_generation: region.dirty.data_gen.0,
+    };
+    if let Err(e) = persistence::save_region_meta_to_disk(world_dir, &meta) {
+        eprintln!("Failed to save region metadata: {}", e);
     }
 }

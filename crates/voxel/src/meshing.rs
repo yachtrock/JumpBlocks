@@ -11,9 +11,17 @@ use crate::shape::*;
 pub const ATTRIBUTE_CHAMFER_OFFSET: bevy::mesh::MeshVertexAttribute =
     bevy::mesh::MeshVertexAttribute::new("ChamferOffset", 930_481_752, bevy::render::render_resource::VertexFormat::Float32x3);
 
+/// Custom vertex attribute for the original sharp (face) normal before chamfer smoothing.
+pub const ATTRIBUTE_SHARP_NORMAL: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new("SharpNormal", 930_481_753, bevy::render::render_resource::VertexFormat::Float32x3);
+
 pub struct ChunkMeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// The original face normal before chamfer smoothing. For non-chamfered
+    /// vertices this equals `normals`. For chamfer vertices, `normals` has the
+    /// smooth bisector and `sharp_normals` has the original flat face normal.
+    pub sharp_normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub chamfer_offsets: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
@@ -25,13 +33,22 @@ pub struct ChunkColliderData {
 }
 
 pub struct ChunkMeshResult {
-    pub full_res: ChunkMeshData,
+    pub full_res: Option<ChunkMeshData>,
     pub lod: ChunkMeshData,
+    pub level: MeshLevel,
     pub collider_data: ChunkColliderData,
     /// Debug overlay mesh highlighting faces with "impacted corner" vertices
     /// (vertices that share a position with a chamfered edge but whose own
     /// edges at that vertex are not sharp).
     pub debug_overlay: Option<ChunkMeshData>,
+}
+
+impl ChunkMeshResult {
+    /// Returns full_res, panicking if not generated. For use in tests
+    /// where generate_chunk_mesh always produces Full level.
+    pub fn full_res(&self) -> &ChunkMeshData {
+        self.full_res.as_ref().expect("full_res not generated")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,25 +238,53 @@ fn rotate_cell_offset(cell: (u8, u8, u8), facing: Facing, size: (u8, u8, u8)) ->
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// What level of mesh detail to generate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshLevel {
+    /// Only the LOD mesh (fast, no chamfer). For distant chunks.
+    LodOnly,
+    /// Both full-res (chamfered) and LOD meshes. For nearby chunks.
+    Full,
+}
+
 pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &ShapeTable, mode: crate::PresentationMode) -> ChunkMeshResult {
+    generate_chunk_mesh_at_level(data, neighbors, shapes, mode, MeshLevel::Full)
+}
+
+pub fn generate_chunk_mesh_at_level(
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+    shapes: &ShapeTable,
+    mode: crate::PresentationMode,
+    level: MeshLevel,
+) -> ChunkMeshResult {
     let t0 = Instant::now();
-    let (full_res, debug_overlay) = match mode {
-        crate::PresentationMode::Flat => (generate_lod_mesh(data, neighbors, shapes), None),
-        crate::PresentationMode::CutAndOffset => (crate::cut_offset_chamfer::generate_cut_offset_chamfer(data, neighbors, shapes), None),
+
+    let (full_res, debug_overlay) = if level == MeshLevel::Full {
+        match mode {
+            crate::PresentationMode::Flat => (Some(generate_lod_mesh(data, neighbors, shapes)), None),
+            crate::PresentationMode::CutAndOffset => (Some(crate::cut_offset_chamfer::generate_cut_offset_chamfer(data, neighbors, shapes)), None),
+        }
+    } else {
+        (None, None)
     };
+
     let t1 = Instant::now();
     let lod = generate_lod_mesh(data, neighbors, shapes);
     let t2 = Instant::now();
 
     let full_ms = (t1 - t0).as_secs_f64() * 1000.0;
     let lod_ms = (t2 - t1).as_secs_f64() * 1000.0;
-    info!(
-        "Chunk meshed [{}]: full={:.2}ms, lod={:.2}ms, total={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
-        match mode { crate::PresentationMode::Flat => "flat", crate::PresentationMode::CutAndOffset => "cut-offset" },
-        full_ms, lod_ms, full_ms + lod_ms,
-        full_res.positions.len(), full_res.indices.len() / 3,
-        lod.positions.len(), lod.indices.len() / 3,
-    );
+    if let Some(ref fr) = full_res {
+        info!(
+            "Chunk meshed [full]: chamfer={:.2}ms, lod={:.2}ms (full: {} verts/{} tris, lod: {} verts/{} tris)",
+            full_ms, lod_ms,
+            fr.positions.len(), fr.indices.len() / 3,
+            lod.positions.len(), lod.indices.len() / 3,
+        );
+    } else {
+        info!("Chunk meshed [lod-only]: {:.2}ms ({} verts/{} tris)", lod_ms, lod.positions.len(), lod.indices.len() / 3);
+    }
 
     let collider_vertices: Vec<Vec3> = lod.positions.iter().map(|p| Vec3::new(p[0], p[1], p[2])).collect();
     let collider_indices: Vec<[u32; 3]> = lod.indices.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
@@ -247,6 +292,7 @@ pub fn generate_chunk_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes:
     ChunkMeshResult {
         full_res,
         lod,
+        level,
         collider_data: ChunkColliderData {
             vertices: collider_vertices,
             indices: collider_indices,
@@ -332,7 +378,8 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
     );
 
     let n = positions.len();
-    ChunkMeshData { positions, normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], indices }
+    let sharp_normals = normals.clone();
+    ChunkMeshData { positions, normals, sharp_normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], indices }
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,6 +1264,7 @@ pub fn build_full_res_mesh(data: &ChunkMeshData) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
     mesh.insert_attribute(ATTRIBUTE_CHAMFER_OFFSET, data.chamfer_offsets.clone());
+    mesh.insert_attribute(ATTRIBUTE_SHARP_NORMAL, data.sharp_normals.clone());
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     mesh
 }
@@ -1226,10 +1274,18 @@ pub fn build_lod_mesh(data: &ChunkMeshData) -> Mesh {
         PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
     );
+    let n = data.positions.len();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
+    // Include zero-filled chamfer attributes so the LOD mesh has the same
+    // vertex layout as the full-res mesh. This avoids pipeline re-specialization
+    // which causes flashes during LOD transitions.
+    mesh.insert_attribute(ATTRIBUTE_CHAMFER_OFFSET, vec![[0.0f32; 3]; n]);
+    mesh.insert_attribute(ATTRIBUTE_SHARP_NORMAL, data.normals.clone());
     mesh.insert_indices(Indices::U32(data.indices.clone()));
+    // Generate tangents so IBL specular reflections match the full-res mesh.
+    let _ = mesh.generate_tangents();
     mesh
 }
 

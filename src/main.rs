@@ -11,6 +11,7 @@ mod player;
 mod player_state;
 mod scripting;
 mod world;
+mod world_paths;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -313,6 +314,22 @@ struct Cli {
     /// Debug: initial camera distance from the player.
     #[arg(long, value_name = "DIST")]
     cam_dist: Option<f32>,
+
+    /// World name to load or create (default: "default").
+    #[arg(long, default_value = "default")]
+    world: String,
+
+    /// Create a new world with this name (builds initial chunks and exits).
+    #[arg(long)]
+    new_world: Option<String>,
+
+    /// Delete a world by name.
+    #[arg(long)]
+    clear_world: Option<String>,
+
+    /// List all worlds and exit.
+    #[arg(long)]
+    list_worlds: bool,
 }
 
 /// Debug start overrides from the CLI (--warp / --look / --cam-dist).
@@ -347,6 +364,43 @@ fn main() {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).expect("Failed to parse CLI arguments");
     let port_explicit = matches.value_source("port") == Some(clap::parser::ValueSource::CommandLine);
+
+    // --- World management commands (run and exit) ---
+    if cli.list_worlds {
+        let worlds = world_paths::list_worlds();
+        let base = world_paths::worlds_base_dir();
+        println!("Worlds directory: {}", base.display());
+        if worlds.is_empty() {
+            println!("  (no worlds)");
+        } else {
+            for w in &worlds {
+                println!("  {}", w);
+            }
+        }
+        return;
+    }
+
+    if let Some(ref name) = cli.clear_world {
+        if world_paths::world_exists(name) {
+            world_paths::clear_world(name).expect("Failed to clear world");
+            println!("Cleared world: {}", name);
+        } else {
+            println!("World '{}' does not exist", name);
+        }
+        return;
+    }
+
+    if let Some(ref name) = cli.new_world {
+        let dir = world_paths::ensure_world(name).expect("Failed to create world directory");
+        println!("Building new world '{}' at {}", name, dir.display());
+        world::build_world_to_disk(&dir);
+        println!("World '{}' built successfully", name);
+        return;
+    }
+
+    // Resolve world directory for the game session
+    let world_save_dir = world_paths::world_dir(&cli.world);
+    println!("Using world '{}' at {}", cli.world, world_save_dir.display());
 
     let role = if cli.start_server {
         NetworkRole::DedicatedServer
@@ -450,6 +504,7 @@ fn main() {
     app.insert_resource(InventoryState { open: false, items });
 
     // Always add world (platforms need to exist on server too for physics)
+    app.insert_resource(jumpblocks_voxel::streaming::WorldSavePath(world_save_dir));
     app.add_plugins(world::WorldPlugin);
 
     // Add networking
@@ -459,6 +514,9 @@ fn main() {
         // Client-side plugins (rendering available)
         app.add_plugins((
             jumpblocks_voxel::VoxelPlugin,
+            jumpblocks_voxel::streaming::StreamingPlugin,
+            jumpblocks_voxel::chunk_lod::LodPlugin,
+            jumpblocks_voxel::cluster::ClusterPlugin,
             player::PlayerPlugin,
             player_state::PlayerStatePlugin,
             action_state::ActionStatePlugin,

@@ -8,6 +8,10 @@ use crate::edge_detection::{EdgeDetectionSettings, PrecariousEdge};
 use crate::player::{ControlScheme, ControlSchemeConfig, LeanSettings, Player, PlayerSettings};
 use bevy_tnua::prelude::*;
 use jumpblocks_voxel::chunk::Chunk;
+use jumpblocks_voxel::chunk_lod::{LodConfig, LodTier};
+use jumpblocks_voxel::cluster::{ClusterConfig, RenderStats};
+use jumpblocks_voxel::coords::ChunkCoord;
+use jumpblocks_voxel::streaming::StreamingConfig;
 
 pub struct DebugUiPlugin;
 
@@ -64,6 +68,11 @@ fn debug_ui_system(
     gamepads: Query<(Entity, &Gamepad)>,
     chunk_query: Query<(&Chunk, &Mesh3d)>,
     mesh_assets: Res<Assets<Mesh>>,
+    mut lod_config: ResMut<LodConfig>,
+    mut streaming_config: ResMut<StreamingConfig>,
+    mut cluster_config: ResMut<ClusterConfig>,
+    render_stats: Res<RenderStats>,
+    lod_chunks: Query<(&ChunkCoord, &LodTier)>,
 ) {
     if !state.visible {
         return;
@@ -175,6 +184,65 @@ fn debug_ui_system(
                 });
             }
         }
+
+        ui.separator();
+
+        // World / LOD
+        ui.collapsing("World / LOD", |ui| {
+            ui.label("Streaming");
+            ui.add(egui::Slider::new(&mut streaming_config.load_radius_xz, 1..=32).text("Load radius XZ"));
+            ui.add(egui::Slider::new(&mut streaming_config.load_radius_y, 1..=16).text("Load radius Y"));
+            ui.add(egui::Slider::new(&mut streaming_config.unload_padding, 0..=8).text("Unload padding"));
+            ui.add(egui::Slider::new(&mut streaming_config.load_budget, 1..=32).text("Load budget/frame"));
+            ui.add(egui::Slider::new(&mut streaming_config.unload_budget, 1..=32).text("Unload budget/frame"));
+
+            ui.separator();
+            ui.label("LOD Tiers");
+            ui.add(egui::Slider::new(&mut lod_config.full_radius, 0..=16).text("Full radius"));
+            ui.add(egui::Slider::new(&mut lod_config.reduced_radius, 1..=32).text("Reduced radius"));
+            ui.add(egui::Slider::new(&mut lod_config.transition_duration, 0.05..=2.0).text("Transition (sec)"));
+
+            ui.separator();
+            ui.label("Chamfer Fade");
+            ui.add(egui::Slider::new(&mut lod_config.chamfer_start, 0.0..=8.0).text("Chamfer start"));
+            ui.add(egui::Slider::new(&mut lod_config.chamfer_end, 0.0..=8.0).text("Chamfer end"));
+
+            ui.separator();
+            ui.label("Clusters");
+            ui.add(egui::Slider::new(&mut cluster_config.cluster_radius, 2..=16).text("Cluster radius"));
+
+            ui.separator();
+            ui.label("Rendering");
+            ui.label(format!("  LOD0 (chamfer):  {}", render_stats.lod0_count));
+            ui.label(format!("  LOD1 (flat):     {}", render_stats.lod1_count));
+            ui.label(format!("  Clusters:        {}", render_stats.cluster_count));
+            ui.label(format!("  Impostors:       {}", render_stats.impostor_count));
+            let draw_total = render_stats.lod0_count + render_stats.lod1_count + render_stats.cluster_count;
+            ui.label(format!("  Draw calls:      ~{}", draw_total));
+
+            ui.separator();
+            ui.label("Mesh Generation");
+            ui.label(format!("  Full (chamfer):  {}", render_stats.mesh_full_count));
+            ui.label(format!("  LOD-only:        {}", render_stats.mesh_lod_only_count));
+            ui.label(format!("  No mesh:         {}", render_stats.mesh_none_count));
+            ui.label(format!("  Meshing now:     {}", render_stats.meshing_count));
+
+            ui.separator();
+            ui.label("Chunks");
+            ui.label(format!("  Total entities:  {}", render_stats.total_chunks));
+            ui.label(format!("  Clustered:       {}", render_stats.clustered_count));
+            let mut full_count = 0;
+            let mut reduced_count = 0;
+            let mut hidden_count = 0;
+            for (_, tier) in lod_chunks.iter() {
+                match tier {
+                    LodTier::Full => full_count += 1,
+                    LodTier::Reduced => reduced_count += 1,
+                    LodTier::Hidden => hidden_count += 1,
+                }
+            }
+            ui.label(format!("  LOD tier: Full={}  Reduced={}  Hidden={}", full_count, reduced_count, hidden_count));
+        });
 
         ui.separator();
 

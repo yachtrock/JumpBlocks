@@ -9,6 +9,8 @@ use crate::player_state::PlayerState;
 use crate::UiInputBlock;
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::TnuaAvian3dSensorShape;
+use crate::world::SpawnPoint;
+use jumpblocks_voxel::streaming::StreamingAnchor;
 
 pub struct PlayerPlugin;
 
@@ -73,11 +75,13 @@ fn spawn_player(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut configs: ResMut<Assets<ControlSchemeConfig>>,
     debug_start: Option<Res<crate::DebugStart>>,
+    spawn_point: Res<SpawnPoint>,
 ) {
+    // --warp overrides everything; otherwise spawn above the island surface.
     let spawn_pos = debug_start
         .as_ref()
         .and_then(|d| d.warp)
-        .unwrap_or(Vec3::new(0.0, 2.0, 0.0));
+        .unwrap_or(spawn_point.0);
     let player_height = 1.0;
     let player_radius = 0.35;
 
@@ -110,6 +114,7 @@ fn spawn_player(
     let mut player = commands.spawn((
         Player,
         LocalPlayer,
+        StreamingAnchor,
         PlayerState::default(),
         ActionState::default(),
         ConsumedInputs::default(),
@@ -190,7 +195,7 @@ fn spawn_headless_player(
             lerp_speed: 8.0,
         },
         LeanState::default(),
-        Transform::from_xyz(0.0, 2.0, 0.0),
+        Transform::from_xyz(0.0, 10.0, 0.0),
         RigidBody::Dynamic,
         Collider::capsule(player_radius, player_height),
         LockedAxes::ROTATION_LOCKED,
