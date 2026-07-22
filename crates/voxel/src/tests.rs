@@ -1071,7 +1071,7 @@ fn mixed_corner_l_plateau() {
     data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1);  // B (east)
     data.place_std(8, 14, 10, SHAPE_CUBE, Facing::North, 1);  // C (north)
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
-    let mesh = &result.full_res;
+    let mesh = result.full_res();
 
     assert_concave_mesh_clean(mesh, "l_plateau");
 
@@ -1102,7 +1102,7 @@ fn mixed_corner_staircase_clean() {
     data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1);
     data.place_std(10, 15, 8, SHAPE_CUBE, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
-    assert_concave_mesh_clean(&result.full_res, "staircase");
+    assert_concave_mesh_clean(result.full_res(), "staircase");
 }
 
 /// The world's wedge-ramp-on-platform showcase: a platform of cubes with a
@@ -1120,7 +1120,7 @@ fn mixed_corner_ramp_on_platform() {
         data.place_wedge(6, 11, 14 + bz * 2, Facing::West, 1);
     }
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
-    assert_concave_mesh_clean(&result.full_res, "ramp_on_platform");
+    assert_concave_mesh_clean(result.full_res(), "ramp_on_platform");
 }
 
 /// The world's rotation-test wedges sit against the wedge ramp's north wall
@@ -1156,7 +1156,7 @@ fn showcase_wedges_against_ramp() {
     data.place_wedge(12, 2, 20, Facing::West, 1);
 
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
-    let mesh = &result.full_res;
+    let mesh = result.full_res();
     assert_mesh_valid(mesh, "showcase_vs_ramp");
     assert_no_degenerate_triangles(mesh, "showcase_vs_ramp");
     let (boundary, _, non_manifold) = count_edge_sharing(mesh);
@@ -1184,7 +1184,7 @@ fn wedge_back_against_lower_wedge() {
     data.place_wedge(8, 13, 8, Facing::East, 1);
     data.place_wedge(8, 14, 10, Facing::North, 1);
     let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
-    assert_concave_mesh_clean(&result.full_res, "wedge_back_lower_wedge");
+    assert_concave_mesh_clean(result.full_res(), "wedge_back_lower_wedge");
 }
 
 #[test]
