@@ -8,7 +8,6 @@
 //! 5. Write back building edits from ECS chunks to region storage
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy::camera::primitives::Aabb;

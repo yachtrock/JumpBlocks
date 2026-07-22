@@ -6,7 +6,7 @@
 //! distributing across as many Y-chunks as needed.
 
 use crate::chunk::ChunkData;
-use crate::coords::{ChunkPos, REGION_XZ, CHUNK_Y_MIN};
+use crate::coords::{ChunkPos, REGION_XZ};
 use crate::chunk::{CHUNK_X, CHUNK_Y, CHUNK_Z};
 use crate::region::Region;
 use crate::shape::{Facing, SHAPE_CUBE};

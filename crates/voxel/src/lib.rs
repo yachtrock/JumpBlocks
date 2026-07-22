@@ -20,7 +20,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
 use chunk::*;
 use chunk_lod::{ChunkLodMesh, LodConfig};
-use coords::{ChunkCoord, CHUNK_WORLD_SIZE};
+use coords::CHUNK_WORLD_SIZE;
 use meshing::*;
 use shape::*;
 use streaming::StreamingAnchor;

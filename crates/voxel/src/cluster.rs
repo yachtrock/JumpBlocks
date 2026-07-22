@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy::mesh::{Indices, PrimitiveTopology};
 
-use crate::chunk_lod::{ChunkDitherMaterial, ChunkLodMaterials, ChunkLodMesh, DitherFadeExtension, LodDebugMode, LodTier, LodConfig, LodTransition};
+use crate::chunk_lod::{ChunkDitherMaterial, ChunkLodMaterials, ChunkLodMesh, DitherFadeExtension, LodDebugMode, LodTier, LodTransition};
 use crate::coords::{ChunkCoord, ChunkPos, CHUNK_WORLD_SIZE};
 use crate::streaming::StreamingAnchor;
 
@@ -109,8 +109,10 @@ pub fn render_stats_system(
     let mut mesh_none = 0usize;
     let mut clustered = 0usize;
     let mut meshing = 0usize;
+    let mut total = 0usize;
 
     for (_tier, mats, is_clustered, mesh_level) in chunks.iter() {
+        total += 1;
         match mesh_level.copied().unwrap_or(crate::ChunkMeshLevel::None) {
             crate::ChunkMeshLevel::Full => mesh_full += 1,
             crate::ChunkMeshLevel::LodOnly => mesh_lod_only += 1,
@@ -142,7 +144,7 @@ pub fn render_stats_system(
     stats.mesh_lod_only_count = mesh_lod_only;
     stats.mesh_none_count = mesh_none;
     stats.meshing_count = meshing;
-    stats.total_chunks = chunks.iter().count();
+    stats.total_chunks = total;
     stats.clustered_count = clustered;
 }
 
@@ -247,6 +249,7 @@ pub fn cluster_management_system(
     }
 
     // --- Step 3: Dissolve clusters that shouldn't exist or have stale membership ---
+    let mut dissolved_keys: std::collections::HashSet<ClusterKey> = std::collections::HashSet::new();
     for (key, cluster_entity) in &current_clusters {
         let should_dissolve = if let Some(desired_members) = should_be_active.get(key) {
             // Check if membership changed (new chunks loaded into this group)
@@ -273,17 +276,17 @@ pub fn cluster_management_system(
                 }
             }
             commands.entity(*cluster_entity).despawn();
+            dissolved_keys.insert(*key);
         }
     }
 
     // --- Step 4: Create clusters that should exist and don't yet ---
+    // (despawns above are deferred, so consult dissolved_keys rather than
+    // querying entity liveness — a stale cluster dissolved this frame must
+    // be rebuilt this frame to avoid a one-frame gap)
     for (key, member_entities) in &should_be_active {
-        // Skip if a valid cluster already exists (wasn't dissolved in step 3)
-        if let Some(&ce) = current_clusters.get(key) {
-            if commands.get_entity(ce).is_ok() {
-                // Entity still exists (wasn't despawned) — cluster is current
-                continue;
-            }
+        if current_clusters.contains_key(key) && !dissolved_keys.contains(key) {
+            continue; // Valid cluster already exists
         }
 
         let members = &groups[key];
