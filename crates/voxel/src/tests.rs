@@ -1906,6 +1906,7 @@ fn worldgen_slope_chunks_mesh_clean() {
     let mut cache: HashMap<ChunkPos, crate::meshing::ChunkMeshResult> = HashMap::new();
     let mut total_solid_interior = 0usize;
     let mut total_union_holes = 0usize;
+    let mut total_backfacing = 0usize;
 
     for &(pos, caps) in ranked.iter().take(6) {
         let slot = region.get_chunk(pos).unwrap();
@@ -2014,9 +2015,206 @@ fn worldgen_slope_chunks_mesh_clean() {
                 }
             }
         }
-        eprintln!("chunk {pos}: {caps} caps, solid-interior {solid_interior}, union-open {union_holes}");
+        // Backfacing slivers: a triangle whose geometric normal strongly
+        // opposes its stored (smoothed) vertex normals renders as a
+        // see-through hole under backface culling even when edge counts are
+        // watertight (a twisted quad mis-wound during re-triangulation).
+        let m = cache[&pos].full_res();
+        let mut backfacing = 0;
+        for i in (0..m.indices.len()).step_by(3) {
+            let t = [m.indices[i] as usize, m.indices[i+1] as usize, m.indices[i+2] as usize];
+            let p = |k: usize| bevy::math::Vec3::from_array(m.positions[t[k]]);
+            let nv = |k: usize| bevy::math::Vec3::from_array(m.normals[t[k]]);
+            let geo = (p(1) - p(0)).cross(p(2) - p(0));
+            let len = geo.length();
+            // Sub-0.01 slivers (a few millimetres wide in-world) still slip
+            // through clipped-face triangulation occasionally; they are
+            // invisible at render scale, so only assert on visible sizes.
+            if len * 0.5 < 0.01 { continue; }
+            let avg_n = (nv(0) + nv(1) + nv(2)).normalize_or_zero();
+            if (geo / len).dot(avg_n) < -0.5 {
+                backfacing += 1;
+                if backfacing <= 4 {
+                    let c = (p(0) + p(1) + p(2)) / 3.0;
+                    eprintln!("  {pos}: backfacing sliver area {:.5} at ({:.3},{:.3},{:.3})",
+                        len * 0.5, c.x, c.y, c.z);
+                    for k in 0..3 {
+                        let q = p(k); let nn = nv(k);
+                        let off = bevy::math::Vec3::from_array(m.chamfer_offsets[t[k]]);
+                        eprintln!("    v ({:.4},{:.4},{:.4}) n ({:.2},{:.2},{:.2}) push ({:.4},{:.4},{:.4})",
+                            q.x, q.y, q.z, nn.x, nn.y, nn.z, off.x, off.y, off.z);
+                    }
+                }
+            }
+        }
+        eprintln!("chunk {pos}: {caps} caps, solid-interior {solid_interior}, union-open {union_holes}, backfacing {backfacing}");
         total_union_holes += union_holes;
+        total_backfacing += backfacing;
     }
     assert!(total_solid_interior == 0, "{total_solid_interior} solid interior hole edges");
     assert!(total_union_holes == 0, "{total_union_holes} open edges in neighbor unions");
+    assert!(total_backfacing == 0, "{total_backfacing} backfacing sliver triangles");
+}
+
+/// Debug: union-check chunks around the showcase spawn hill.
+#[test]
+#[ignore]
+fn debug_spawn_hill_union() {
+    use crate::world_def::WorldDef;
+    use crate::coords::RegionId;
+    use bevy::math::Vec3;
+
+    let def = WorldDef::standard();
+    let mut region = crate::region::Region::new(RegionId(0), Vec3::ZERO);
+    crate::worldgen::generate_archipelago(&mut region, &def.terrain);
+
+    fn wire_neighbors(region: &crate::region::Region, pos: ChunkPos) -> ChunkNeighbors {
+        let mut nb = ChunkNeighbors::empty();
+        for (dx, dy, dz) in ChunkPos::neighbor_offsets() {
+            if let Some(np) = pos.neighbor(dx, dy, dz) {
+                if let Some(arc) = region.get_chunk_data(np) {
+                    nb.set_arc(dx, dy, dz, arc);
+                }
+            }
+        }
+        nb
+    }
+
+    let shapes = make_shapes();
+    let chunk_w = crate::chunk::CHUNK_X as f32 * crate::chunk::VOXEL_SIZE;
+    let chunk_h = crate::chunk::CHUNK_Y as f32 * crate::chunk::VOXEL_SIZE;
+    let mut cache: HashMap<ChunkPos, crate::meshing::ChunkMeshResult> = HashMap::new();
+
+    for cx in 131..=133 {
+        for cz in 127..=129 {
+            let pos = ChunkPos::new(cx, 0, cz);
+            let Some(slot) = region.get_chunk(pos) else { continue };
+            let caps = slot.data.blocks.iter().filter(|b| b.shape != 0).count();
+            let nb = wire_neighbors(&region, pos);
+            cache.entry(pos).or_insert_with(|| {
+                generate_chunk_mesh(&slot.data, &nb, &shapes, crate::PresentationMode::CutAndOffset)
+            });
+            let mut union = {
+                let m = cache[&pos].full_res();
+                ChunkMeshData {
+                    positions: m.positions.clone(),
+                    normals: m.normals.clone(),
+                    sharp_normals: m.sharp_normals.clone(),
+                    uvs: m.uvs.clone(),
+                    chamfer_offsets: m.chamfer_offsets.clone(),
+                    indices: m.indices.clone(),
+                }
+            };
+            for (dx, dy, dz) in ChunkPos::neighbor_offsets() {
+                let Some(np) = pos.neighbor(dx, dy, dz) else { continue };
+                let Some(nslot) = region.get_chunk(np) else { continue };
+                if !cache.contains_key(&np) {
+                    let nnb = wire_neighbors(&region, np);
+                    let r = generate_chunk_mesh(&nslot.data, &nnb, &shapes, crate::PresentationMode::CutAndOffset);
+                    cache.insert(np, r);
+                }
+                union = union_meshes(
+                    &union,
+                    cache[&np].full_res(),
+                    [dx as f32 * chunk_w, dy as f32 * chunk_h, dz as f32 * chunk_w],
+                );
+            }
+            let mut edge_count: HashMap<((i32,i32,i32),(i32,i32,i32)), usize> = HashMap::new();
+            let mut seg: HashMap<((i32,i32,i32),(i32,i32,i32)), ([f32;3],[f32;3])> = HashMap::new();
+            for i in (0..union.indices.len()).step_by(3) {
+                let t = [union.indices[i], union.indices[i+1], union.indices[i+2]];
+                for j in 0..3 {
+                    let a = union.positions[t[j] as usize];
+                    let b = union.positions[t[(j+1)%3] as usize];
+                    let (qa, qb) = (quantize_pos(&a), quantize_pos(&b));
+                    let key = if qa <= qb { (qa, qb) } else { (qb, qa) };
+                    *edge_count.entry(key).or_insert(0) += 1;
+                    seg.entry(key).or_insert((a, b));
+                }
+            }
+            let near_center = |p: [f32;3]| -> bool {
+                p[0] > -1.0 && p[0] < chunk_w + 1.0
+                    && p[1] > -1.0 && p[1] < chunk_h + 1.0
+                    && p[2] > -1.0 && p[2] < chunk_w + 1.0
+            };
+            let mut open = 0;
+            for (key, &c) in &edge_count {
+                if c == 2 { continue; }
+                let (a, b) = seg[key];
+                if near_center(a) && near_center(b) {
+                    open += 1;
+                    if open <= 8 {
+                        // world coords: chunk-local + chunk offset from region origin at -2048
+                        let wx = (cx as f32 - 128.0) * chunk_w;
+                        let wz = (cz as f32 - 128.0) * chunk_w;
+                        eprintln!("  {pos}: open x{c} local ({:.3},{:.3},{:.3})\u{2192}({:.3},{:.3},{:.3}) world ({:.1},{:.1},{:.1})",
+                            a[0],a[1],a[2],b[0],b[1],b[2], a[0]+wx, a[1], a[2]+wz);
+                    }
+                }
+            }
+            // Flipped-triangle scan: geometric normal vs stored vertex normals.
+            let m = cache[&pos].full_res();
+            let mut flipped = 0;
+            for i in (0..m.indices.len()).step_by(3) {
+                let t = [m.indices[i] as usize, m.indices[i+1] as usize, m.indices[i+2] as usize];
+                let p = |k: usize| bevy::math::Vec3::from_array(m.positions[t[k]]);
+                let nv = |k: usize| bevy::math::Vec3::from_array(m.normals[t[k]]);
+                let geo = (p(1) - p(0)).cross(p(2) - p(0));
+                let len = geo.length();
+                if len < 1e-8 { continue; }
+                let avg_n = (nv(0) + nv(1) + nv(2)).normalize_or_zero();
+                if (geo / len).dot(avg_n) < -0.1 {
+                    flipped += 1;
+                    if flipped <= 8 && len * 0.5 > 1e-4 {
+                        let c = (p(0) + p(1) + p(2)) / 3.0;
+                        eprintln!("  {pos}: FLIPPED area {:.5} center ({:.3},{:.3},{:.3})", len * 0.5, c.x, c.y, c.z);
+                        for k in 0..3 {
+                            let q = p(k); let nn = nv(k);
+                            let off = bevy::math::Vec3::from_array(m.chamfer_offsets[t[k]]);
+                            eprintln!("    v ({:.4},{:.4},{:.4}) n ({:.2},{:.2},{:.2}) push ({:.4},{:.4},{:.4})",
+                                q.x, q.y, q.z, nn.x, nn.y, nn.z, off.x, off.y, off.z);
+                        }
+                    }
+                }
+            }
+            eprintln!("chunk {pos}: {caps} caps, union-open {open}, flipped {flipped}");
+        }
+    }
+}
+
+/// Debug: dump solid faces near the last backfacing sliver.
+#[test]
+#[ignore]
+fn debug_sliver_solid_faces() {
+    use crate::world_def::WorldDef;
+    use crate::coords::RegionId;
+    use bevy::math::Vec3;
+
+    let def = WorldDef::standard();
+    let mut region = crate::region::Region::new(RegionId(0), Vec3::ZERO);
+    crate::worldgen::generate_archipelago(&mut region, &def.terrain);
+    let pos = ChunkPos::new(105, 0, 133);
+    let slot = region.get_chunk(pos).unwrap();
+    let mut nb = ChunkNeighbors::empty();
+    for (dx, dy, dz) in ChunkPos::neighbor_offsets() {
+        if let Some(np) = pos.neighbor(dx, dy, dz) {
+            if let Some(arc) = region.get_chunk_data(np) {
+                nb.set_arc(dx, dy, dz, arc);
+            }
+        }
+    }
+    let shapes = make_shapes();
+    let solid = build_solid_mesh_public(&slot.data, &nb, &shapes);
+    let target = Vec3::new(5.6, 11.43, 1.0);
+    for f in &solid.faces {
+        let near = f.verts.iter().any(|&v| solid.positions[v as usize].distance(target) < 0.5);
+        if near {
+            let vs: Vec<String> = f.verts.iter().map(|&v| {
+                let p = solid.positions[v as usize];
+                format!("({:.4},{:.4},{:.4})", p.x, p.y, p.z)
+            }).collect();
+            eprintln!("face n=({:.2},{:.2},{:.2}) halo={} voxel={:?} tris={:?}\n  verts {}",
+                f.normal.x, f.normal.y, f.normal.z, f.halo, f.voxel, f.orig_triangles, vs.join(" "));
+        }
+    }
 }

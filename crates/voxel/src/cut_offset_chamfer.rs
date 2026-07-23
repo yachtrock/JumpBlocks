@@ -71,20 +71,27 @@ fn quad_triangulation(
         ok02
     };
 
-    if use02 {
-        if n02_a.dot(expected_normal) >= 0.0 {
-            [base, base + 1, base + 2, base, base + 2, base + 3]
-        } else {
-            [base + 2, base + 1, base, base, base + 3, base + 2]
-        }
+    // Orient EACH triangle independently against the expected normal.  A
+    // quad twisted by fillet pushes (outer edge tilted out of the face
+    // plane) can have one triangle facing backward even when the other is
+    // fine — a single whole-quad winding check leaves that triangle
+    // backfacing, which renders as a see-through sliver.
+    let verts = [v0, v1, v2, v3];
+    let tris: [[u32; 3]; 2] = if use02 {
+        [[0, 1, 2], [0, 2, 3]]
     } else {
-        // n13_a is the normal of the first emitted triangle [v1, v2, v3].
-        if n13_a.dot(expected_normal) >= 0.0 {
-            [base + 1, base + 2, base + 3, base + 1, base + 3, base]
-        } else {
-            [base + 3, base + 2, base + 1, base, base + 3, base + 1]
-        }
+        [[1, 2, 3], [1, 3, 0]]
+    };
+    let mut out = [0u32; 6];
+    for (t, tri) in tris.iter().enumerate() {
+        let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        let n = (verts[b] - verts[a]).cross(verts[c] - verts[a]);
+        let (i0, i2) = if n.dot(expected_normal) >= 0.0 { (tri[0], tri[2]) } else { (tri[2], tri[0]) };
+        out[t * 3] = base + i0;
+        out[t * 3 + 1] = base + tri[1];
+        out[t * 3 + 2] = base + i2;
     }
+    out
 }
 
 /// A quad emitted into the mesh: where its 4 vertices and 6 indices live,
@@ -1030,15 +1037,28 @@ pub fn generate_cut_offset_chamfer(
                 inner[0], inner[1], inner[2], inner[3], fn_,
             );
         } else if !face.orig_triangles.is_empty() {
-            // Use original triangulation — preserves all boundary vertices
-            // (like collinear midpoints) so edges match adjacent faces.
+            // Preserve all boundary vertices (like collinear midpoints) so
+            // edges match adjacent faces.  The original triangulation is only
+            // valid for the ORIGINAL ring: once setbacks displace inner
+            // vertices, thin original triangles can invert in-plane, leaving
+            // sliver gaps.  Re-triangulate the displaced ring (same boundary
+            // chain, so seams are unaffected); fall back to the original
+            // triangulation if ear clipping fails.
+            let displaced = (0..n).any(|i| inner[i].distance_squared(orig[i]) > 1e-12);
+            let retri = if displaced {
+                let t = crate::meshing::ear_clip_triangulate_public(&inner, fn_);
+                if t.len() == n - 2 { Some(t) } else { None }
+            } else {
+                None
+            };
             let inner_base = positions.len() as u32;
             for i in 0..n {
                 positions.push(inner[i].into());
                 normals.push(fn_.into());
                 uvs.push([0.0, 0.0]);
             }
-            for tri in &face.orig_triangles {
+            let tris: &[[usize; 3]] = retri.as_deref().unwrap_or(&face.orig_triangles);
+            for tri in tris {
                 indices.push(inner_base + tri[2] as u32);
                 indices.push(inner_base + tri[1] as u32);
                 indices.push(inner_base + tri[0] as u32);
