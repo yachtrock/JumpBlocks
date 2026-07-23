@@ -435,18 +435,44 @@ fn spawn_or_update_preview(
 // Chunk modification processing
 // ---------------------------------------------------------------------------
 
-fn process_chunk_modifications(mut chunks: Query<&mut Chunk>) {
-    for mut chunk in chunks.iter_mut() {
+fn process_chunk_modifications(
+    mut chunks: Query<(&jumpblocks_voxel::coords::ChunkCoord, &mut Chunk)>,
+) {
+    // First pass: apply modifications and snapshot the fresh data.
+    let mut modified: Vec<(jumpblocks_voxel::coords::ChunkPos, Arc<jumpblocks_voxel::chunk::ChunkData>)> =
+        Vec::new();
+    for (coord, mut chunk) in chunks.iter_mut() {
         if chunk.pending_modifications.is_empty() {
             continue;
         }
         let count = chunk.pending_modifications.len();
         chunk.pending_modifications.clear();
         chunk.mark_dirty();
+        modified.push((coord.pos, Arc::new(chunk.data.clone())));
         info!(
             "Applied {} block modification(s), chunk marked dirty for re-mesh",
             count
         );
+    }
+    if modified.is_empty() {
+        return;
+    }
+
+    // Second pass: neighbors mesh with a halo of our blocks (seam fillets),
+    // so they need the fresh data and a re-mesh too.
+    for (coord, mut chunk) in chunks.iter_mut() {
+        for (pos, arc) in &modified {
+            let dx = pos.x - coord.pos.x;
+            let dy = pos.y - coord.pos.y;
+            let dz = pos.z - coord.pos.z;
+            if (dx == 0 && dy == 0 && dz == 0)
+                || dx.abs() > 1 || dy.abs() > 1 || dz.abs() > 1
+            {
+                continue;
+            }
+            chunk.neighbors.set_arc(dx, dy, dz, arc.clone());
+            chunk.mark_dirty();
+        }
     }
 }
 

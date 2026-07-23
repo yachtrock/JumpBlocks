@@ -226,16 +226,24 @@ pub fn generate_cut_offset_chamfer(
         // Collect unique blocks from the chunk data — NOT from surviving
         // faces.  Fully-occluded blocks (or blocks whose faces merged into a
         // neighbor's) still bridge their neighbors into one component.
-        let mut blocks: Vec<((usize, usize, usize), (u8, u8, u8))> = Vec::new();
+        let mut blocks: Vec<((i32, i32, i32), (u8, u8, u8))> = Vec::new();
         for block in &data.blocks {
             let Some(shape) = shapes.get(block.shape) else { continue };
             let (ox, oy, oz) = block.origin;
-            let voxel = (ox as usize, oy as usize, oz as usize);
+            let voxel = (ox as i32, oy as i32, oz as i32);
             if !blocks.iter().any(|(v, _)| *v == voxel) {
                 blocks.push((voxel, shape.size));
             }
         }
-        // Faces may reference neighbor-chunk voxels not present in data.
+        // Neighbor-halo blocks bridge components across chunk seams exactly
+        // like the neighbor's own meshing pass sees them (including
+        // fully-interior halo blocks, which emit no faces).
+        for &(voxel, size) in &solid.halo_blocks {
+            if !blocks.iter().any(|(v, _)| *v == voxel) {
+                blocks.push((voxel, size));
+            }
+        }
+        // Faces may reference voxels not present above.
         for face in &solid.faces {
             if !blocks.iter().any(|(v, _)| *v == face.voxel) {
                 blocks.push((face.voxel, face.block_size));
@@ -265,7 +273,7 @@ pub fn generate_cut_offset_chamfer(
             }
         }
         // Build map: voxel_origin → component root
-        let mut map: HashMap<(usize, usize, usize), usize> = HashMap::new();
+        let mut map: HashMap<(i32, i32, i32), usize> = HashMap::new();
         for i in 0..n {
             let root = find(&mut label, i);
             map.insert(blocks[i].0, root);
@@ -351,14 +359,10 @@ pub fn generate_cut_offset_chamfer(
                     return false;
                 }
             }
-            // Never chamfer an edge that lies on a chunk seam with neighbor
-            // geometry adjacent to it — the neighbor chunk meshes that side
-            // independently, and only identical un-filleted geometry on both
-            // sides keeps the seam watertight. (Applies to interior concave
-            // edges lying on the seam plane too, not just lone edges.)
-            if edge_touches_neighbor_geometry(a, b, &solid, data, neighbors) {
-                return false;
-            }
+            // Chunk seams need no special handling here: the neighbor halo
+            // gives seam edges their second face, so both chunks compute
+            // the same fillet from the same local data.
+            let _ = (a, b);
             true
         })
         .map(|(&key, _)| key)
@@ -655,6 +659,11 @@ pub fn generate_cut_offset_chamfer(
     // Per-face: subdivide via vertex splits
     // -----------------------------------------------------------------------
     for (fi, face) in solid.faces.iter().enumerate() {
+        // Halo faces belong to a neighbor chunk: they shape every fillet
+        // decision above, but only their owner emits their geometry.
+        if face.halo {
+            continue;
+        }
         let n = face.verts.len();
         let fn_ = face.normal;
         let face_comp_val = block_component.get(&face.voxel).copied().unwrap_or(0);
@@ -1133,20 +1142,6 @@ pub fn generate_cut_offset_chamfer(
     // face normals that we'll blend back to when chamfer_amount goes to 0.
     let sharp_normals = normals.clone();
 
-    // Vertices "pinned" to a chunk seam with neighbor geometry: fillet
-    // displacement must vanish there, because the neighbor chunk meshes its
-    // side independently with the original sharp geometry. Chamfered edges
-    // that end at such a vertex taper their fillet to zero so both chunks
-    // agree exactly on the seam plane.
-    let pinned_verts: HashSet<u32> = solid
-        .positions
-        .iter()
-        .enumerate()
-        .filter(|&(_, &p)| point_touches_neighbor_geometry(p, data, neighbors))
-        .map(|(i, _)| i as u32)
-        .collect();
-    const TAPER_LEN: f32 = CHAMFER_WIDTH * 3.0;
-
     for idx in 0..positions.len() {
         let p = Vec3::from_array(positions[idx]);
 
@@ -1160,11 +1155,9 @@ pub fn generate_cut_offset_chamfer(
                 continue;
             }
             if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
-                if !pinned_verts.contains(&v) {
-                    chamfer_offsets[idx] = push.into();
-                    if let Some(&bisect) = vert_bisector.get(&v) {
-                        normals[idx] = bisect.into();
-                    }
+                chamfer_offsets[idx] = push.into();
+                if let Some(&bisect) = vert_bisector.get(&v) {
+                    normals[idx] = bisect.into();
                 }
                 at_vert = true;
                 break;
@@ -1197,24 +1190,11 @@ pub fn generate_cut_offset_chamfer(
             let dist_sq = (p - closest).length_squared();
 
             if dist_sq < 1e-6 {
-                // Taper the fillet to zero toward seam-pinned endpoints.
-                let mut taper = 1.0f32;
-                if pinned_verts.contains(&a) {
-                    taper = taper.min(((p - pa).length() / TAPER_LEN).clamp(0.0, 1.0));
-                }
-                if pinned_verts.contains(&b) {
-                    taper = taper.min(((p - pb).length() / TAPER_LEN).clamp(0.0, 1.0));
-                }
                 let ek = edge_key(a, b);
                 if let Some(&push) = edge_push.get(&ek) {
-                    chamfer_offsets[idx] = (push * taper).into();
+                    chamfer_offsets[idx] = push.into();
                     if let Some(&bisect) = edge_bisector.get(&ek) {
-                        if taper >= 1.0 {
-                            normals[idx] = bisect.into();
-                        } else if taper > 0.0 {
-                            let flat = Vec3::from_array(normals[idx]);
-                            normals[idx] = flat.lerp(bisect, taper).normalize_or_zero().into();
-                        }
+                        normals[idx] = bisect.into();
                     }
                 }
                 break;

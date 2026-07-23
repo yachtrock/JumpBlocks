@@ -1225,7 +1225,20 @@ fn terrace_across_chunk_seam_watertight() {
     let (boundary, _interior, non_manifold) = count_edge_sharing(&combined);
     let uncovered = count_uncovered_boundary_edges(&combined, "seam_terrace");
     eprintln!("seam terrace: boundary={boundary} uncovered={uncovered} non_manifold={non_manifold}");
-    assert!(uncovered == 0, "seam terrace union has {uncovered} open boundary edges (holes)");
+    if boundary > 0 {
+        dump_boundary_edges(&combined, "seam_terrace");
+    }
+    assert!(boundary == 0, "seam terrace union has {boundary} boundary edges (holes)");
+    assert!(non_manifold == 0, "seam terrace union has {non_manifold} non-manifold edges");
+
+    // The concave edge along the seam must actually be FILLETED, not left
+    // sharp: with the neighbor halo both chunks round it identically. The
+    // fillet pushes the crease off the exact corner line (16, 7.5, z), so
+    // no final vertex may remain exactly on it between the step walls.
+    let on_crease = combined.positions.iter().filter(|p| {
+        (p[0] - 16.0).abs() < 1e-4 && (p[1] - 7.5).abs() < 1e-4 && p[2] > 4.05 && p[2] < 4.95
+    }).count();
+    assert!(on_crease == 0, "seam concave edge not filleted: {on_crease} verts still on the crease");
 }
 
 /// Same, but with the raised block in the EAST chunk (mirror case) and the
@@ -1254,7 +1267,11 @@ fn terrace_across_chunk_seam_mirrored_watertight() {
     let (boundary, _interior, non_manifold) = count_edge_sharing(&combined);
     let uncovered = count_uncovered_boundary_edges(&combined, "seam_terrace_mirrored");
     eprintln!("seam terrace mirrored: boundary={boundary} uncovered={uncovered} non_manifold={non_manifold}");
-    assert!(uncovered == 0, "mirrored seam terrace union has {uncovered} open boundary edges");
+    if boundary > 0 {
+        dump_boundary_edges(&combined, "seam_terrace_mirrored");
+    }
+    assert!(boundary == 0, "mirrored seam terrace union has {boundary} boundary edges");
+    assert!(non_manifold == 0, "mirrored union has {non_manifold} non-manifold edges");
 }
 
 /// Staircase profile: two stacked cubes beside one — the concave edge's

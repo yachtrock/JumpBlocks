@@ -90,17 +90,32 @@ fn face_is_occluded(
     facing: Facing,
     size: (u8, u8, u8),
 ) -> bool {
+    let (ox, oy, oz) = block.origin;
+    face_is_occluded_at(data, neighbors, shapes, (ox as i32, oy as i32, oz as i32), face, facing, size)
+}
+
+/// Like `face_is_occluded`, with an explicit chunk-local origin that may lie
+/// outside `0..CHUNK` (used for neighbor-halo blocks).
+fn face_is_occluded_at(
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+    shapes: &ShapeTable,
+    origin: (i32, i32, i32),
+    face: &BlockFace,
+    facing: Facing,
+    size: (u8, u8, u8),
+) -> bool {
     if face.cell_coverage.is_empty() {
         return false; // diagonal faces are never culled
     }
 
-    let (ox, oy, oz) = block.origin;
+    let (ox, oy, oz) = origin;
     for cover in &face.cell_coverage {
         // Rotate the cell offset by the block's facing
         let rotated_cell = rotate_cell_offset(cover.cell, facing, size);
-        let cell_x = ox as i32 + rotated_cell.0 as i32;
-        let cell_y = oy as i32 + rotated_cell.1 as i32;
-        let cell_z = oz as i32 + rotated_cell.2 as i32;
+        let cell_x = ox + rotated_cell.0 as i32;
+        let cell_y = oy + rotated_cell.1 as i32;
+        let cell_z = oz + rotated_cell.2 as i32;
 
         // Rotate the face side by the block's facing
         let world_side = cover.side.rotated_by(facing);
@@ -142,11 +157,25 @@ fn block_is_fully_interior(
     facing: Facing,
 ) -> bool {
     let (ox, oy, oz) = block.origin;
+    block_is_fully_interior_at(data, neighbors, shapes, (ox as i32, oy as i32, oz as i32), shape, facing)
+}
+
+/// Like `block_is_fully_interior`, with an explicit chunk-local origin that
+/// may lie outside `0..CHUNK` (used for neighbor-halo blocks).
+fn block_is_fully_interior_at(
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+    shapes: &ShapeTable,
+    origin: (i32, i32, i32),
+    shape: &BlockShape,
+    facing: Facing,
+) -> bool {
+    let (ox, oy, oz) = origin;
     for &cell in &shape.occupied_cells {
         let rotated = rotate_cell_offset(cell, facing, shape.size);
-        let cx = ox as i32 + rotated.0 as i32;
-        let cy = oy as i32 + rotated.1 as i32;
-        let cz = oz as i32 + rotated.2 as i32;
+        let cx = ox + rotated.0 as i32;
+        let cy = oy + rotated.1 as i32;
+        let cz = oz + rotated.2 as i32;
         for (dx, dy, dz, side) in NEIGHBOR_OFFSETS_WITH_SIDE {
             let nx = cx + dx;
             let ny = cy + dy;
@@ -400,10 +429,16 @@ pub struct SolidFace {
     /// Indices into SolidMesh.positions (3 or 4 verts).
     pub verts: Vec<u32>,
     pub normal: Vec3,
-    /// Source block origin position in chunk coords.
-    pub voxel: (usize, usize, usize),
+    /// Source block origin position in chunk-local cell coords. Halo faces
+    /// (owned by a neighbor chunk) can sit outside `0..CHUNK` on any axis.
+    pub voxel: (i32, i32, i32),
     /// Block shape size in cells.
     pub block_size: (u8, u8, u8),
+    /// Whether this face belongs to a neighbor-chunk halo block. Halo faces
+    /// participate in every chamfer decision (edge sharpness, fillet pushes,
+    /// corner treatment) so both chunks compute identical seam fillets, but
+    /// only the owning chunk emits their geometry.
+    pub halo: bool,
     /// Original shape face triangulation (grid-aligned).
     /// Indices are into this face's `verts` list (0..verts.len()).
     pub orig_triangles: Vec<[usize; 3]>,
@@ -412,12 +447,16 @@ pub struct SolidFace {
 pub struct SolidMesh {
     pub positions: Vec<Vec3>,
     pub faces: Vec<SolidFace>,
+    /// Every neighbor-chunk block within the halo band, as
+    /// (chunk-local origin, shape size) — including fully-interior ones,
+    /// so component bridging matches the neighbor's own view.
+    pub halo_blocks: Vec<((i32, i32, i32), (u8, u8, u8))>,
     vert_map: HashMap<(i32, i32, i32), u32>,
 }
 
 impl SolidMesh {
     fn new() -> Self {
-        Self { positions: Vec::new(), faces: Vec::new(), vert_map: HashMap::new() }
+        Self { positions: Vec::new(), faces: Vec::new(), halo_blocks: Vec::new(), vert_map: HashMap::new() }
     }
 
     fn add_vert(&mut self, pos: Vec3) -> u32 {
@@ -439,8 +478,9 @@ pub fn build_solid_mesh_public(data: &ChunkData, neighbors: &ChunkNeighbors, sha
 struct RawFace {
     verts: Vec<Vec3>,
     normal: Vec3,
-    voxel: (usize, usize, usize),
+    voxel: (i32, i32, i32),
     block_size: (u8, u8, u8),
+    halo: bool,
     orig_triangles: Vec<[usize; 3]>,
 }
 
@@ -717,6 +757,7 @@ fn try_merge_face_set(
                 normal: first.normal,
                 voxel: first.voxel,
                 block_size: first.block_size,
+                halo: first.halo,
                 orig_triangles: tris,
             });
             for &fi in set {
@@ -747,7 +788,7 @@ fn try_merge_face_set(
 /// merging them would perturb established behavior for no benefit.
 fn merge_coplanar_faces(
     faces: Vec<RawFace>,
-    merge_blocks: &std::collections::HashSet<(usize, usize, usize)>,
+    merge_blocks: &std::collections::HashSet<(i32, i32, i32)>,
 ) -> Vec<RawFace> {
     let quant = |x: f32| (x * 1000.0) as i32;
     let qpos = |p: Vec3| {
@@ -850,8 +891,8 @@ fn merge_coplanar_faces(
 fn clip_contact_faces(
     faces: Vec<RawFace>,
     clip_shapes: Vec<RawFace>,
-) -> (Vec<RawFace>, std::collections::HashSet<(usize, usize, usize)>) {
-    let mut clipped_blocks: std::collections::HashSet<(usize, usize, usize)> =
+) -> (Vec<RawFace>, std::collections::HashSet<(i32, i32, i32)>) {
+    let mut clipped_blocks: std::collections::HashSet<(i32, i32, i32)> =
         std::collections::HashSet::new();
     // Real (emitted) faces first, then occluded faces that only act as clip
     // shapes: a culled face still covers the region it rests against, so the
@@ -985,6 +1026,7 @@ fn clip_contact_faces(
                 normal: face.normal,
                 voxel: face.voxel,
                 block_size: face.block_size,
+                halo: face.halo,
                 orig_triangles: tris,
             });
         }
@@ -1038,8 +1080,9 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
             let raw = RawFace {
                 verts: world_verts,
                 normal,
-                voxel: (ox as usize, oy as usize, oz as usize),
+                voxel: (ox as i32, oy as i32, oz as i32),
                 block_size: shape.size,
+                halo: false,
                 orig_triangles: face.triangles.clone(),
             };
 
@@ -1054,6 +1097,92 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
             raw_faces.push(raw);
         }
     }
+
+    // -- Neighbor halo -------------------------------------------------------
+    // Include every neighbor-chunk block within one block (HALO_CELLS) of our
+    // bounds. Their faces participate in all chamfer decisions — giving seam
+    // edges their second face and seam corners their full incident-edge set,
+    // so this chunk and the neighbor compute IDENTICAL fillets from identical
+    // local data — but only the owning chunk emits their geometry (see the
+    // `halo` flag). All in-band blocks are also recorded in `halo_blocks`
+    // (even fully-interior ones) so component bridging matches the
+    // neighbor's own view.
+    const HALO_CELLS: i32 = 2;
+    let mut halo_blocks: Vec<((i32, i32, i32), (u8, u8, u8))> = Vec::new();
+    for dcx in -1i32..=1 {
+        for dcy in -1i32..=1 {
+            for dcz in -1i32..=1 {
+                if dcx == 0 && dcy == 0 && dcz == 0 {
+                    continue;
+                }
+                let Some(nd) = neighbors.get(dcx, dcy, dcz) else { continue };
+                let base = (
+                    dcx * CHUNK_X as i32,
+                    dcy * CHUNK_Y as i32,
+                    dcz * CHUNK_Z as i32,
+                );
+                for (block_idx, block) in nd.blocks.iter().enumerate() {
+                    let Some(shape) = shapes.get(block.shape) else { continue };
+                    let facing = block.facing;
+                    let (ox, oy, oz) = block.origin;
+                    let origin = (base.0 + ox as i32, base.1 + oy as i32, base.2 + oz as i32);
+                    // Conservative rotated footprint (current shapes have
+                    // square XZ footprints, so this is exact for them).
+                    let sxz = shape.size.0.max(shape.size.2) as i32;
+                    let sy = shape.size.1 as i32;
+                    let in_band = origin.0 < CHUNK_X as i32 + HALO_CELLS
+                        && origin.0 + sxz > -HALO_CELLS
+                        && origin.1 < CHUNK_Y as i32 + HALO_CELLS
+                        && origin.1 + sy > -HALO_CELLS
+                        && origin.2 < CHUNK_Z as i32 + HALO_CELLS
+                        && origin.2 + sxz > -HALO_CELLS;
+                    if !in_band {
+                        continue;
+                    }
+                    halo_blocks.push((origin, shape.size));
+
+                    // Mirror the owner chunk's block-eligibility checks,
+                    // evaluated in the neighbor's own data.
+                    let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
+                        let cx = ox as usize + dx as usize;
+                        let cy = oy as usize + dy as usize;
+                        let cz = oz as usize + dz as usize;
+                        nd.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
+                    });
+                    if !has_cells {
+                        continue;
+                    }
+                    if block_is_fully_interior_at(data, neighbors, shapes, origin, shape, facing) {
+                        continue;
+                    }
+
+                    let wx = origin.0 as f32 * VOXEL_SIZE;
+                    let wy = origin.1 as f32 * VOXEL_SIZE;
+                    let wz = origin.2 as f32 * VOXEL_SIZE;
+                    for face in &shape.faces {
+                        let world_verts: Vec<Vec3> = face.vertices.iter()
+                            .map(|v| to_world(facing.rotate_block_point(*v, shape.size), wx, wy, wz))
+                            .collect();
+                        let normal = compute_world_normal(&world_verts, &face.triangles);
+                        let raw = RawFace {
+                            verts: world_verts,
+                            normal,
+                            voxel: origin,
+                            block_size: shape.size,
+                            halo: true,
+                            orig_triangles: face.triangles.clone(),
+                        };
+                        if face_is_occluded_at(data, neighbors, shapes, origin, face, facing, shape.size) {
+                            clip_shapes.push(raw);
+                            continue;
+                        }
+                        raw_faces.push(raw);
+                    }
+                }
+            }
+        }
+    }
+    mesh.halo_blocks = halo_blocks;
 
     let faces_before_btb = raw_faces.len();
 
@@ -1085,6 +1214,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
             normal: face.normal,
             voxel: face.voxel,
             block_size: face.block_size,
+            halo: face.halo,
             orig_triangles: face.orig_triangles,
         });
     }
@@ -1170,15 +1300,15 @@ pub fn is_sharp(edge: &EdgeInfo, mesh: &SolidMesh) -> bool {
 /// Returns true if two blocks share a full face — touching along exactly one
 /// axis with positive 2D overlap on the other two (not just an edge or vertex).
 pub fn blocks_are_face_adjacent(
-    voxel_a: (usize, usize, usize),
+    voxel_a: (i32, i32, i32),
     size_a: (u8, u8, u8),
-    voxel_b: (usize, usize, usize),
+    voxel_b: (i32, i32, i32),
     size_b: (u8, u8, u8),
 ) -> bool {
     let min_a = [voxel_a.0, voxel_a.1, voxel_a.2];
-    let max_a = [voxel_a.0 + size_a.0 as usize, voxel_a.1 + size_a.1 as usize, voxel_a.2 + size_a.2 as usize];
+    let max_a = [voxel_a.0 + size_a.0 as i32, voxel_a.1 + size_a.1 as i32, voxel_a.2 + size_a.2 as i32];
     let min_b = [voxel_b.0, voxel_b.1, voxel_b.2];
-    let max_b = [voxel_b.0 + size_b.0 as usize, voxel_b.1 + size_b.1 as usize, voxel_b.2 + size_b.2 as usize];
+    let max_b = [voxel_b.0 + size_b.0 as i32, voxel_b.1 + size_b.1 as i32, voxel_b.2 + size_b.2 as i32];
 
     for touch_axis in 0..3 {
         let touching = max_a[touch_axis] == min_b[touch_axis]
@@ -1204,165 +1334,6 @@ pub fn blocks_are_face_adjacent(
     }
     false
 }
-
-/// True if this edge lies on a chunk-boundary plane and the neighbor chunk
-/// has geometry directly adjacent to it — either continuing the surface
-/// flat, or meeting it in a step/corner.
-///
-/// Such edges must NOT be chamfered: the two chunks mesh independently, so
-/// any fillet applied on one side has no matching geometry on the other and
-/// opens a hole along the seam (this was visible in-game as pinholes and
-/// hard edges along terraces that cross chunk borders). Leaving the edge
-/// sharp on both sides keeps the seam watertight.
-pub fn edge_touches_neighbor_geometry(
-    ev0: u32,
-    ev1: u32,
-    solid: &SolidMesh,
-    data: &ChunkData,
-    neighbors: &ChunkNeighbors,
-) -> bool {
-    let p0 = solid.positions[ev0 as usize];
-    let p1 = solid.positions[ev1 as usize];
-
-    let chunk_size = CHUNK_X as f32 * VOXEL_SIZE;
-    let chunk_height = CHUNK_Y as f32 * VOXEL_SIZE;
-
-    // (axis, boundary coordinate, outward sign)
-    let planes: [(usize, f32, f32); 6] = [
-        (0, 0.0, -1.0),
-        (0, chunk_size, 1.0),
-        (1, 0.0, -1.0),
-        (1, chunk_height, 1.0),
-        (2, 0.0, -1.0),
-        (2, chunk_size, 1.0),
-    ];
-
-    let eps = 1e-4;
-    for (axis, boundary, sign) in planes {
-        if (p0[axis] - boundary).abs() > eps || (p1[axis] - boundary).abs() > eps {
-            continue;
-        }
-        let mut out = Vec3::ZERO;
-        out[axis] = sign;
-
-        let d = p1 - p0;
-        let len = d.length();
-        if len < 1e-5 {
-            continue;
-        }
-        let dir = d / len;
-        let perp = out.cross(dir);
-
-        // Sample the neighbor-side cells adjacent to the edge, cell by cell
-        // along its length and on both sides across the face plane.
-        let steps = (len / VOXEL_SIZE).round().max(1.0) as usize;
-        for i in 0..steps {
-            let s = p0 + dir * ((i as f32 + 0.5) * VOXEL_SIZE);
-            for side in [0.5f32, -0.5] {
-                let q = s + (out * 0.5 + perp * side) * VOXEL_SIZE;
-                let cx = (q.x / VOXEL_SIZE).floor() as i32;
-                let cy = (q.y / VOXEL_SIZE).floor() as i32;
-                let cz = (q.z / VOXEL_SIZE).floor() as i32;
-                if is_cell_occupied(data, neighbors, cx, cy, cz) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// True if this point lies on a chunk-boundary plane with neighbor-chunk
-/// geometry directly adjacent to it. Chamfered edges that *end* at such a
-/// point emit corner fillets/patches that the neighbor chunk can't mirror,
-/// so chamfering must stop there too (see `edge_touches_neighbor_geometry`).
-pub fn point_touches_neighbor_geometry(
-    p: Vec3,
-    data: &ChunkData,
-    neighbors: &ChunkNeighbors,
-) -> bool {
-    let chunk_size = CHUNK_X as f32 * VOXEL_SIZE;
-    let chunk_height = CHUNK_Y as f32 * VOXEL_SIZE;
-    let planes: [(usize, f32, f32); 6] = [
-        (0, 0.0, -1.0),
-        (0, chunk_size, 1.0),
-        (1, 0.0, -1.0),
-        (1, chunk_height, 1.0),
-        (2, 0.0, -1.0),
-        (2, chunk_size, 1.0),
-    ];
-    let eps = 1e-4;
-    for (axis, boundary, sign) in planes {
-        if (p[axis] - boundary).abs() > eps {
-            continue;
-        }
-        let mut out = Vec3::ZERO;
-        out[axis] = sign;
-        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
-        // The up-to-4 neighbor-side cells around the point.
-        for du in [-0.5f32, 0.5] {
-            for dv in [-0.5f32, 0.5] {
-                let mut q = p + out * (0.5 * VOXEL_SIZE);
-                q[u] += du * VOXEL_SIZE;
-                q[v] += dv * VOXEL_SIZE;
-                let cx = (q.x / VOXEL_SIZE).floor() as i32;
-                let cy = (q.y / VOXEL_SIZE).floor() as i32;
-                let cz = (q.z / VOXEL_SIZE).floor() as i32;
-                if is_cell_occupied(data, neighbors, cx, cy, cz) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Check if a boundary edge lies on a chunk face where a filled neighbor cell
-/// would continue the surface.
-#[allow(dead_code)]
-pub fn is_boundary_edge_at_neighbor_seam(
-    ev0: u32,
-    ev1: u32,
-    face: &SolidFace,
-    solid: &SolidMesh,
-    data: &ChunkData,
-    neighbors: &ChunkNeighbors,
-) -> bool {
-    let p0 = solid.positions[ev0 as usize];
-    let p1 = solid.positions[ev1 as usize];
-    let (vx, vy, vz) = face.voxel;
-
-    let chunk_size = CHUNK_X as f32 * VOXEL_SIZE;
-    let chunk_height = CHUNK_Y as f32 * VOXEL_SIZE;
-
-    let checks: [(f32, f32, i32, i32, i32); 6] = [
-        (p0.x, 0.0,          -1, 0, 0),
-        (p0.x, chunk_size,    1, 0, 0),
-        (p0.y, 0.0,           0, -1, 0),
-        (p0.y, chunk_height,  0, 1, 0),
-        (p0.z, 0.0,           0, 0, -1),
-        (p0.z, chunk_size,    0, 0,  1),
-    ];
-
-    let eps = 1e-4;
-    for (_, boundary, dx, dy, dz) in checks {
-        let (c0, c1) = match (dx != 0, dy != 0) {
-            (true, _)     => (p0.x, p1.x),
-            (_, true)     => (p0.y, p1.y),
-            _             => (p0.z, p1.z),
-        };
-        if (c0 - boundary).abs() < eps && (c1 - boundary).abs() < eps {
-            let nx = vx as i32 + dx;
-            let ny = vy as i32 + dy;
-            let nz = vz as i32 + dz;
-            if is_cell_occupied(data, neighbors, nx, ny, nz) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 
 // ---------------------------------------------------------------------------
 // Mesh builders
