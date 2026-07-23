@@ -4421,6 +4421,7 @@ dependencies = [
  "objc2-game-controller",
  "rhai",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

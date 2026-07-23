@@ -7,7 +7,9 @@ pub mod meshing;
 pub mod persistence;
 pub mod region;
 pub mod shape;
+pub mod stamp;
 pub mod streaming;
+pub mod world_def;
 pub mod world_grid;
 pub mod worldgen;
 

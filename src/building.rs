@@ -294,13 +294,34 @@ fn apply_building_commands(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut preview_res: ResMut<PreviewResources>,
     preview_query: Query<Entity, With<BlockPreview>>,
+    build_locks: Option<Res<crate::challenge::BuildLocks>>,
+    messages: Option<ResMut<crate::challenge::HudMessages>>,
 ) {
     let inner = api.inner.lock().unwrap();
 
     // --- Handle place requests ---
+    let mut messages = messages;
     for req in &inner.place_requests {
         if let Some(ref pos) = inner.build_pos {
-            if let Ok((mut chunk, _)) = chunks.get_mut(pos.chunk_entity) {
+            if let Ok((mut chunk, chunk_transform)) = chunks.get_mut(pos.chunk_entity) {
+                // Locked zones / active challenge runs prohibit modification
+                if let Some(ref locks) = build_locks {
+                    let world_pos = chunk_transform.transform_point(Vec3::new(
+                        (pos.x as f32 + 1.0) * VOXEL_SIZE,
+                        (pos.y as f32 + 0.5) * VOXEL_SIZE,
+                        (pos.z as f32 + 1.0) * VOXEL_SIZE,
+                    ));
+                    if !locks.can_build_at(world_pos) {
+                        if let Some(ref mut msgs) = messages {
+                            if locks.building_disabled {
+                                msgs.push("Can't build during a challenge run!");
+                            } else {
+                                msgs.push("This zone is locked — turn in trophies at its pedestal first.");
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if req.shape == SHAPE_WEDGE {
                     chunk.data.place_wedge(pos.x, pos.y, pos.z, req.facing, req.texture);
                 } else {

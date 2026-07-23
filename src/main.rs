@@ -1,9 +1,11 @@
 mod action_state;
 mod building;
 mod camera;
+mod challenge;
 mod curtain;
 mod debug_ui;
 mod edge_detection;
+mod export;
 mod layers;
 mod native_gamepad;
 mod network;
@@ -330,6 +332,11 @@ struct Cli {
     /// List all worlds and exit.
     #[arg(long)]
     list_worlds: bool,
+
+    /// Export the authored world (terrain, courses, challenges, zones) as
+    /// JSON for the web viewer, then exit.
+    #[arg(long, value_name = "FILE")]
+    export_web: Option<String>,
 }
 
 /// Debug start overrides from the CLI (--warp / --look / --cam-dist).
@@ -366,6 +373,11 @@ fn main() {
     let port_explicit = matches.value_source("port") == Some(clap::parser::ValueSource::CommandLine);
 
     // --- World management commands (run and exit) ---
+    if let Some(ref path) = cli.export_web {
+        export::export_world(std::path::Path::new(path));
+        return;
+    }
+
     if cli.list_worlds {
         let worlds = world_paths::list_worlds();
         let base = world_paths::worlds_base_dir();
@@ -529,6 +541,8 @@ fn main() {
             UiPlugin::new(game_ui),
             WireframePlugin::default(),
         ));
+        // ChallengePlugin needs DebugUiPlugin's EguiPlugin registered first.
+        app.add_plugins(challenge::ChallengePlugin);
         app.add_systems(Update, toggle_wireframe);
         app.add_systems(Startup, send_initial_ui_data);
         app.add_systems(PreUpdate, toggle_inventory);

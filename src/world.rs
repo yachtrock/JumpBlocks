@@ -6,14 +6,23 @@ use jumpblocks_voxel::chunk_lod::{ChunkDitherMaterial, DitherFadeExtension};
 use jumpblocks_voxel::coords::{ChunkPos, RegionId};
 use jumpblocks_voxel::persistence;
 use jumpblocks_voxel::streaming::{ChunkMaterial, WorldSavePath};
+use jumpblocks_voxel::world_def::{WorldDef, cell_base_world};
 use jumpblocks_voxel::world_grid::WorldGrid;
-use jumpblocks_voxel::worldgen::{self, IslandGenConfig};
 
 use crate::layers::GameLayer;
+
+/// World-space origin of the main region. The archipelago is authored so
+/// that Haven Isle's center (chunk 128,128) sits at the world origin.
+pub const REGION_ORIGIN: Vec3 = Vec3::new(-2048.0, 0.0, -2048.0);
 
 /// Resource communicating the spawn point to the player system.
 #[derive(Resource)]
 pub struct SpawnPoint(pub Vec3);
+
+/// Spawn position derived from the world definition (with clearance).
+fn def_spawn_point(def: &WorldDef) -> Vec3 {
+    cell_base_world(REGION_ORIGIN, def.spawn_cell) + Vec3::Y * 2.0
+}
 
 pub struct WorldPlugin;
 
@@ -21,9 +30,7 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         // Insert default spawn point immediately so it's available even if
         // setup_world hasn't run yet. setup_world overwrites with the real value.
-        let gen_config = IslandGenConfig::default();
-        let spawn_y = worldgen::island_spawn_height(&gen_config) + 3.0;
-        app.insert_resource(SpawnPoint(Vec3::new(0.0, spawn_y, 0.0)));
+        app.insert_resource(SpawnPoint(def_spawn_point(&WorldDef::standard())));
 
         app.init_resource::<WorldGrid>()
             .add_systems(Startup, setup_world)
@@ -43,7 +50,7 @@ fn attach_chunk_collision_layers(
     }
 }
 
-fn setup_world(
+pub fn setup_world(
     mut commands: Commands,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
@@ -51,9 +58,7 @@ fn setup_world(
     mut world_grid: ResMut<WorldGrid>,
     save_path: Option<Res<WorldSavePath>>,
 ) {
-    let has_rendering = meshes.is_some() && materials.is_some();
-
-    // Ground plane
+    // "Sea" safety net: an infinite plane just below the walkable sea floor.
     let ground = commands.spawn((
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
@@ -61,53 +66,14 @@ fn setup_world(
     ));
     let ground_entity = ground.id();
 
-    let platforms = [
-        Vec3::new(5.0, 1.0, 0.0),
-        Vec3::new(10.0, 2.5, 3.0),
-        Vec3::new(15.0, 4.0, -1.0),
-        Vec3::new(12.0, 5.5, -6.0),
-        Vec3::new(7.0, 7.0, -8.0),
-    ];
-
-    let platform_entities: Vec<(Entity, Vec3)> = platforms
-        .iter()
-        .map(|&pos| {
-            let e = commands
-                .spawn((
-                    Transform::from_translation(pos),
-                    RigidBody::Static,
-                    Collider::cuboid(4.0, 0.5, 4.0),
-                    CollisionLayers::new(
-                        [GameLayer::Default, GameLayer::CameraBlocking],
-                        LayerMask::ALL,
-                    ),
-                ))
-                .id();
-            (e, pos)
-        })
-        .collect();
-
     if let (Some(mut meshes), Some(mut materials)) = (meshes, materials) {
         commands.entity(ground_entity).insert((
-            Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(50.0)))),
+            Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(1500.0)))),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.3, 0.6, 0.3),
+                base_color: Color::srgb(0.15, 0.35, 0.55),
                 ..default()
             })),
         ));
-
-        let platform_material = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.5, 0.5, 0.6),
-            ..default()
-        });
-        let platform_mesh = meshes.add(Cuboid::new(4.0, 0.5, 4.0));
-
-        for (entity, _pos) in &platform_entities {
-            commands.entity(*entity).insert((
-                Mesh3d(platform_mesh.clone()),
-                MeshMaterial3d(platform_material.clone()),
-            ));
-        }
 
         // Directional light — pointing straight down for clean platformer shadows
         commands.spawn((
@@ -142,7 +108,7 @@ fn setup_world(
     }
 
     // --- Create a region and load chunk data ---
-    let region_id = world_grid.create_region(Vec3::new(-2048.0, 0.0, -2048.0));
+    let region_id = world_grid.create_region(REGION_ORIGIN);
     world_grid.active_region = region_id;
 
     let loaded_from_disk = if let Some(ref save) = save_path {
@@ -172,10 +138,8 @@ fn setup_world(
         if loaded_from_disk { "loaded from disk" } else { "generated" }
     );
 
-    // Compute spawn point above island surface
-    let gen_config = IslandGenConfig::default();
-    let spawn_y = worldgen::island_spawn_height(&gen_config) + 3.0; // +3 for clearance
-    commands.insert_resource(SpawnPoint(Vec3::new(0.0, spawn_y, 0.0)));
+    // Spawn point from the authored world definition
+    commands.insert_resource(SpawnPoint(def_spawn_point(&WorldDef::standard())));
 }
 
 // ---------------------------------------------------------------------------
@@ -245,19 +209,24 @@ fn save_region_to_disk(
     }
 }
 
-/// Generate island terrain for a region.
+/// Generate the authored archipelago (terrain + challenge courses) for a region.
 fn populate_region(region_id: RegionId, world_grid: &mut WorldGrid) {
     let region = world_grid.get_region_mut(region_id).unwrap();
-    let config = IslandGenConfig::default();
-    let count = worldgen::generate_island(region, &config);
-    info!("[world] Generated island with {} chunks", count);
+    let def = WorldDef::standard();
+    let count = def.build_into_region(region);
+    info!(
+        "[world] Generated archipelago: {} islands, {} challenges, {} chunks",
+        def.terrain.islands.len(),
+        def.challenges.len(),
+        count
+    );
 }
 
 /// Build a world to disk (CLI --new-world command).
 /// Creates the demo chunks and saves them without starting the game.
 pub fn build_world_to_disk(world_dir: &Path) {
     let mut world_grid = WorldGrid::new();
-    let region_id = world_grid.create_region(Vec3::new(-2048.0, 0.0, -2048.0));
+    let region_id = world_grid.create_region(REGION_ORIGIN);
     populate_region(region_id, &mut world_grid);
 
     let region = world_grid.get_region_mut(region_id).unwrap();
@@ -269,7 +238,7 @@ pub fn build_world_to_disk(world_dir: &Path) {
     // Save region metadata
     let meta = persistence::RegionMeta {
         region_id: region_id.0,
-        world_origin: [-2048.0, 0.0, -2048.0],
+        world_origin: [REGION_ORIGIN.x, REGION_ORIGIN.y, REGION_ORIGIN.z],
         chunk_count: region.chunk_count() as u32,
         data_generation: region.dirty.data_gen.0,
     };
