@@ -57,6 +57,7 @@ pub fn setup_world(
     dither_materials: Option<ResMut<Assets<ChunkDitherMaterial>>>,
     mut world_grid: ResMut<WorldGrid>,
     save_path: Option<Res<WorldSavePath>>,
+    debug_start: Option<Res<crate::DebugStart>>,
 ) {
     // "Sea" safety net: an infinite plane just below the walkable sea floor.
     let ground = commands.spawn((
@@ -138,8 +139,13 @@ pub fn setup_world(
         if loaded_from_disk { "loaded from disk" } else { "generated" }
     );
 
-    // Spawn point from the authored world definition
-    commands.insert_resource(SpawnPoint(def_spawn_point(&WorldDef::standard())));
+    // Spawn point from the authored world definition (--warp overrides,
+    // so debug warps survive the load-time spawn hold).
+    let spawn = debug_start
+        .as_ref()
+        .and_then(|d| d.warp)
+        .unwrap_or_else(|| def_spawn_point(&WorldDef::standard()));
+    commands.insert_resource(SpawnPoint(spawn));
 }
 
 // ---------------------------------------------------------------------------
