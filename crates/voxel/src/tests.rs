@@ -2055,3 +2055,59 @@ fn worldgen_slope_chunks_mesh_clean() {
     assert!(total_union_holes == 0, "{total_union_holes} open edges in neighbor unions");
     assert!(total_backfacing == 0, "{total_backfacing} backfacing sliver triangles");
 }
+
+/// Dump the chamfered mesh of every registered shape (plus a small terraced
+/// assembly) as JSON for external visualization.  Gated on SHAPE_GALLERY_OUT
+/// so it never runs in normal test sweeps.
+#[test]
+#[ignore]
+fn dump_shape_gallery() {
+    let Ok(out_path) = std::env::var("SHAPE_GALLERY_OUT") else {
+        return;
+    };
+    let shapes = make_shapes();
+    let mut exhibits: Vec<String> = Vec::new();
+
+    let mesh_json = |name: &str, mesh: &ChunkMeshData| -> String {
+        let pos: Vec<String> = mesh.positions.iter()
+            .flat_map(|p| p.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>())
+            .collect();
+        let nrm: Vec<String> = mesh.normals.iter()
+            .flat_map(|n| n.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>())
+            .collect();
+        let idx: Vec<String> = mesh.indices.iter().map(|i| i.to_string()).collect();
+        format!("{{\"name\":\"{name}\",\"positions\":[{}],\"normals\":[{}],\"indices\":[{}]}}",
+            pos.join(","), nrm.join(","), idx.join(","))
+    };
+
+    for (id, label) in [
+        (SHAPE_CUBE, "cube"),
+        (SHAPE_WEDGE, "wedge (1:2)"),
+        (SHAPE_WEDGE_OUTER, "outer corner (1:2)"),
+        (SHAPE_WEDGE_INNER, "inner corner (1:2)"),
+        (SHAPE_WEDGE_STEEP, "steep wedge (1:1)"),
+        (SHAPE_WEDGE_STEEP_OUTER, "steep outer (1:1)"),
+        (SHAPE_WEDGE_STEEP_INNER, "steep inner (1:1)"),
+    ] {
+        let mut data = ChunkData::new();
+        let shape = shapes.get(id).unwrap();
+        let occ = crate::shape::rotated_occupied_cells(shape, Facing::North);
+        data.place_block(id, Facing::North, 1, 14, 8, 14, &occ);
+        let nb = ChunkNeighbors::empty();
+        let r = generate_chunk_mesh(&data, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+        exhibits.push(mesh_json(label, r.full_res()));
+    }
+
+    // Terraced assembly: corners + straights + steep meeting with fillets.
+    {
+        let mut data = ChunkData::new();
+        let heights: &[&[i32]] = &[&[3, 2, 1], &[2, 2, 1], &[1, 1, 1]];
+        build_capped_terrain_into(&mut data, heights, (10, 6, 10), 0..3);
+        let nb = ChunkNeighbors::empty();
+        let r = generate_chunk_mesh(&data, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+        exhibits.push(mesh_json("assembled terrace", r.full_res()));
+    }
+
+    std::fs::write(&out_path, format!("[{}]", exhibits.join(","))).unwrap();
+    eprintln!("wrote {out_path}");
+}
