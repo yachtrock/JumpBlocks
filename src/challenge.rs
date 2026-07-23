@@ -54,6 +54,7 @@ impl Plugin for ChallengePlugin {
                     moving_platform_system,
                     sync_build_locks,
                     tick_messages,
+                    hold_player_until_world_ready,
                 ),
             )
             .add_systems(EguiPrimaryContextPass, challenge_hud);
@@ -430,6 +431,25 @@ fn challenge_timer_system(
         vel.0 = Vec3::ZERO;
     }
     active.0 = None;
+}
+
+/// While the reveal curtain is still down the world's collision meshes may
+/// not exist yet — without this the player falls through the terrain during
+/// loading and ends up under the islands. Pin them to the spawn point until
+/// the chunks are ready.
+fn hold_player_until_world_ready(
+    curtain: Option<Res<crate::curtain::CurtainState>>,
+    spawn: Res<SpawnPoint>,
+    mut players: Query<(&mut Transform, &mut LinearVelocity), With<Player>>,
+) {
+    let Some(curtain) = curtain else { return };
+    if curtain.chunks_ready {
+        return;
+    }
+    if let Ok((mut tf, mut vel)) = players.single_mut() {
+        tf.translation = spawn.0;
+        vel.0 = Vec3::ZERO;
+    }
 }
 
 fn kill_volume_system(

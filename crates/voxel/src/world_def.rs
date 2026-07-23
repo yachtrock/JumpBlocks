@@ -204,9 +204,9 @@ impl WorldDef {
         // below, so start_cell.y = ground + 1 (top of the pad layer).
         let c0_start = IVec3::new(4240, ground(4240, 4096) + 1, 4096);
         let c1_start = IVec3::new(3950, ground(3950, 4040) + 1, 4040);
-        let c2_start = IVec3::new(3456, ground(3456, 4380) + 1, 4380);
-        let c3_start = IVec3::new(3620, ground(3620, 4224) + 1, 4224);
-        let c4_start = IVec3::new(4512, ground(4512, 3702) + 1, 3702);
+        let c2_start = IVec3::new(3456, ground(3456, 4340) + 1, 4340);
+        let c3_start = IVec3::new(3570, ground(3570, 4224) + 1, 4224);
+        let c4_start = IVec3::new(4512, ground(4512, 3660) + 1, 3660);
 
         let challenges = vec![
             ChallengeDef {

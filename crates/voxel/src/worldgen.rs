@@ -157,17 +157,76 @@ pub struct TerrainSample {
     pub texture_body: u16,
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic value noise (no dependencies, seeded per island)
+// ---------------------------------------------------------------------------
+
+fn hash2(x: i32, z: i32, seed: u32) -> f32 {
+    let mut h = (x as u32)
+        .wrapping_mul(0x85EB_CA6B)
+        ^ (z as u32).wrapping_mul(0xC2B2_AE35)
+        ^ seed.wrapping_mul(0x9E37_79B9);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x27D4_EB2F);
+    h ^= h >> 15;
+    (h as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
+/// Smooth 2D value noise in roughly [-1, 1].
+fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
+    let x0 = x.floor();
+    let z0 = z.floor();
+    let fx = x - x0;
+    let fz = z - z0;
+    let sx = fx * fx * (3.0 - 2.0 * fx);
+    let sz = fz * fz * (3.0 - 2.0 * fz);
+    let (ix, iz) = (x0 as i32, z0 as i32);
+    let a = hash2(ix, iz, seed);
+    let b = hash2(ix + 1, iz, seed);
+    let c = hash2(ix, iz + 1, seed);
+    let d = hash2(ix + 1, iz + 1, seed);
+    a + (b - a) * sx + (c - a) * sz + (a - b - c + d) * sx * sz
+}
+
+/// Fractal Brownian motion: several octaves of value noise, ~[-1, 1].
+fn fbm(x: f32, z: f32, seed: u32, octaves: u32) -> f32 {
+    let mut total = 0.0;
+    let mut amp = 1.0;
+    let mut freq = 1.0;
+    let mut norm = 0.0;
+    for o in 0..octaves {
+        total += value_noise(x * freq, z * freq, seed.wrapping_add(o * 131)) * amp;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.03;
+    }
+    total / norm
+}
+
+/// Per-island noise seed derived from its center (stable & deterministic).
+fn island_seed(island: &IslandParams) -> u32 {
+    island.center.0.to_bits() ^ island.center.1.to_bits().rotate_left(16)
+}
+
 /// Height contributed by a single island at a position (chunk units).
 /// Returns 0 outside the island's coastline.
 fn island_height(island: &IslandParams, wx: f32, wz: f32) -> i32 {
+    let seed = island_seed(island);
     let dx = wx - island.center.0;
     let dz = wz - island.center.1;
-    let dist = (dx * dx + dz * dz).sqrt();
+    let mut dist = (dx * dx + dz * dz).sqrt();
 
-    // Coastline shape: angular variation
+    // Organic coastline: periodic fBm sampled on a circle (seamless in
+    // angle), plus a positional domain warp so bays and headlands aren't
+    // purely radial. `perimeter_bumps` sets how many undulations fit around
+    // the coast; `bump_amplitude` how deep they cut.
     let angle = dz.atan2(dx);
-    let bump = 1.0 + island.bump_amplitude * (angle * island.perimeter_bumps).sin();
+    let k = island.perimeter_bumps * 0.32;
+    let coast = fbm(angle.cos() * k + 7.3, angle.sin() * k - 3.1, seed, 3);
+    let bump = 1.0 + island.bump_amplitude * 2.2 * coast;
     let effective_radius = island.radius_chunks * bump;
+
+    dist += fbm(wx * 0.9, wz * 0.9, seed ^ 0x51ED_270B, 3) * island.radius_chunks * 0.07;
 
     if dist > effective_radius {
         return 0;
@@ -180,11 +239,13 @@ fn island_height(island: &IslandParams, wx: f32, wz: f32) -> i32 {
     let height_range = island.peak_height as f32 - island.edge_height as f32;
     let base_height = island.edge_height as f32 + t_smooth * height_range;
 
-    // Surface ridges: two overlapping sine patterns for more interesting terrain
-    let ridge1 = (wx * 1.7 + wz * 0.9).sin() * island.ridge_height * t;
-    let ridge2 = (wx * 0.6 - wz * 2.3).sin() * island.ridge_height * 0.5 * t;
+    // Rolling terrain: broad fBm hills with a touch of fine detail,
+    // fading out toward the coast.
+    let hills = fbm(wx * 0.55, wz * 0.55, seed ^ 0x9E37_79B9, 4);
+    let detail = fbm(wx * 1.9, wz * 1.9, seed ^ 0x1234_5678, 2);
+    let ridge = (hills * 1.5 + detail * 0.4) * island.ridge_height * t;
 
-    let total = base_height + ridge1 + ridge2;
+    let total = base_height + ridge;
     total.max(0.0) as i32
 }
 
@@ -238,7 +299,8 @@ pub fn generate_archipelago(region: &mut Region, config: &ArchipelagoConfig) -> 
     let mut min_cz = i32::MAX;
     let mut max_cz = i32::MIN;
     for island in &config.islands {
-        let extent = (island.radius_chunks * (1.0 + island.bump_amplitude))
+        // Coast noise can push the shoreline out to ~radius * (1 + 1.6*amp)
+        let extent = (island.radius_chunks * (1.0 + island.bump_amplitude * 1.6))
             .max(config.flat_extent)
             .ceil() as i32
             + 1;
