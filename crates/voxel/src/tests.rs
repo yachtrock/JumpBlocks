@@ -1092,6 +1092,171 @@ fn mixed_corner_l_plateau() {
     }
 }
 
+/// A 3D terrace inner corner: an L-plateau with a block raised ON the
+/// corner, as terraced terrain constantly produces. The raised block's two
+/// exposed vertical faces meet the lower tops at TWO concave edges which
+/// join a convex vertical edge at one tri-junction — the configuration that
+/// showed pinhole gaps in-game.
+#[test]
+fn terrace_inner_corner_clean() {
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    data.place_std(8, 14, 8, SHAPE_CUBE, Facing::North, 1);   // base corner
+    data.place_std(10, 14, 8, SHAPE_CUBE, Facing::North, 1);  // base east
+    data.place_std(8, 14, 10, SHAPE_CUBE, Facing::North, 1);  // base north
+    data.place_std(8, 15, 8, SHAPE_CUBE, Facing::North, 1);   // raised on corner
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    assert_concave_mesh_clean(result.full_res(), "terrace_inner_corner");
+}
+
+/// A full 2×2 terrace step (two raised blocks on a 2×3 base) — the raised
+/// slab's corner faces the lower terrace diagonally. Mirrors the stepped
+/// hillsides worldgen produces everywhere.
+#[test]
+fn terrace_step_row_clean() {
+    let shapes = make_shapes();
+    let mut data = ChunkData::new();
+    for (x, z) in [(8, 8), (10, 8), (8, 10), (10, 10), (12, 8), (12, 10)] {
+        data.place_std(x, 14, z, SHAPE_CUBE, Facing::North, 1);
+    }
+    data.place_std(8, 15, 8, SHAPE_CUBE, Facing::North, 1);
+    data.place_std(8, 15, 10, SHAPE_CUBE, Facing::North, 1);
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    assert_concave_mesh_clean(result.full_res(), "terrace_step_row");
+}
+
+/// Boundary edges that are not geometrically covered by other boundary
+/// geometry — i.e. genuine open holes. Chunk meshes join at seams with
+/// T-junctions (the same line subdivided differently on each side), which
+/// are geometrically closed; only an edge with empty space beside it is a
+/// real hole.
+fn count_uncovered_boundary_edges(mesh: &ChunkMeshData, label: &str) -> usize {
+    use bevy::math::Vec3;
+    let mut edge_count: HashMap<((i32, i32, i32), (i32, i32, i32)), usize> = HashMap::new();
+    let mut segments: HashMap<((i32, i32, i32), (i32, i32, i32)), (Vec3, Vec3)> = HashMap::new();
+    for i in (0..mesh.indices.len()).step_by(3) {
+        let tri = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
+        for j in 0..3 {
+            let a = mesh.positions[tri[j] as usize];
+            let b = mesh.positions[tri[(j + 1) % 3] as usize];
+            let (qa, qb) = (quantize_pos(&a), quantize_pos(&b));
+            let key = if qa <= qb { (qa, qb) } else { (qb, qa) };
+            *edge_count.entry(key).or_insert(0) += 1;
+            segments.entry(key).or_insert((Vec3::from_array(a), Vec3::from_array(b)));
+        }
+    }
+    let boundary: Vec<(Vec3, Vec3)> = edge_count
+        .iter()
+        .filter(|&(_, &c)| c == 1)
+        .map(|(k, _)| segments[k])
+        .collect();
+
+    fn point_seg_dist(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+        let ab = b - a;
+        let t = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+        (p - (a + ab * t)).length()
+    }
+
+    let mut uncovered = 0;
+    for (i, &(a, b)) in boundary.iter().enumerate() {
+        let open = [0.25f32, 0.5, 0.75].iter().any(|&t| {
+            let q = a.lerp(b, t);
+            !boundary.iter().enumerate().any(|(j, &(c, d))| {
+                j != i && point_seg_dist(q, c, d) < 1e-3
+            })
+        });
+        if open {
+            uncovered += 1;
+            eprintln!("  {label}: OPEN boundary edge ({:.3},{:.3},{:.3})→({:.3},{:.3},{:.3})",
+                a.x, a.y, a.z, b.x, b.y, b.z);
+        }
+    }
+    uncovered
+}
+
+/// Union of two adjacent chunks' meshes in world space, for seam checks.
+fn union_meshes(a: &ChunkMeshData, b: &ChunkMeshData, b_offset: [f32; 3]) -> ChunkMeshData {
+    let mut positions = a.positions.clone();
+    let mut normals = a.normals.clone();
+    let mut sharp_normals = a.sharp_normals.clone();
+    let mut uvs = a.uvs.clone();
+    let mut chamfer_offsets = a.chamfer_offsets.clone();
+    let mut indices = a.indices.clone();
+    let base = positions.len() as u32;
+    positions.extend(b.positions.iter().map(|p| {
+        [p[0] + b_offset[0], p[1] + b_offset[1], p[2] + b_offset[2]]
+    }));
+    normals.extend_from_slice(&b.normals);
+    sharp_normals.extend_from_slice(&b.sharp_normals);
+    uvs.extend_from_slice(&b.uvs);
+    chamfer_offsets.extend_from_slice(&b.chamfer_offsets);
+    indices.extend(b.indices.iter().map(|i| i + base));
+    ChunkMeshData { positions, normals, sharp_normals, uvs, chamfer_offsets, indices }
+}
+
+/// A terrace step that crosses a chunk seam: the lower terrace continues
+/// into the east chunk while a raised block sits right at the seam in the
+/// west chunk. The two chunks mesh independently (with neighbor data);
+/// their union must still be watertight — chamfer decisions on both sides
+/// of the seam must agree. This is the in-game "pinholes along terraces"
+/// configuration.
+#[test]
+fn terrace_across_chunk_seam_watertight() {
+    let shapes = make_shapes();
+    let chunk_w = crate::chunk::CHUNK_X as f32 * crate::chunk::VOXEL_SIZE;
+
+    let mut a = ChunkData::new();
+    a.place_std(28, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    a.place_std(30, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    a.place_std(30, 15, 8, SHAPE_CUBE, Facing::North, 1); // raised at the seam
+    let mut b = ChunkData::new();
+    b.place_std(0, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    b.place_std(2, 14, 8, SHAPE_CUBE, Facing::North, 1);
+
+    let mut na = ChunkNeighbors::empty();
+    na.set(1, 0, 0, b.clone());
+    let mut nb = ChunkNeighbors::empty();
+    nb.set(-1, 0, 0, a.clone());
+
+    let ra = generate_chunk_mesh(&a, &na, &shapes, crate::PresentationMode::CutAndOffset);
+    let rb = generate_chunk_mesh(&b, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+    let combined = union_meshes(ra.full_res(), rb.full_res(), [chunk_w, 0.0, 0.0]);
+
+    let (boundary, _interior, non_manifold) = count_edge_sharing(&combined);
+    let uncovered = count_uncovered_boundary_edges(&combined, "seam_terrace");
+    eprintln!("seam terrace: boundary={boundary} uncovered={uncovered} non_manifold={non_manifold}");
+    assert!(uncovered == 0, "seam terrace union has {uncovered} open boundary edges (holes)");
+}
+
+/// Same, but with the raised block in the EAST chunk (mirror case) and the
+/// seam crossing along Z as well, to catch direction-dependent asymmetry.
+#[test]
+fn terrace_across_chunk_seam_mirrored_watertight() {
+    let shapes = make_shapes();
+    let chunk_w = crate::chunk::CHUNK_X as f32 * crate::chunk::VOXEL_SIZE;
+
+    let mut a = ChunkData::new();
+    a.place_std(30, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    let mut b = ChunkData::new();
+    b.place_std(0, 14, 8, SHAPE_CUBE, Facing::North, 1);
+    b.place_std(0, 15, 8, SHAPE_CUBE, Facing::North, 1); // raised, east side
+    b.place_std(2, 14, 8, SHAPE_CUBE, Facing::North, 1);
+
+    let mut na = ChunkNeighbors::empty();
+    na.set(1, 0, 0, b.clone());
+    let mut nb = ChunkNeighbors::empty();
+    nb.set(-1, 0, 0, a.clone());
+
+    let ra = generate_chunk_mesh(&a, &na, &shapes, crate::PresentationMode::CutAndOffset);
+    let rb = generate_chunk_mesh(&b, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+    let combined = union_meshes(ra.full_res(), rb.full_res(), [chunk_w, 0.0, 0.0]);
+
+    let (boundary, _interior, non_manifold) = count_edge_sharing(&combined);
+    let uncovered = count_uncovered_boundary_edges(&combined, "seam_terrace_mirrored");
+    eprintln!("seam terrace mirrored: boundary={boundary} uncovered={uncovered} non_manifold={non_manifold}");
+    assert!(uncovered == 0, "mirrored seam terrace union has {uncovered} open boundary edges");
+}
+
 /// Staircase profile: two stacked cubes beside one — the concave edge's
 /// ENDPOINTS are mixed corners (2 convex + 1 concave edges each).
 #[test]

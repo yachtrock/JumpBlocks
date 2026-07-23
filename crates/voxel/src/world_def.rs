@@ -278,28 +278,40 @@ impl WorldDef {
             },
         ];
 
-        let platforms = vec![
-            MovingPlatformDef {
-                name: "Sea Ferry".to_string(),
-                from_cell: IVec3::new(3872, 7, 4141),
-                to_cell: IVec3::new(3616, 7, 4192),
-                half_extents: Vec3::new(2.0, 0.25, 2.0),
-                period: 30.0,
-            },
-            MovingPlatformDef {
-                name: "Spire Lift".to_string(),
-                // Filled in relative to the Spire Spiral course gap; see
-                // course authoring below (kept in sync manually).
-                from_cell: IVec3::new(4418, 76, 3600),
-                to_cell: IVec3::new(4448, 88, 3524),
-                half_extents: Vec3::new(1.5, 0.25, 1.5),
-                period: 10.0,
-            },
-        ];
-
         let spawn_cell = IVec3::new(4096, ground(4096, 4096) + 1, 4096);
 
-        Self { terrain, zones, challenges, platforms, spawn_cell }
+        let mut def = Self { terrain, zones, challenges, platforms: Vec::new(), spawn_cell };
+
+        // The Sea Ferry rides low enough to board from the sand (top at
+        // ~2.25 wu; the measured max hop-up is 2.0 wu from a 0.5 wu floor).
+        def.platforms.push(MovingPlatformDef {
+            name: "Sea Ferry".to_string(),
+            from_cell: IVec3::new(3872, 4, 4141),
+            to_cell: IVec3::new(3616, 4, 4192),
+            half_extents: Vec3::new(2.0, 0.25, 2.0),
+            period: 30.0,
+        });
+
+        // The Spire Lift bridges the deliberate gap in the Spire Spiral
+        // course — its endpoints are derived from the actual course stones
+        // so it always lines up.
+        let layout = def.course_layout(4);
+        if let Some((a, b)) = layout.lift_gap {
+            let s1 = layout.stones[a];
+            let s2 = layout.stones[b];
+            let dir = (s2 - s1).as_vec3().normalize_or_zero();
+            let from = s1.as_vec3() + dir * 8.0;
+            let to = s2.as_vec3() - dir * 8.0;
+            def.platforms.push(MovingPlatformDef {
+                name: "Spire Lift".to_string(),
+                from_cell: IVec3::new(from.x as i32, s1.y, from.z as i32),
+                to_cell: IVec3::new(to.x as i32, s2.y, to.z as i32),
+                half_extents: Vec3::new(1.5, 0.25, 1.5),
+                period: 10.0,
+            });
+        }
+
+        def
     }
 
     /// Generate terrain and stamp all authored structures into the region.
@@ -342,191 +354,232 @@ impl WorldDef {
     }
 
     fn stamp_courses(&self, s: &mut Stamper) {
-        // C0 First Steps: gentle arc of stones from the east flank of Haven
-        // down toward the goal over the sea.
-        stamp_stone_arc(
-            s,
-            self.challenges[0].start_cell,
-            self.challenges[0].goal_cell + IVec3::new(0, -2, 0),
-            9,
-            30.0,
-            6.0,
-            TEX_COURSE,
-        );
-
-        // C1 Ridge Runner: terrain-hugging stones over the ridge to the
-        // summit; floating 3 cells above ground along a bowed path.
-        stamp_terrain_run(
-            s,
-            self,
-            self.challenges[1].start_cell,
-            self.challenges[1].goal_cell + IVec3::new(0, -2, 0),
-            10,
-            40.0,
-            3,
-            TEX_COURSE,
-        );
-
-        // C2 Magma Hop: low stones across the sea, kill volume below.
-        stamp_stone_arc(
-            s,
-            self.challenges[2].start_cell,
-            self.challenges[2].goal_cell + IVec3::new(0, -2, 0),
-            8,
-            24.0,
-            4.0,
-            TEX_COURSE,
-        );
-
-        // C3 Ember Ascent: spiral of ramped stones up the cone.
-        stamp_spiral(
-            s,
-            self,
-            IVec3::new(3456, 0, 4224), // Ember center
-            self.challenges[3].start_cell,
-            self.challenges[3].goal_cell + IVec3::new(0, -2, 0),
-            10,
-            160.0,
-            36.0,
-            Some(3), // hug terrain at +3 cells
-            TEX_COURSE,
-        );
-
-        // C4 Spire Spiral: floating spiral around the spire with a gap for
-        // the Spire Lift moving platform (t in [0.5, 0.65] skipped).
-        stamp_spiral(
-            s,
-            self,
-            IVec3::new(4512, 0, 3552), // Spire center
-            self.challenges[4].start_cell,
-            self.challenges[4].goal_cell + IVec3::new(0, -2, 0),
-            14,
-            110.0,
-            55.0,
-            None, // free-floating: interpolate start.y -> goal.y
-            TEX_COURSE,
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Course stamping helpers
-// ---------------------------------------------------------------------------
-
-fn facing_toward(delta: IVec3) -> Facing {
-    if delta.x.abs() >= delta.z.abs() {
-        if delta.x >= 0 { Facing::East } else { Facing::West }
-    } else if delta.z >= 0 {
-        Facing::North
-    } else {
-        Facing::South
-    }
-}
-
-/// A run of floating 2×2-block stones from `start` to `end` with a lateral
-/// sine bow (`lateral` cells) and a vertical arc (`rise` cells at midpoint).
-fn stamp_stone_arc(
-    s: &mut Stamper,
-    start: IVec3,
-    end: IVec3,
-    steps: i32,
-    lateral: f32,
-    rise: f32,
-    texture: u16,
-) {
-    let dir = (end - start).as_vec3();
-    let perp = Vec3::new(-dir.z, 0.0, dir.x).normalize_or_zero();
-    for i in 1..steps {
-        let t = i as f32 / steps as f32;
-        let bow = (t * std::f32::consts::PI).sin();
-        let p = start.as_vec3() + dir * t + perp * lateral * bow + Vec3::Y * (rise * bow);
-        let cell = IVec3::new(p.x as i32, p.y as i32, p.z as i32);
-        // Stone: 2×2 blocks, one layer, standing surface at cell.y
-        s.platform(cell.x - 2, cell.y - 1, cell.z - 2, 2, 1, 2, texture);
-    }
-}
-
-/// Stones that follow the terrain at `hover` cells above ground along a
-/// bowed path (for over-land runs).
-#[allow(clippy::too_many_arguments)]
-fn stamp_terrain_run(
-    s: &mut Stamper,
-    def: &WorldDef,
-    start: IVec3,
-    end: IVec3,
-    steps: i32,
-    lateral: f32,
-    hover: i32,
-    texture: u16,
-) {
-    let dir = (end - start).as_vec3();
-    let perp = Vec3::new(-dir.z, 0.0, dir.x).normalize_or_zero();
-    for i in 1..steps {
-        let t = i as f32 / steps as f32;
-        let bow = (t * std::f32::consts::PI).sin();
-        let p = start.as_vec3() + dir * t + perp * lateral * bow;
-        let gx = p.x as i32;
-        let gz = p.z as i32;
-        let gy = def.ground(gx, gz) + hover;
-        s.platform(gx - 2, gy - 1, gz - 2, 2, 1, 2, texture);
-    }
-}
-
-/// A spiral of stones around `center` from `start` to `end`.
-/// Radius shrinks from `r0` to `r1`; if `hug` is set the stones sit that many
-/// cells above terrain, otherwise Y interpolates start→end. Every stone gets
-/// a wedge ramp on its uphill edge pointing back along the path.
-#[allow(clippy::too_many_arguments)]
-fn stamp_spiral(
-    s: &mut Stamper,
-    def: &WorldDef,
-    center: IVec3,
-    start: IVec3,
-    end: IVec3,
-    steps: i32,
-    r0: f32,
-    r1: f32,
-    hug: Option<i32>,
-    texture: u16,
-) {
-    let a0 = ((start.z - center.z) as f32).atan2((start.x - center.x) as f32);
-    let total_angle = 2.0 * std::f32::consts::PI * 1.1; // just over one loop
-    let mut prev = start;
-    for i in 1..=steps {
-        let t = i as f32 / steps as f32;
-        // Gap for the moving platform on free-floating spirals
-        if hug.is_none() && (0.5..0.65).contains(&t) {
-            continue;
+        for idx in 0..self.challenges.len() {
+            let layout = self.course_layout(idx);
+            // Interior stones only: index 0 is the start pad and the last
+            // entry is the goal platform, both stamped separately.
+            for stone in &layout.stones[1..layout.stones.len().saturating_sub(1)] {
+                s.platform(stone.x - 3, stone.y - 1, stone.z - 3, 3, 1, 3, TEX_COURSE);
+            }
         }
-        let (cell, is_last) = if i == steps {
-            (end, true)
+    }
+
+    /// The hop-by-hop layout of a challenge course. Every consecutive pair
+    /// of standing positions (including the start pad and goal platform)
+    /// respects the measured player envelope — see `sample_course`.
+    pub fn course_layout(&self, idx: usize) -> CourseLayout {
+        let c = &self.challenges[idx];
+        let start = c.start_cell.as_vec3();
+        // Standing surface on the goal platform is one cell below the goal
+        // entity's float cell.
+        let goal = (c.goal_cell - IVec3::Y).as_vec3();
+
+        match idx {
+            // First Steps: gentle bowed arc off Haven's east flank.
+            0 => CourseLayout::plain(sample_course(&arc_path(start, goal, 30.0))),
+            // Ridge Runner: terrain-hugging bowed run to the summit.
+            1 => {
+                let xz = arc_path(start, goal, 40.0);
+                let path = move |t: f32| {
+                    let p = xz(t);
+                    let g = self.ground(p.x as i32, p.z as i32) as f32;
+                    // Blend to the exact endpoint heights at both ends
+                    let hover = g + 3.0;
+                    let y = if t < 0.1 {
+                        start.y + (hover - start.y) * (t / 0.1)
+                    } else if t > 0.9 {
+                        hover + (goal.y - hover) * ((t - 0.9) / 0.1)
+                    } else {
+                        hover
+                    };
+                    Vec3::new(p.x, y, p.z)
+                };
+                CourseLayout::plain(sample_course(&path))
+            }
+            // Magma Hop: low bowed arc across the sea.
+            2 => CourseLayout::plain(sample_course(&arc_path(start, goal, 24.0))),
+            // Ember Ascent: spiral hugging the cone.
+            3 => {
+                let center = Vec3::new(3456.0, 0.0, 4224.0);
+                let spiral = spiral_path(center, start, goal, 160.0, 40.0);
+                let path = move |t: f32| {
+                    let p = spiral(t);
+                    let g = self.ground(p.x as i32, p.z as i32) as f32 + 3.0;
+                    // Follow terrain in the middle, honor endpoints
+                    let y = if t < 0.1 {
+                        start.y + (g - start.y) * (t / 0.1)
+                    } else if t > 0.85 {
+                        g + (goal.y - g) * ((t - 0.85) / 0.15)
+                    } else {
+                        g
+                    };
+                    Vec3::new(p.x, y, p.z)
+                };
+                CourseLayout::plain(sample_course(&path))
+            }
+            // Spire Spiral: free-floating spiral with a moving-platform gap.
+            4 => {
+                let center = Vec3::new(4512.0, 0.0, 3552.0);
+                let spiral = spiral_path(center, start, goal, 110.0, 55.0);
+                let lerp_y = move |t: f32| {
+                    let p = spiral(t);
+                    Vec3::new(p.x, start.y + (goal.y - start.y) * t, p.z)
+                };
+                let part1 = {
+                    let f = |t: f32| lerp_y(t * 0.5);
+                    sample_course(&f)
+                };
+                let part2 = {
+                    let f = |t: f32| lerp_y(0.62 + t * 0.38);
+                    sample_course(&f)
+                };
+                let gap_a = part1.len() - 1;
+                let mut stones = part1;
+                stones.extend(part2);
+                CourseLayout { lift_gap: Some((gap_a, gap_a + 1)), stones }
+            }
+            _ => CourseLayout::plain(vec![c.start_cell, c.goal_cell - IVec3::Y]),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Course layout
+// ---------------------------------------------------------------------------
+
+// The player's measured movement envelope (tests/jump_metrics.rs):
+//   jump apex ~3.1 wu, max ledge hop-up 2.0 wu, max run gap >= 11 wu.
+// Authoring uses comfortable fractions so courses are challenges, not
+// pixel-perfect maxima.
+
+/// Hard ceiling on the rise of a single hop (world units).
+pub const PLAYER_MAX_RISE_WU: f32 = 2.0;
+/// Hard ceiling on the edge-to-edge gap of a single hop (world units).
+pub const PLAYER_MAX_GAP_WU: f32 = 11.0;
+
+/// Authoring limit: rise per hop in cells (1.5 wu of the 2.0 measured).
+const STEP_RISE_CELLS: f32 = 3.0;
+/// Authoring limit: edge-to-edge gap per hop in cells (5 wu of the 11 measured).
+const STEP_GAP_CELLS: f32 = 10.0;
+/// Course stones are 3×3 blocks = 6×6 cells.
+const STONE_CELLS: f32 = 6.0;
+
+/// A challenge course as standing positions: `stones[0]` is the start pad,
+/// the last entry is the goal platform surface.
+pub struct CourseLayout {
+    pub stones: Vec<IVec3>,
+    /// Consecutive stone indices bridged by a moving platform, not a jump.
+    pub lift_gap: Option<(usize, usize)>,
+}
+
+impl CourseLayout {
+    fn plain(stones: Vec<IVec3>) -> Self {
+        Self { stones, lift_gap: None }
+    }
+}
+
+/// A bowed path from `start` to `end` (cells): lateral sine offset, linear Y.
+fn arc_path(start: Vec3, end: Vec3, lateral: f32) -> impl Fn(f32) -> Vec3 {
+    let dir = end - start;
+    let perp = Vec3::new(-dir.z, 0.0, dir.x).normalize_or_zero();
+    move |t: f32| start + dir * t + perp * lateral * (t * std::f32::consts::PI).sin()
+}
+
+/// A spiral (XZ only; Y = 0) around `center` starting at `start`'s bearing,
+/// radius `r0`→`r1`, just over one full loop, blending to `end` at the tail.
+fn spiral_path(center: Vec3, start: Vec3, end: Vec3, r0: f32, r1: f32) -> impl Fn(f32) -> Vec3 {
+    let a0 = (start.z - center.z).atan2(start.x - center.x);
+    let total = 2.0 * std::f32::consts::PI * 1.1;
+    move |t: f32| {
+        let angle = a0 + total * t;
+        let radius = r0 + (r1 - r0) * t;
+        let p = Vec3::new(
+            center.x + angle.cos() * radius,
+            0.0,
+            center.z + angle.sin() * radius,
+        );
+        // Blend toward the exact endpoints so the course connects.
+        if t < 0.08 {
+            let k = t / 0.08;
+            Vec3::new(start.x, 0.0, start.z).lerp(p, k)
+        } else if t > 0.88 {
+            let k = (t - 0.88) / 0.12;
+            p.lerp(Vec3::new(end.x, 0.0, end.z), k * k)
         } else {
-            let angle = a0 + total_angle * t;
-            let radius = r0 + (r1 - r0) * t;
-            let gx = center.x + (angle.cos() * radius) as i32;
-            let gz = center.z + (angle.sin() * radius) as i32;
-            let gy = match hug {
-                Some(h) => def.ground(gx, gz) + h,
-                None => start.y + ((end.y - start.y) as f32 * t) as i32,
-            };
-            (IVec3::new(gx, gy, gz), false)
-        };
-        s.platform(cell.x - 2, cell.y - 1, cell.z - 2, 2, 1, 2, texture);
-        // Ramp on the approach edge when climbing
-        if cell.y > prev.y + 1 && !is_last {
-            let toward_prev = prev - cell;
-            let f = facing_toward(toward_prev);
-            let off = match f {
-                Facing::East => IVec3::new(4, 0, 0),
-                Facing::West => IVec3::new(-4, 0, 0),
-                Facing::North => IVec3::new(0, 0, 4),
-                Facing::South => IVec3::new(0, 0, -4),
-            };
-            s.place_wedge(cell.x + off.x, cell.y - 1, cell.z + off.z, f, texture);
+            p
         }
-        prev = cell;
     }
 }
+
+/// Sample a path into stone positions such that every consecutive hop
+/// (including from `path(0)` and to `path(1)`) stays inside the authoring
+/// envelope: edge gap ≤ `STEP_GAP_CELLS`, |rise| ≤ `STEP_RISE_CELLS`.
+///
+/// Greedy: walk the path finely; when the next sample would violate a
+/// constraint relative to the last emitted stone, emit the previous sample.
+/// On terrain steeper than the envelope allows, the rise is clamped so the
+/// stones ladder up in valid steps.
+fn sample_course(path: &impl Fn(f32) -> Vec3) -> Vec<IVec3> {
+    let to_cell = |p: Vec3| IVec3::new(
+        p.x.round() as i32,
+        p.y.round() as i32,
+        p.z.round() as i32,
+    );
+
+    let mut out = vec![to_cell(path(0.0))];
+    let mut last = path(0.0);
+    let mut prev_sample = last;
+
+    const FINE: i32 = 1200;
+    for i in 1..=FINE {
+        let t = i as f32 / FINE as f32;
+        let p = path(t);
+        let horiz = Vec2::new(p.x - last.x, p.z - last.z).length();
+        let gap = horiz - STONE_CELLS;
+        let rise = p.y - last.y;
+        if gap > STEP_GAP_CELLS || rise.abs() > STEP_RISE_CELLS {
+            // Emit the last sample that still satisfied the constraints,
+            // clamping the rise for terrain steeper than one hop.
+            let mut emit = prev_sample;
+            let d = emit.y - last.y;
+            if d.abs() > STEP_RISE_CELLS {
+                emit.y = last.y + STEP_RISE_CELLS.copysign(d);
+            }
+            // Ensure forward progress even on near-vertical terrain.
+            let advance = Vec2::new(emit.x - last.x, emit.z - last.z).length();
+            if advance < 2.0 {
+                emit.x = p.x;
+                emit.z = p.z;
+            }
+            let cell = to_cell(emit);
+            if cell != *out.last().unwrap() {
+                out.push(cell);
+            }
+            last = emit;
+        }
+        prev_sample = p;
+    }
+
+    let end = to_cell(path(1.0));
+    if end != *out.last().unwrap() {
+        // The final leg's rise may still exceed one hop (e.g. a goal high
+        // above the last stone); insert ladder steps if needed.
+        let mut lastv = out.last().unwrap().as_vec3();
+        let endv = end.as_vec3();
+        loop {
+            let d = endv.y - lastv.y;
+            if d.abs() <= STEP_RISE_CELLS {
+                break;
+            }
+            let t = STEP_RISE_CELLS / d.abs();
+            lastv = lastv.lerp(endv, t.min(1.0));
+            out.push(to_cell(lastv));
+        }
+        out.push(end);
+    }
+    out
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -606,6 +659,67 @@ mod tests {
                 g
             );
         }
+    }
+
+    #[test]
+    fn courses_respect_player_envelope() {
+        // Every hop of every course must be clearable by the measured
+        // player (tests/jump_metrics.rs): the authoring limits used here
+        // are comfortable fractions of PLAYER_MAX_RISE_WU / _GAP_WU.
+        let def = WorldDef::standard();
+        let cells_to_wu = crate::chunk::VOXEL_SIZE;
+        for idx in 0..def.challenges.len() {
+            let layout = def.course_layout(idx);
+            let name = &def.challenges[idx].name;
+            assert!(layout.stones.len() >= 3, "{name} should have stones");
+            for (i, pair) in layout.stones.windows(2).enumerate() {
+                if layout.lift_gap == Some((i, i + 1)) {
+                    continue; // bridged by the moving platform
+                }
+                let a = pair[0].as_vec3();
+                let b = pair[1].as_vec3();
+                let gap_wu =
+                    (Vec2::new(b.x - a.x, b.z - a.z).length() - STONE_CELLS) * cells_to_wu;
+                let rise_wu = (b.y - a.y) * cells_to_wu;
+                assert!(
+                    gap_wu <= STEP_GAP_CELLS * cells_to_wu + 0.6,
+                    "{name} hop {i}: gap {gap_wu:.1} wu too wide ({:?} -> {:?})",
+                    pair[0], pair[1]
+                );
+                assert!(
+                    rise_wu.abs() <= STEP_RISE_CELLS * cells_to_wu + 0.26,
+                    "{name} hop {i}: rise {rise_wu:.1} wu too tall ({:?} -> {:?})",
+                    pair[0], pair[1]
+                );
+                // And well inside what the real player can actually do:
+                assert!(gap_wu <= PLAYER_MAX_GAP_WU * 0.6);
+                assert!(rise_wu.abs() <= PLAYER_MAX_RISE_WU * 0.8 + 0.26);
+            }
+            // Stones never sit below the sea surface
+            for stone in &layout.stones {
+                assert!(stone.y >= 2, "{name} stone under the sea: {stone:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn spire_lift_bridges_its_gap() {
+        let def = WorldDef::standard();
+        let layout = def.course_layout(4);
+        let (a, b) = layout.lift_gap.expect("Spire Spiral should have a lift gap");
+        let lift = def
+            .platforms
+            .iter()
+            .find(|p| p.name == "Spire Lift")
+            .expect("Spire Lift exists");
+        // Lift endpoints hug the stones on both sides of the gap
+        let s1 = layout.stones[a].as_vec3();
+        let s2 = layout.stones[b].as_vec3();
+        let from = lift.from_cell.as_vec3();
+        let to = lift.to_cell.as_vec3();
+        assert!(Vec2::new(from.x - s1.x, from.z - s1.z).length() <= 12.0);
+        assert!(Vec2::new(to.x - s2.x, to.z - s2.z).length() <= 12.0);
+        assert!((from.y - s1.y).abs() <= 3.0 && (to.y - s2.y).abs() <= 3.0);
     }
 
     #[test]

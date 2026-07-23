@@ -351,13 +351,13 @@ pub fn generate_cut_offset_chamfer(
                     return false;
                 }
             }
-            if info.faces.len() < 2 {
-                let fi = info.faces[0];
-                if is_boundary_edge_at_neighbor_seam(
-                    a, b, &solid.faces[fi], &solid, data, neighbors,
-                ) {
-                    return false;
-                }
+            // Never chamfer an edge that lies on a chunk seam with neighbor
+            // geometry adjacent to it — the neighbor chunk meshes that side
+            // independently, and only identical un-filleted geometry on both
+            // sides keeps the seam watertight. (Applies to interior concave
+            // edges lying on the seam plane too, not just lone edges.)
+            if edge_touches_neighbor_geometry(a, b, &solid, data, neighbors) {
+                return false;
             }
             true
         })
@@ -1133,6 +1133,20 @@ pub fn generate_cut_offset_chamfer(
     // face normals that we'll blend back to when chamfer_amount goes to 0.
     let sharp_normals = normals.clone();
 
+    // Vertices "pinned" to a chunk seam with neighbor geometry: fillet
+    // displacement must vanish there, because the neighbor chunk meshes its
+    // side independently with the original sharp geometry. Chamfered edges
+    // that end at such a vertex taper their fillet to zero so both chunks
+    // agree exactly on the seam plane.
+    let pinned_verts: HashSet<u32> = solid
+        .positions
+        .iter()
+        .enumerate()
+        .filter(|&(_, &p)| point_touches_neighbor_geometry(p, data, neighbors))
+        .map(|(i, _)| i as u32)
+        .collect();
+    const TAPER_LEN: f32 = CHAMFER_WIDTH * 3.0;
+
     for idx in 0..positions.len() {
         let p = Vec3::from_array(positions[idx]);
 
@@ -1146,9 +1160,11 @@ pub fn generate_cut_offset_chamfer(
                 continue;
             }
             if (p - solid.positions[v as usize]).length_squared() < 1e-6 {
-                chamfer_offsets[idx] = push.into();
-                if let Some(&bisect) = vert_bisector.get(&v) {
-                    normals[idx] = bisect.into();
+                if !pinned_verts.contains(&v) {
+                    chamfer_offsets[idx] = push.into();
+                    if let Some(&bisect) = vert_bisector.get(&v) {
+                        normals[idx] = bisect.into();
+                    }
                 }
                 at_vert = true;
                 break;
@@ -1181,11 +1197,24 @@ pub fn generate_cut_offset_chamfer(
             let dist_sq = (p - closest).length_squared();
 
             if dist_sq < 1e-6 {
+                // Taper the fillet to zero toward seam-pinned endpoints.
+                let mut taper = 1.0f32;
+                if pinned_verts.contains(&a) {
+                    taper = taper.min(((p - pa).length() / TAPER_LEN).clamp(0.0, 1.0));
+                }
+                if pinned_verts.contains(&b) {
+                    taper = taper.min(((p - pb).length() / TAPER_LEN).clamp(0.0, 1.0));
+                }
                 let ek = edge_key(a, b);
                 if let Some(&push) = edge_push.get(&ek) {
-                    chamfer_offsets[idx] = push.into();
+                    chamfer_offsets[idx] = (push * taper).into();
                     if let Some(&bisect) = edge_bisector.get(&ek) {
-                        normals[idx] = bisect.into();
+                        if taper >= 1.0 {
+                            normals[idx] = bisect.into();
+                        } else if taper > 0.0 {
+                            let flat = Vec3::from_array(normals[idx]);
+                            normals[idx] = flat.lerp(bisect, taper).normalize_or_zero().into();
+                        }
                     }
                 }
                 break;
@@ -1229,3 +1258,4 @@ pub fn generate_cut_offset_chamfer(
         indices,
     }
 }
+

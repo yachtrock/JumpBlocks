@@ -1205,8 +1205,121 @@ pub fn blocks_are_face_adjacent(
     false
 }
 
+/// True if this edge lies on a chunk-boundary plane and the neighbor chunk
+/// has geometry directly adjacent to it — either continuing the surface
+/// flat, or meeting it in a step/corner.
+///
+/// Such edges must NOT be chamfered: the two chunks mesh independently, so
+/// any fillet applied on one side has no matching geometry on the other and
+/// opens a hole along the seam (this was visible in-game as pinholes and
+/// hard edges along terraces that cross chunk borders). Leaving the edge
+/// sharp on both sides keeps the seam watertight.
+pub fn edge_touches_neighbor_geometry(
+    ev0: u32,
+    ev1: u32,
+    solid: &SolidMesh,
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+) -> bool {
+    let p0 = solid.positions[ev0 as usize];
+    let p1 = solid.positions[ev1 as usize];
+
+    let chunk_size = CHUNK_X as f32 * VOXEL_SIZE;
+    let chunk_height = CHUNK_Y as f32 * VOXEL_SIZE;
+
+    // (axis, boundary coordinate, outward sign)
+    let planes: [(usize, f32, f32); 6] = [
+        (0, 0.0, -1.0),
+        (0, chunk_size, 1.0),
+        (1, 0.0, -1.0),
+        (1, chunk_height, 1.0),
+        (2, 0.0, -1.0),
+        (2, chunk_size, 1.0),
+    ];
+
+    let eps = 1e-4;
+    for (axis, boundary, sign) in planes {
+        if (p0[axis] - boundary).abs() > eps || (p1[axis] - boundary).abs() > eps {
+            continue;
+        }
+        let mut out = Vec3::ZERO;
+        out[axis] = sign;
+
+        let d = p1 - p0;
+        let len = d.length();
+        if len < 1e-5 {
+            continue;
+        }
+        let dir = d / len;
+        let perp = out.cross(dir);
+
+        // Sample the neighbor-side cells adjacent to the edge, cell by cell
+        // along its length and on both sides across the face plane.
+        let steps = (len / VOXEL_SIZE).round().max(1.0) as usize;
+        for i in 0..steps {
+            let s = p0 + dir * ((i as f32 + 0.5) * VOXEL_SIZE);
+            for side in [0.5f32, -0.5] {
+                let q = s + (out * 0.5 + perp * side) * VOXEL_SIZE;
+                let cx = (q.x / VOXEL_SIZE).floor() as i32;
+                let cy = (q.y / VOXEL_SIZE).floor() as i32;
+                let cz = (q.z / VOXEL_SIZE).floor() as i32;
+                if is_cell_occupied(data, neighbors, cx, cy, cz) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True if this point lies on a chunk-boundary plane with neighbor-chunk
+/// geometry directly adjacent to it. Chamfered edges that *end* at such a
+/// point emit corner fillets/patches that the neighbor chunk can't mirror,
+/// so chamfering must stop there too (see `edge_touches_neighbor_geometry`).
+pub fn point_touches_neighbor_geometry(
+    p: Vec3,
+    data: &ChunkData,
+    neighbors: &ChunkNeighbors,
+) -> bool {
+    let chunk_size = CHUNK_X as f32 * VOXEL_SIZE;
+    let chunk_height = CHUNK_Y as f32 * VOXEL_SIZE;
+    let planes: [(usize, f32, f32); 6] = [
+        (0, 0.0, -1.0),
+        (0, chunk_size, 1.0),
+        (1, 0.0, -1.0),
+        (1, chunk_height, 1.0),
+        (2, 0.0, -1.0),
+        (2, chunk_size, 1.0),
+    ];
+    let eps = 1e-4;
+    for (axis, boundary, sign) in planes {
+        if (p[axis] - boundary).abs() > eps {
+            continue;
+        }
+        let mut out = Vec3::ZERO;
+        out[axis] = sign;
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        // The up-to-4 neighbor-side cells around the point.
+        for du in [-0.5f32, 0.5] {
+            for dv in [-0.5f32, 0.5] {
+                let mut q = p + out * (0.5 * VOXEL_SIZE);
+                q[u] += du * VOXEL_SIZE;
+                q[v] += dv * VOXEL_SIZE;
+                let cx = (q.x / VOXEL_SIZE).floor() as i32;
+                let cy = (q.y / VOXEL_SIZE).floor() as i32;
+                let cz = (q.z / VOXEL_SIZE).floor() as i32;
+                if is_cell_occupied(data, neighbors, cx, cy, cz) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Check if a boundary edge lies on a chunk face where a filled neighbor cell
 /// would continue the surface.
+#[allow(dead_code)]
 pub fn is_boundary_edge_at_neighbor_seam(
     ev0: u32,
     ev1: u32,
