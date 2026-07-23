@@ -39,7 +39,10 @@ pub fn export_world(out_path: &Path) {
 fn collect_visible_blocks(region: &Region) -> Vec<i16> {
     let mut out: Vec<i16> = Vec::new();
 
-    // Occupancy check across chunk borders, in global cell coords.
+    // Occlusion check across chunk borders, in global cell coords. Only
+    // full cubes occlude: slope caps mark partially-empty cells as occupied
+    // (for gameplay), and treating those as solid would cull visible blocks
+    // behind slopes.
     let occupied = |gx: i32, gy: i32, gz: i32| -> bool {
         let cx = gx.div_euclid(CHUNK_X as i32);
         let cy = gy.div_euclid(CHUNK_Y as i32);
@@ -47,11 +50,14 @@ fn collect_visible_blocks(region: &Region) -> Vec<i16> {
         let Some(slot) = region.get_chunk(ChunkPos::new(cx, cy, cz)) else {
             return false;
         };
-        slot.data.is_occupied(
-            gx.rem_euclid(CHUNK_X as i32) as usize,
-            gy.rem_euclid(CHUNK_Y as i32) as usize,
-            gz.rem_euclid(CHUNK_Z as i32) as usize,
-        )
+        slot.data
+            .resolve_block(
+                gx.rem_euclid(CHUNK_X as i32) as usize,
+                gy.rem_euclid(CHUNK_Y as i32) as usize,
+                gz.rem_euclid(CHUNK_Z as i32) as usize,
+            )
+            .map(|b| b.shape == 0)
+            .unwrap_or(false)
     };
 
     for (pos, slot) in region.iter_chunks() {

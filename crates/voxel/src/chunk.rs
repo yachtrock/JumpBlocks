@@ -299,8 +299,8 @@ impl ChunkData {
                 continue;
             };
 
-            // Check each occupied cell
-            for &(dx, dy, dz) in &shape.occupied_cells {
+            // Check each occupied cell (rotated by the block's facing)
+            for (dx, dy, dz) in crate::shape::rotated_occupied_cells(shape, block.facing) {
                 let cx = ox as usize + dx as usize;
                 let cy = oy as usize + dy as usize;
                 let cz = oz as usize + dz as usize;

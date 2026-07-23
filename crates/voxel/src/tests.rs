@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::chunk::*;
+use crate::coords::ChunkPos;
 use crate::meshing::*;
 use crate::shape::*;
 
@@ -1174,6 +1175,196 @@ fn count_uncovered_boundary_edges(mesh: &ChunkMeshData, label: &str) -> usize {
     uncovered
 }
 
+// ---------------------------------------------------------------------------
+// Slope-cap terrain helpers
+// ---------------------------------------------------------------------------
+
+/// Build capped terrain from a block-column heightfield (heights in cells,
+/// indexed `heights[z][x]`), exactly like worldgen does: cubes up to the
+/// surface, with slope caps replacing the top cube wherever
+/// `classify_slope_cap` finds a smoothable step. Columns outside the patch
+/// are treated as equal height. `x_range` limits which columns are written
+/// (for splitting one patch across two chunks); `origin` is the cell of
+/// column (x_range.start, 0).
+fn build_capped_terrain_into(
+    data: &mut ChunkData,
+    heights: &[&[i32]],
+    origin: (usize, usize, usize),
+    x_range: std::ops::Range<usize>,
+) {
+    use crate::worldgen::classify_slope_cap;
+    let shapes = make_shapes();
+    let rows = heights.len() as i32;
+    let cols = heights[0].len() as i32;
+    for (j, row) in heights.iter().enumerate() {
+        for (i, &h) in row.iter().enumerate() {
+            if !x_range.contains(&i) {
+                continue;
+            }
+            let sample = |dx: i32, dz: i32| -> i32 {
+                let nx = i as i32 + dx;
+                let nz = j as i32 + dz;
+                if nx < 0 || nz < 0 || nx >= cols || nz >= rows {
+                    h
+                } else {
+                    heights[nz as usize][nx as usize]
+                }
+            };
+            let cap = if h >= 1 {
+                classify_slope_cap(&|dx, dz| sample(dx, dz) - h)
+            } else {
+                None
+            };
+            let bx = origin.0 + (i - x_range.start) * 2;
+            let bz = origin.2 + j * 2;
+            let cube_top = if cap.is_some() { h - 1 } else { h };
+            for y in 0..cube_top.max(0) {
+                data.place_std(bx, origin.1 + y as usize, bz, SHAPE_CUBE, Facing::North, 1);
+            }
+            if let Some((shape_id, facing, _ch)) = cap {
+                let shape = shapes.get(shape_id).unwrap();
+                let occ = crate::shape::rotated_occupied_cells(shape, facing);
+                data.place_block(
+                    shape_id,
+                    facing,
+                    1,
+                    bx,
+                    origin.1 + (h - 1) as usize,
+                    bz,
+                    &occ,
+                );
+            }
+        }
+    }
+}
+
+/// Every slope-cap shape alone, in every facing: valid data and clean mesh.
+#[test]
+fn slope_cap_single_shapes_clean() {
+    let shapes = make_shapes();
+    for shape_id in [
+        SHAPE_WEDGE_OUTER,
+        SHAPE_WEDGE_INNER,
+        SHAPE_WEDGE_STEEP,
+        SHAPE_WEDGE_STEEP_OUTER,
+        SHAPE_WEDGE_STEEP_INNER,
+    ] {
+        for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let mut data = ChunkData::new();
+            let shape = shapes.get(shape_id).unwrap();
+            let occ = crate::shape::rotated_occupied_cells(shape, facing);
+            data.place_block(shape_id, facing, 1, 8, 16, 8, &occ);
+            let errors = data.validate(&shapes);
+            assert!(errors.is_empty(), "shape {shape_id} {facing:?}: {errors:?}");
+            let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+            assert_concave_mesh_clean(
+                result.full_res(),
+                &format!("cap_{shape_id}_{facing:?}"),
+            );
+        }
+    }
+}
+
+/// A plateau with a full ring of caps: straight wedges on the flanks, inner
+/// corners in the notches, outer corners on the diagonals — every junction
+/// type the terrain generator produces, meshed together with cubes.
+#[test]
+fn slope_cap_hill_assembly_clean() {
+    let heights: &[&[i32]] = &[
+        &[1, 1, 1, 1, 1],
+        &[1, 2, 2, 2, 1],
+        &[1, 2, 3, 2, 1],
+        &[1, 2, 2, 2, 1],
+        &[1, 1, 1, 1, 1],
+    ];
+    let mut data = ChunkData::new();
+    build_capped_terrain_into(&mut data, heights, (8, 14, 8), 0..5);
+    let shapes = make_shapes();
+    let errors = data.validate(&shapes);
+    assert!(errors.is_empty(), "hill terrain invalid: {errors:?}");
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    assert_concave_mesh_clean(result.full_res(), "cap_hill");
+}
+
+/// Same, but with +2 steps so the steep 1:1 family is used.
+#[test]
+fn slope_cap_steep_hill_assembly_clean() {
+    let heights: &[&[i32]] = &[
+        &[1, 1, 1, 1, 1],
+        &[1, 3, 3, 3, 1],
+        &[1, 3, 5, 3, 1],
+        &[1, 3, 3, 3, 1],
+        &[1, 1, 1, 1, 1],
+    ];
+    let mut data = ChunkData::new();
+    build_capped_terrain_into(&mut data, heights, (8, 14, 8), 0..5);
+    let shapes = make_shapes();
+    let result = generate_chunk_mesh(&data, &ChunkNeighbors::empty(), &shapes, crate::PresentationMode::CutAndOffset);
+    assert_concave_mesh_clean(result.full_res(), "cap_steep_hill");
+}
+
+/// A capped hill straddling a chunk seam: both chunks mesh independently
+/// (with neighbor halos) and their union must be watertight — wedge fillets
+/// across the seam included.
+#[test]
+fn slope_caps_across_seam_watertight() {
+    let heights: &[&[i32]] = &[
+        &[1, 1, 1, 1],
+        &[1, 2, 2, 1],
+        &[1, 2, 2, 1],
+        &[1, 1, 1, 1],
+    ];
+    let chunk_w = crate::chunk::CHUNK_X as f32 * crate::chunk::VOXEL_SIZE;
+
+    // Columns 0..2 in chunk A at cells 28/30; columns 2..4 in chunk B at 0/2.
+    let mut a = ChunkData::new();
+    build_capped_terrain_into(&mut a, heights, (28, 14, 8), 0..2);
+    let mut b = ChunkData::new();
+    build_capped_terrain_into(&mut b, heights, (0, 14, 8), 2..4);
+
+    let shapes = make_shapes();
+    let mut na = ChunkNeighbors::empty();
+    na.set(1, 0, 0, b.clone());
+    let mut nb = ChunkNeighbors::empty();
+    nb.set(-1, 0, 0, a.clone());
+
+    let ra = generate_chunk_mesh(&a, &na, &shapes, crate::PresentationMode::CutAndOffset);
+    let rb = generate_chunk_mesh(&b, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+    let combined = union_meshes(ra.full_res(), rb.full_res(), [chunk_w, 0.0, 0.0]);
+
+    let (boundary, _interior, non_manifold) = count_edge_sharing(&combined);
+    eprintln!("cap seam: boundary={boundary} non_manifold={non_manifold}");
+    if boundary > 0 {
+        dump_boundary_edges(&combined, "cap_seam");
+    }
+    assert!(boundary == 0, "capped-hill seam union has {boundary} boundary edges");
+    assert!(non_manifold == 0, "capped-hill seam union has {non_manifold} non-manifold edges");
+}
+
+/// The classifier picks the right shapes and orientations.
+#[test]
+fn slope_cap_classification() {
+    use crate::worldgen::classify_slope_cap;
+    // High to the south only → straight wedge, facing North (descends +z)
+    let cap = classify_slope_cap(&|_dx, dz| if dz == -1 { 1 } else { 0 });
+    assert_eq!(cap, Some((SHAPE_WEDGE, Facing::North, 2)));
+    // High to the east only, by 2 → steep wedge facing East
+    let cap = classify_slope_cap(&|dx, _dz| if dx == 1 { 2 } else { 0 });
+    assert_eq!(cap, Some((SHAPE_WEDGE_STEEP, Facing::East, 3)));
+    // High south AND west → inner corner (shared SW corner → North)
+    let cap = classify_slope_cap(&|dx, dz| if dz == -1 || dx == -1 { 1 } else { 0 });
+    assert_eq!(cap, Some((SHAPE_WEDGE_INNER, Facing::North, 2)));
+    // Only the NE diagonal high → outer corner facing South
+    let cap = classify_slope_cap(&|dx, dz| if dx == 1 && dz == 1 { 1 } else { 0 });
+    assert_eq!(cap, Some((SHAPE_WEDGE_OUTER, Facing::South, 2)));
+    // A cliff (+3) is left alone
+    let cap = classify_slope_cap(&|dx, _dz| if dx == 1 { 3 } else { 0 });
+    assert_eq!(cap, None);
+    // Opposite high sides → no cap
+    let cap = classify_slope_cap(&|dx, _dz| if dx != 0 { 1 } else { 0 });
+    assert_eq!(cap, None);
+}
+
 /// Union of two adjacent chunks' meshes in world space, for seam checks.
 fn union_meshes(a: &ChunkMeshData, b: &ChunkMeshData, b_offset: [f32; 3]) -> ChunkMeshData {
     let mut positions = a.positions.clone();
@@ -1596,4 +1787,236 @@ fn ear_clip_preserves_collinear_boundary() {
             }
         }
     }
+}
+
+/// Slope caps meeting a chunk seam in every arrangement worldgen produces:
+/// caps side by side across the seam, caps on one side only, and a full
+/// plateau ring (straight + outer-corner caps) straddling it. Each chunk
+/// meshes independently; the union must be exactly watertight.
+#[test]
+fn slope_cap_seam_configurations_watertight() {
+    let chunk_w = crate::chunk::CHUNK_X as f32 * crate::chunk::VOXEL_SIZE;
+    let shapes = make_shapes();
+    let configs: &[(&str, &[&[i32]])] = &[
+        ("two_caps_side_by_side", &[&[1, 1], &[2, 2]]),
+        ("cap_in_A_only", &[&[1, 2], &[2, 2]]),
+        ("cap_in_B_only", &[&[2, 1], &[2, 2]]),
+        ("plateau_ring", &[&[1, 1, 1, 1], &[1, 2, 2, 1], &[1, 2, 2, 1], &[1, 1, 1, 1]]),
+    ];
+    for (name, heights) in configs {
+        let ncols = heights[0].len();
+        let split = ncols / 2;
+        let mut a = ChunkData::new();
+        build_capped_terrain_into(&mut a, heights, (32 - split * 2, 14, 8), 0..split);
+        let mut b = ChunkData::new();
+        build_capped_terrain_into(&mut b, heights, (0, 14, 8), split..ncols);
+        let mut na = ChunkNeighbors::empty();
+        na.set(1, 0, 0, b.clone());
+        let mut nb = ChunkNeighbors::empty();
+        nb.set(-1, 0, 0, a.clone());
+        let ra = generate_chunk_mesh(&a, &na, &shapes, crate::PresentationMode::CutAndOffset);
+        let rb = generate_chunk_mesh(&b, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+        let (ba, _ia, na_) = count_edge_sharing(ra.full_res());
+        let (bb, _ib, nb_) = count_edge_sharing(rb.full_res());
+        let combined = union_meshes(ra.full_res(), rb.full_res(), [chunk_w, 0.0, 0.0]);
+        let (boundary, _i, non_manifold) = count_edge_sharing(&combined);
+        eprintln!("[cap seam] {name}: union boundary={boundary} nm={non_manifold} | A b={ba} nm={na_} | B b={bb} nm={nb_}");
+        if boundary > 0 {
+            dump_boundary_edges(&combined, name);
+        }
+        assert!(boundary == 0, "{name}: union has {boundary} boundary edges");
+        assert!(non_manifold == 0, "{name}: union has {non_manifold} non-manifold edges");
+        assert!(na_ == 0 && nb_ == 0, "{name}: per-chunk non-manifold edges");
+    }
+}
+/// Minimal repro of the worldgen hole: an inner-corner cap on a cube column,
+/// with a second inner-corner cap one cell lower on the adjacent column.
+/// Extracted from worldgen chunk (111,0,133) blocks (20,15,28)cube /
+/// (20,16,28)inner / (20,15,30)inner.
+#[test]
+fn inner_cap_step_repro() {
+    let shapes = make_shapes();
+    let inner = shapes.get(SHAPE_WEDGE_INNER).unwrap();
+    let occ = crate::shape::rotated_occupied_cells(inner, Facing::North);
+    let mut data = ChunkData::new();
+    data.place_std(4, 4, 4, SHAPE_CUBE, Facing::North, 1);
+    data.place_block(SHAPE_WEDGE_INNER, Facing::North, 1, 4, 5, 4, &occ);
+    data.place_block(SHAPE_WEDGE_INNER, Facing::North, 1, 4, 4, 6, &occ);
+
+    let nb = ChunkNeighbors::empty();
+    let solid = build_solid_mesh_public(&data, &nb, &shapes);
+    for (i, f) in solid.faces.iter().enumerate() {
+        let vs: Vec<String> = f.verts.iter()
+            .map(|&v| { let p = solid.positions[v as usize]; format!("({:.3},{:.3},{:.3})", p.x, p.y, p.z) })
+            .collect();
+        eprintln!("face {i}: n=({:.1},{:.1},{:.1}) voxel={:?} tris={:?} verts={}",
+            f.normal.x, f.normal.y, f.normal.z, f.voxel, f.orig_triangles, vs.join(" "));
+    }
+    let r = generate_chunk_mesh(&data, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+    let (boundary, _i, nm) = count_edge_sharing(r.full_res());
+    eprintln!("[inner cap step] boundary={boundary} nm={nm}");
+    if boundary > 0 {
+        dump_boundary_edges(r.full_res(), "inner_cap_step");
+    }
+    assert!(boundary == 0 && nm == 0, "inner cap step: boundary={boundary} nm={nm}");
+}
+
+/// Mesh the real worldgen terrain chunks densest in slope caps and require
+/// watertightness at both stages:
+/// 1. the pre-chamfer solid mesh of each chunk must have no boundary edges
+///    off the chunk border planes (no interior holes), and
+/// 2. the chamfered mesh, unioned with the chamfered meshes of all its
+///    neighbor chunks, must have no boundary edges anywhere near the central
+///    chunk volume (seam fillets must match across chunk borders).
+#[test]
+fn worldgen_slope_chunks_mesh_clean() {
+    use crate::world_def::WorldDef;
+    use crate::coords::RegionId;
+    use bevy::math::Vec3;
+
+    let def = WorldDef::standard();
+    let mut region = crate::region::Region::new(RegionId(0), Vec3::ZERO);
+    crate::worldgen::generate_archipelago(&mut region, &def.terrain);
+
+    // Rank chunks by slope-cap count
+    let mut ranked: Vec<(ChunkPos, usize)> = region
+        .iter_chunks()
+        .map(|(pos, slot)| {
+            let caps = slot.data.blocks.iter().filter(|b| b.shape != 0).count();
+            (pos, caps)
+        })
+        .collect();
+    ranked.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+
+    fn wire_neighbors(region: &crate::region::Region, pos: ChunkPos) -> ChunkNeighbors {
+        let mut nb = ChunkNeighbors::empty();
+        for (dx, dy, dz) in ChunkPos::neighbor_offsets() {
+            if let Some(np) = pos.neighbor(dx, dy, dz) {
+                if let Some(arc) = region.get_chunk_data(np) {
+                    nb.set_arc(dx, dy, dz, arc);
+                }
+            }
+        }
+        nb
+    }
+
+    let shapes = make_shapes();
+    let chunk_w = crate::chunk::CHUNK_X as f32 * crate::chunk::VOXEL_SIZE;
+    let chunk_h = crate::chunk::CHUNK_Y as f32 * crate::chunk::VOXEL_SIZE;
+    let mut cache: HashMap<ChunkPos, crate::meshing::ChunkMeshResult> = HashMap::new();
+    let mut total_solid_interior = 0usize;
+    let mut total_union_holes = 0usize;
+
+    for &(pos, caps) in ranked.iter().take(6) {
+        let slot = region.get_chunk(pos).unwrap();
+        let nb = wire_neighbors(&region, pos);
+
+        // Stage 1: pre-chamfer solid mesh (owned faces, original
+        // triangulation) must have no boundary edges off the border planes.
+        let solid = build_solid_mesh_public(&slot.data, &nb, &shapes);
+        let mut ec: HashMap<((i32,i32,i32),(i32,i32,i32)), usize> = HashMap::new();
+        let mut sseg: HashMap<((i32,i32,i32),(i32,i32,i32)), ([f32;3],[f32;3])> = HashMap::new();
+        for face in solid.faces.iter().filter(|f| !f.halo) {
+            for tri in &face.orig_triangles {
+                for j in 0..3 {
+                    let a = solid.positions[face.verts[tri[j]] as usize];
+                    let b = solid.positions[face.verts[tri[(j+1)%3]] as usize];
+                    let (a, b) = ([a.x, a.y, a.z], [b.x, b.y, b.z]);
+                    let (qa, qb) = (quantize_pos(&a), quantize_pos(&b));
+                    if qa == qb { continue; }
+                    let key = if qa <= qb { (qa, qb) } else { (qb, qa) };
+                    *ec.entry(key).or_insert(0) += 1;
+                    sseg.entry(key).or_insert((a, b));
+                }
+            }
+        }
+        let on_border = |p: [f32;3]| -> bool {
+            p[0].abs() < 1e-3 || (p[0] - chunk_w).abs() < 1e-3
+                || p[1].abs() < 1e-3 || (p[1] - chunk_h).abs() < 1e-3
+                || p[2].abs() < 1e-3 || (p[2] - chunk_w).abs() < 1e-3
+        };
+        let mut solid_interior = 0;
+        for (key, &c) in &ec {
+            if c != 1 { continue; }
+            let (a, b) = sseg[key];
+            if !on_border(a) || !on_border(b) {
+                solid_interior += 1;
+                if solid_interior <= 6 {
+                    eprintln!("  {pos}: SOLID hole edge ({:.3},{:.3},{:.3})\u{2192}({:.3},{:.3},{:.3})",
+                        a[0],a[1],a[2],b[0],b[1],b[2]);
+                }
+            }
+        }
+        total_solid_interior += solid_interior;
+
+        // Stage 2: union the chamfered mesh with every neighbor chunk's
+        // chamfered mesh; no boundary edge may fall inside (or near) the
+        // central chunk volume.
+        cache.entry(pos).or_insert_with(|| {
+            generate_chunk_mesh(&slot.data, &nb, &shapes, crate::PresentationMode::CutAndOffset)
+        });
+        let mut union = {
+            let m = cache[&pos].full_res();
+            ChunkMeshData {
+                positions: m.positions.clone(),
+                normals: m.normals.clone(),
+                sharp_normals: m.sharp_normals.clone(),
+                uvs: m.uvs.clone(),
+                chamfer_offsets: m.chamfer_offsets.clone(),
+                indices: m.indices.clone(),
+            }
+        };
+        for (dx, dy, dz) in ChunkPos::neighbor_offsets() {
+            let Some(np) = pos.neighbor(dx, dy, dz) else { continue };
+            if region.get_chunk(np).is_none() { continue; }
+            if !cache.contains_key(&np) {
+                let ndata = region.get_chunk(np).unwrap();
+                let nnb = wire_neighbors(&region, np);
+                let r = generate_chunk_mesh(&ndata.data, &nnb, &shapes, crate::PresentationMode::CutAndOffset);
+                cache.insert(np, r);
+            }
+            union = union_meshes(
+                &union,
+                cache[&np].full_res(),
+                [dx as f32 * chunk_w, dy as f32 * chunk_h, dz as f32 * chunk_w],
+            );
+        }
+
+        let mut edge_count: HashMap<((i32,i32,i32),(i32,i32,i32)), usize> = HashMap::new();
+        let mut seg: HashMap<((i32,i32,i32),(i32,i32,i32)), ([f32;3],[f32;3])> = HashMap::new();
+        for i in (0..union.indices.len()).step_by(3) {
+            let t = [union.indices[i], union.indices[i+1], union.indices[i+2]];
+            for j in 0..3 {
+                let a = union.positions[t[j] as usize];
+                let b = union.positions[t[(j+1)%3] as usize];
+                let (qa, qb) = (quantize_pos(&a), quantize_pos(&b));
+                let key = if qa <= qb { (qa, qb) } else { (qb, qa) };
+                *edge_count.entry(key).or_insert(0) += 1;
+                seg.entry(key).or_insert((a, b));
+            }
+        }
+        // Any point within 1wu of the central chunk volume is far from the
+        // union's outer surface (neighbors extend 16wu further out).
+        let near_center = |p: [f32;3]| -> bool {
+            p[0] > -1.0 && p[0] < chunk_w + 1.0
+                && p[1] > -1.0 && p[1] < chunk_h + 1.0
+                && p[2] > -1.0 && p[2] < chunk_w + 1.0
+        };
+        let mut union_holes = 0;
+        for (key, &c) in &edge_count {
+            if c == 2 { continue; }
+            let (a, b) = seg[key];
+            if near_center(a) && near_center(b) {
+                union_holes += 1;
+                if union_holes <= 6 {
+                    eprintln!("  {pos}: UNION open edge x{c} ({:.3},{:.3},{:.3})\u{2192}({:.3},{:.3},{:.3})",
+                        a[0],a[1],a[2],b[0],b[1],b[2]);
+                }
+            }
+        }
+        eprintln!("chunk {pos}: {caps} caps, solid-interior {solid_interior}, union-open {union_holes}");
+        total_union_holes += union_holes;
+    }
+    assert!(total_solid_interior == 0, "{total_solid_interior} solid interior hole edges");
+    assert!(total_union_holes == 0, "{total_union_holes} open edges in neighbor unions");
 }

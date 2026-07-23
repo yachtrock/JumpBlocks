@@ -240,9 +240,11 @@ fn neighbor_cell_occludes(
             if cover.coverage == Coverage::Full {
                 return true;
             }
-            // Matching partial IDs occlude each other (wedge-wedge adjacency)
+            // Matching partial IDs occlude each other (wedge-wedge adjacency).
+            // PARTIAL_NEVER_MATCH is a sentinel that never matches: those
+            // contacts are resolved by contact clipping instead.
             if let (Coverage::Partial(our_id), Coverage::Partial(their_id)) = (our_coverage, cover.coverage) {
-                if our_id == their_id {
+                if our_id == their_id && our_id != crate::shape::PARTIAL_NEVER_MATCH {
                     return true;
                 }
             }
@@ -355,11 +357,13 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
         let wz = oz as f32 * VOXEL_SIZE;
         stats_blocks += 1;
 
-        // Verify this block still owns at least one cell (not removed)
-        let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
-            let cx = ox as usize + dx as usize;
-            let cy = oy as usize + dy as usize;
-            let cz = oz as usize + dz as usize;
+        // Verify this block still owns at least one cell (not removed).
+        // Occupied offsets rotate with the block's facing.
+        let has_cells = shape.occupied_cells.iter().any(|&cell| {
+            let r = rotate_cell_offset(cell, facing, shape.size);
+            let cx = ox as usize + r.0 as usize;
+            let cy = oy as usize + r.1 as usize;
+            let cz = oz as usize + r.2 as usize;
             data.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
         });
         if !has_cells { stats_blocks_no_cells += 1; continue; }
@@ -799,15 +803,26 @@ fn merge_coplanar_faces(
         )
     };
 
-    // Group faces by oriented plane.  Merging is decided per connected SET:
-    // a set merges only if it contains a face from a contact-clipped block,
-    // but the merge then covers every coplanar face edge-connected to it.
-    let mut groups: HashMap<(i32, i32, i32, i32), Vec<usize>> = HashMap::new();
+    // Group faces by oriented plane AND owning chunk.  Faces from different
+    // chunks never merge: a merged surface is emitted by ONE owner, and a
+    // cross-ownership merge would be emitted by both chunks (duplicate
+    // geometry) or neither.  Partitioning by the owning CHUNK (derived from
+    // the block origin) rather than by the local halo flag keeps the
+    // partition identical from every chunk's point of view — a third chunk
+    // seeing two neighbors' coplanar surfaces (both halo to it) must split
+    // them exactly where the owners do, or ring adjacency at seam corners
+    // diverges and the fillets crack.
+    let mut groups: HashMap<(i32, i32, i32, i32, (i32, i32, i32)), Vec<usize>> = HashMap::new();
     for (fi, f) in faces.iter().enumerate() {
         let n = f.normal;
         let d = n.dot(f.verts[0]);
+        let owner = (
+            f.voxel.0.div_euclid(CHUNK_X as i32),
+            f.voxel.1.div_euclid(CHUNK_Y as i32),
+            f.voxel.2.div_euclid(CHUNK_Z as i32),
+        );
         groups
-            .entry((quant(n.x), quant(n.y), quant(n.z), (d * 10000.0).round() as i32))
+            .entry((quant(n.x), quant(n.y), quant(n.z), (d * 10000.0).round() as i32, owner))
             .or_default()
             .push(fi);
     }
@@ -815,7 +830,7 @@ fn merge_coplanar_faces(
     let mut consumed: Vec<bool> = vec![false; faces.len()];
     let mut merged: Vec<RawFace> = Vec::new();
 
-    let mut group_keys: Vec<(i32, i32, i32, i32)> = groups.keys().copied().collect();
+    let mut group_keys: Vec<(i32, i32, i32, i32, (i32, i32, i32))> = groups.keys().copied().collect();
     group_keys.sort_unstable();
     for gkey in group_keys {
         let idxs = &groups[&gkey];
@@ -866,11 +881,13 @@ fn merge_coplanar_faces(
             if set.len() < 2 {
                 continue;
             }
-            // Only merge sets touched by a partial contact — full-face
-            // seams already work unmerged.
-            if !set.iter().any(|&fi| merge_blocks.contains(&faces[fi].voxel)) {
-                continue;
-            }
+            // Merge EVERY edge-connected coplanar set, not just those touched
+            // by a partial contact.  The merge decision must be local and
+            // deterministic: a chunk and its neighbor (seeing the same surface
+            // through the halo band) have to agree on the merged polygon's
+            // ring adjacency near the seam, and "was any block in this set
+            // partially clipped" can depend on contacts far outside the halo
+            // band.
             try_merge_face_set(&faces, set, &mut merged, &mut consumed);
         }
     }
@@ -1054,11 +1071,13 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
         let wz = oz as f32 * VOXEL_SIZE;
         stats_blocks += 1;
 
-        // Verify this block still owns at least one cell
-        let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
-            let cx = ox as usize + dx as usize;
-            let cy = oy as usize + dy as usize;
-            let cz = oz as usize + dz as usize;
+        // Verify this block still owns at least one cell (not removed).
+        // Occupied offsets rotate with the block's facing.
+        let has_cells = shape.occupied_cells.iter().any(|&cell| {
+            let r = rotate_cell_offset(cell, facing, shape.size);
+            let cx = ox as usize + r.0 as usize;
+            let cy = oy as usize + r.1 as usize;
+            let cz = oz as usize + r.2 as usize;
             data.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
         });
         if !has_cells { stats_blocks_no_cells += 1; continue; }
@@ -1107,7 +1126,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
     // `halo` flag). All in-band blocks are also recorded in `halo_blocks`
     // (even fully-interior ones) so component bridging matches the
     // neighbor's own view.
-    const HALO_CELLS: i32 = 2;
+    const HALO_CELLS: i32 = 4;
     let mut halo_blocks: Vec<((i32, i32, i32), (u8, u8, u8))> = Vec::new();
     for dcx in -1i32..=1 {
         for dcy in -1i32..=1 {
@@ -1143,10 +1162,11 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
 
                     // Mirror the owner chunk's block-eligibility checks,
                     // evaluated in the neighbor's own data.
-                    let has_cells = shape.occupied_cells.iter().any(|&(dx, dy, dz)| {
-                        let cx = ox as usize + dx as usize;
-                        let cy = oy as usize + dy as usize;
-                        let cz = oz as usize + dz as usize;
+                    let has_cells = shape.occupied_cells.iter().any(|&cell| {
+                        let r = rotate_cell_offset(cell, facing, shape.size);
+                        let cx = ox as usize + r.0 as usize;
+                        let cy = oy as usize + r.1 as usize;
+                        let cz = oz as usize + r.2 as usize;
                         nd.get_cell(cx, cy, cz) == Cell::Local(BlockId(block_idx as u16))
                     });
                     if !has_cells {

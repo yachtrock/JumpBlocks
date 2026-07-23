@@ -16,7 +16,7 @@ use crate::chunk::ChunkData;
 use crate::coords::{ChunkPos, REGION_XZ};
 use crate::chunk::{CHUNK_X, CHUNK_Y, CHUNK_Z};
 use crate::region::Region;
-use crate::shape::{Facing, SHAPE_CUBE};
+use crate::shape::{Facing, SHAPE_CUBE, SHAPE_WEDGE, SHAPE_WEDGE_INNER, SHAPE_WEDGE_OUTER};
 
 // ---------------------------------------------------------------------------
 // Texture palette
@@ -290,6 +290,97 @@ pub fn sample_terrain(config: &ArchipelagoConfig, wx: f32, wz: f32) -> TerrainSa
     TerrainSample { height: 0, texture_surface: 0, texture_body: 0 }
 }
 
+/// Classify which slope cap (if any) a terrain block column should wear,
+/// from the height deltas of its 8 neighbor columns (`delta(dx, dz)` =
+/// neighbor height − own height, dx/dz ∈ {-1, 0, 1}).
+///
+/// Returns `(shape id, facing, shape height in cells)`. The cap replaces the
+/// column's top cube; its slope rises to meet the higher neighbor. +1 steps
+/// get the 1:2 wedge family, +2 steps the steep 1:1 family:
+/// - exactly one higher side → straight wedge,
+/// - two adjacent equally-higher sides → inner (valley) corner,
+/// - only a diagonal higher → outer (hill) corner.
+pub fn classify_slope_cap(delta: &dyn Fn(i32, i32) -> i32) -> Option<(u16, Facing, i32)> {
+    let dw = delta(-1, 0);
+    let de = delta(1, 0);
+    let ds = delta(0, -1);
+    let dn = delta(0, 1);
+    let high = |v: i32| v >= 1;
+    // High corner {SW, SE, NE, NW} → facing that rotates the canonical
+    // (-X/-Z-high) cap onto it.
+    let corner_facing = |west: bool, south: bool| match (west, south) {
+        (true, true) => Facing::North,
+        (false, true) => Facing::East,
+        (false, false) => Facing::South,
+        (true, false) => Facing::West,
+    };
+    // The steep (1:1) variant of every 1:2 slope shape sits 3 ids later in
+    // the ShapeTable (WEDGE 1→STEEP 4, OUTER 2→5, INNER 3→6).
+    let family = |v: i32, gentle: u16| -> Option<(u16, i32)> {
+        match v {
+            1 => Some((gentle, 2)),
+            2 => Some((gentle + 3, 3)),
+            _ => None,
+        }
+    };
+    match [dw, de, ds, dn].iter().filter(|&&v| high(v)).count() {
+        0 => {
+            // Outer corner: exactly one high diagonal, gentle enough.
+            let diags = [
+                (delta(-1, -1), true, true),   // SW
+                (delta(1, -1), false, true),   // SE
+                (delta(1, 1), false, false),   // NE
+                (delta(-1, 1), true, false),   // NW
+            ];
+            let mut hit = None;
+            let mut n = 0;
+            for (v, w, s) in diags {
+                if high(v) {
+                    n += 1;
+                    hit = Some((v, w, s));
+                }
+            }
+            let (v, w, s) = hit?;
+            if n != 1 {
+                return None;
+            }
+            let (shape, ch) = family(v, SHAPE_WEDGE_OUTER)?;
+            Some((shape, corner_facing(w, s), ch))
+        }
+        1 => {
+            // Straight wedge rising toward the single high side.
+            let (v, facing) = if high(dw) {
+                (dw, Facing::West)
+            } else if high(de) {
+                (de, Facing::East)
+            } else if high(ds) {
+                (ds, Facing::North)
+            } else {
+                (dn, Facing::South)
+            };
+            let (shape, ch) = family(v, SHAPE_WEDGE)?;
+            Some((shape, facing, ch))
+        }
+        2 => {
+            // Inner corner: two adjacent high sides with equal rise.
+            let (west, south, v) = if high(dw) && high(ds) && dw == ds {
+                (true, true, dw)
+            } else if high(ds) && high(de) && ds == de {
+                (false, true, ds)
+            } else if high(de) && high(dn) && de == dn {
+                (false, false, de)
+            } else if high(dn) && high(dw) && dn == dw {
+                (true, false, dn)
+            } else {
+                return None;
+            };
+            let (shape, ch) = family(v, SHAPE_WEDGE_INNER)?;
+            Some((shape, corner_facing(west, south), ch))
+        }
+        _ => None,
+    }
+}
+
 /// Generate an archipelago and insert chunks into the region.
 /// Returns the number of chunks generated.
 pub fn generate_archipelago(region: &mut Region, config: &ArchipelagoConfig) -> usize {
@@ -314,81 +405,97 @@ pub fn generate_archipelago(region: &mut Region, config: &ArchipelagoConfig) -> 
     let min_cz = min_cz.max(0);
     let max_cz = max_cz.min(REGION_XZ - 1);
 
-    // First pass: compute the heightmap for every block column.
-    // Block columns are at even cell coords (step 2) so 16x16 per chunk.
-    let block_cols = CHUNK_X / 2;
-    let mut chunk_heights: Vec<(i32, i32, Vec<Vec<TerrainSample>>)> = Vec::new();
-
-    let empty = TerrainSample { height: 0, texture_surface: 0, texture_body: 0 };
-    for cx in min_cx..=max_cx {
-        for cz in min_cz..=max_cz {
-            let mut heights: Vec<Vec<TerrainSample>> = vec![vec![empty; block_cols]; block_cols];
-            let mut any_nonzero = false;
-
-            for bxi in 0..block_cols {
-                for bzi in 0..block_cols {
-                    let bx = bxi * 2;
-                    let bz = bzi * 2;
-
-                    let wx = cx as f32 + (bx as f32 / CHUNK_X as f32);
-                    let wz = cz as f32 + (bz as f32 / CHUNK_Z as f32);
-
-                    let s = sample_terrain(config, wx, wz);
-                    heights[bxi][bzi] = s;
-                    if s.height > 0 {
-                        any_nonzero = true;
-                    }
-                }
-            }
-
-            if any_nonzero {
-                chunk_heights.push((cx, cz, heights));
-            }
+    // First pass: a global heightmap at block-column resolution over the
+    // whole bounding box, with a one-column margin so slope-cap
+    // classification can inspect neighbors without re-sampling. A column at
+    // chunk `cx`, block `bxi` lives at ix = (cx - min_cx) * 16 + bxi.
+    let block_cols = CHUNK_X / 2; // 16 block columns per chunk axis
+    let cols_w = (max_cx - min_cx + 1) * block_cols as i32 + 2;
+    let cols_h = (max_cz - min_cz + 1) * block_cols as i32 + 2;
+    let mut grid: Vec<TerrainSample> = Vec::with_capacity((cols_w * cols_h) as usize);
+    for iz in -1..cols_h - 1 {
+        for ix in -1..cols_w - 1 {
+            let wx = min_cx as f32 + ix as f32 / block_cols as f32;
+            let wz = min_cz as f32 + iz as f32 / block_cols as f32;
+            grid.push(sample_terrain(config, wx, wz));
         }
     }
+    let sample_col = |ix: i32, iz: i32| -> TerrainSample {
+        grid[((iz + 1) * cols_w + (ix + 1)) as usize]
+    };
+
+    let shapes = crate::shape::ShapeTable::default();
+
+    let classify_cap = |ix: i32, iz: i32, h: i32| -> Option<(u16, Facing, i32)> {
+        if h < 1 {
+            return None;
+        }
+        classify_slope_cap(&|dx, dz| sample_col(ix + dx, iz + dz).height - h)
+    };
 
     // Second pass: for each XZ chunk column, create vertical chunks as needed.
     let mut count = 0;
 
-    for (cx, cz, heights) in &chunk_heights {
-        // Find the min and max cell Y across all block columns in this XZ chunk
-        let min_cell_y: i32 = -(config.underground_depth as i32);
-        let mut max_cell_y: i32 = 0;
-        for col in heights {
-            for s in col {
-                if s.height > max_cell_y {
-                    max_cell_y = s.height;
-                }
-            }
-        }
-
-        if max_cell_y <= 0 && min_cell_y >= 0 {
-            continue;
-        }
-
-        // Convert cell Y range to chunk Y range
-        let min_chunk_y = cell_y_to_chunk_y(min_cell_y);
-        let max_chunk_y = cell_y_to_chunk_y(max_cell_y);
-
-        for cy in min_chunk_y..=max_chunk_y {
-            let chunk_base_cell_y = cy * CHUNK_Y as i32;
-
-            let mut data = ChunkData::new();
-            let mut has_blocks = false;
-
+    for cx in min_cx..=max_cx {
+        for cz in min_cz..=max_cz {
+            // Per-column terrain + cap info for this chunk
+            let mut cols: Vec<(usize, usize, TerrainSample, Option<(u16, Facing, i32)>)> =
+                Vec::with_capacity(block_cols * block_cols);
+            let min_cell_y: i32 = -(config.underground_depth as i32);
+            let mut max_cell_y: i32 = 0;
             for bxi in 0..block_cols {
                 for bzi in 0..block_cols {
+                    let ix = (cx - min_cx) * block_cols as i32 + bxi as i32;
+                    let iz = (cz - min_cz) * block_cols as i32 + bzi as i32;
+                    let sample = sample_col(ix, iz);
+                    let h = sample.height;
+                    let mut cap = classify_cap(ix, iz, h);
+                    // A cap must fit within one vertical chunk.
+                    if let Some((_, _, ch)) = cap {
+                        let base = h - 1;
+                        if base.rem_euclid(CHUNK_Y as i32) > CHUNK_Y as i32 - ch {
+                            cap = None;
+                        }
+                    }
+                    let top = match cap {
+                        Some((_, _, ch)) => h - 1 + ch,
+                        None => h,
+                    };
+                    max_cell_y = max_cell_y.max(top);
+                    cols.push((bxi, bzi, sample, cap));
+                }
+            }
+
+            if max_cell_y <= 0 && min_cell_y >= 0 {
+                continue;
+            }
+            if cols.iter().all(|(_, _, s, _)| s.height <= 0) {
+                continue;
+            }
+
+            let min_chunk_y = cell_y_to_chunk_y(min_cell_y);
+            let max_chunk_y = cell_y_to_chunk_y(max_cell_y);
+
+            for cy in min_chunk_y..=max_chunk_y {
+                let chunk_base_cell_y = cy * CHUNK_Y as i32;
+
+                let mut data = ChunkData::new();
+                let mut has_blocks = false;
+
+                for &(bxi, bzi, sample, cap) in &cols {
                     let bx = bxi * 2;
                     let bz = bzi * 2;
-                    let sample = heights[bxi][bzi];
                     let surface_h = sample.height;
                     let bottom = min_cell_y;
+                    // With a cap, the top cube layer is replaced by the cap's base.
+                    let cube_top = match cap {
+                        Some(_) => surface_h - 1,
+                        None => surface_h,
+                    };
 
-                    // Fill from bottom to surface_h
                     for local_y in 0..CHUNK_Y {
                         let global_cell_y = chunk_base_cell_y + local_y as i32;
-
-                        if global_cell_y >= bottom && global_cell_y < surface_h {
+                        if global_cell_y >= bottom && global_cell_y < cube_top {
                             let texture = if global_cell_y == surface_h - 1 {
                                 sample.texture_surface
                             } else {
@@ -398,14 +505,34 @@ pub fn generate_archipelago(region: &mut Region, config: &ArchipelagoConfig) -> 
                             has_blocks = true;
                         }
                     }
-                }
-            }
 
-            if has_blocks {
-                let pos = ChunkPos::new(*cx, cy, *cz);
-                if pos.in_bounds() {
-                    region.set_chunk(pos, data);
-                    count += 1;
+                    // Place the slope cap in the chunk containing its base.
+                    if let Some((shape_id, facing, _ch)) = cap {
+                        let base = surface_h - 1;
+                        let local = base - chunk_base_cell_y;
+                        if (0..CHUNK_Y as i32).contains(&local) {
+                            let shape = shapes.get(shape_id).expect("slope shape registered");
+                            let occ = crate::shape::rotated_occupied_cells(shape, facing);
+                            data.place_block(
+                                shape_id,
+                                facing,
+                                sample.texture_surface,
+                                bx,
+                                local as usize,
+                                bz,
+                                &occ,
+                            );
+                            has_blocks = true;
+                        }
+                    }
+                }
+
+                if has_blocks {
+                    let pos = ChunkPos::new(cx, cy, cz);
+                    if pos.in_bounds() {
+                        region.set_chunk(pos, data);
+                        count += 1;
+                    }
                 }
             }
         }

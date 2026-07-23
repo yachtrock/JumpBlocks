@@ -112,6 +112,42 @@ fn emit_quad(
     v3: Vec3,
     expected_normal: Vec3,
 ) {
+    emit_quad_impl(positions, normals, uvs, indices, quads, v0, v1, v2, v3, expected_normal, false);
+}
+
+/// Like `emit_quad`, but keeps quads that are degenerate (zero-area /
+/// collinear) in their PRE-push positions.  Corner patches at sharp-run
+/// terminals are collinear slivers on the face boundary that only gain area
+/// once the fillet pushes move the original vertex off the surface — the
+/// post-push re-triangulation orients them correctly.
+fn emit_quad_forced(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    quads: &mut Vec<QuadRecord>,
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+    v3: Vec3,
+    expected_normal: Vec3,
+) {
+    emit_quad_impl(positions, normals, uvs, indices, quads, v0, v1, v2, v3, expected_normal, true);
+}
+
+fn emit_quad_impl(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    quads: &mut Vec<QuadRecord>,
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+    v3: Vec3,
+    expected_normal: Vec3,
+    force: bool,
+) {
     const EPS_SQ: f32 = 1e-10;
     let mut poly: Vec<Vec3> = Vec::with_capacity(4);
     for v in [v0, v1, v2, v3] {
@@ -125,7 +161,27 @@ fn emit_quad(
     match poly.len() {
         0..=2 => return,
         3 => {
-            emit_tri(positions, normals, uvs, indices, poly[0], poly[1], poly[2], expected_normal);
+            if force {
+                // Emit even if currently zero-area: pushes give it area.
+                // Record as a degenerate "quad" (4th corner repeats the 3rd,
+                // whose second triangle the post-push re-triangulation and
+                // the final index pass both treat as empty) so orientation
+                // is decided AFTER pushes.
+                let (a, b, c) = (poly[0], poly[1], poly[2]);
+                let base = positions.len() as u32;
+                positions.extend_from_slice(&[a.into(), b.into(), c.into(), c.into()]);
+                let n: [f32; 3] = expected_normal.into();
+                normals.extend_from_slice(&[n, n, n, n]);
+                uvs.extend_from_slice(&[[0.0; 2]; 4]);
+                quads.push(QuadRecord {
+                    base,
+                    index_start: indices.len(),
+                    expected_normal,
+                });
+                indices.extend_from_slice(&quad_triangulation(a, b, c, c, expected_normal, base));
+            } else {
+                emit_tri(positions, normals, uvs, indices, poly[0], poly[1], poly[2], expected_normal);
+            }
             return;
         }
         _ => {
@@ -746,16 +802,21 @@ pub fn generate_cut_offset_chamfer(
             let ip = (i + n - 1) % n;
             let jn = (j + 1) % n;
 
-            // At vi: split toward prev vertex, unless prev edge is collinear
-            // with this sharp edge (midpoint vertex) — then use perpendicular.
-            let si = if is_collinear(i, ip, i, j) {
+            // At vi: split toward prev vertex.  If the prev edge is collinear
+            // with this sharp edge AND itself sharp (midpoint of a straight
+            // sharp chain), the cut just continues — use the perpendicular.
+            // A collinear NON-sharp prev edge means the sharpness TERMINATES
+            // on a straight boundary: slide along the continuation by the
+            // shared arc so every face bordering the continuation (including
+            // the coplanar face across a chunk seam) splits at the same point.
+            let si = if is_collinear(i, ip, i, j) && prev_sharp[i] {
                 perp_offset(i, i, j)
             } else {
                 split_toward(i, ip)
             };
 
-            // At vj: split toward next vertex, unless next edge is collinear.
-            let sj = if is_collinear(j, jn, i, j) {
+            // At vj: same rule for the next edge.
+            let sj = if is_collinear(j, jn, i, j) && next_sharp[j] {
                 perp_offset(j, i, j)
             } else {
                 split_toward(j, jn)
@@ -844,6 +905,20 @@ pub fn generate_cut_offset_chamfer(
                     inner.push(orig[i] + inward * setback_of(ip, i));
                     continue;
                 }
+            }
+
+            // Sharp-run terminal on a straight boundary: one adjacent edge is
+            // sharp and the other continues collinearly WITHOUT being sharp.
+            // The corner must sit ON the continuation edge at the shared arc,
+            // so this face and the coplanar continuation face (which may live
+            // across a chunk seam) agree on the boundary chain exactly.
+            if prev_sharp[i] && !next_sharp[i] && is_collinear(i, j, ip, i) {
+                inner.push(split_toward(i, j));
+                continue;
+            }
+            if next_sharp[i] && !prev_sharp[i] && is_collinear(i, ip, i, j) {
+                inner.push(split_toward(i, ip));
+                continue;
             }
 
             if needs_full_offset {
@@ -1082,7 +1157,10 @@ pub fn generate_cut_offset_chamfer(
 
             // Corner patch quad:
             //   orig → split_on_prev_edge → inner → split_on_next_edge
-            emit_quad(
+            // Forced: at a sharp-run terminal on a straight boundary the
+            // patch is a collinear sliver pre-push that gains area once the
+            // original vertex is pushed.
+            emit_quad_forced(
                 &mut positions,
                 &mut normals,
                 &mut uvs,
@@ -1227,6 +1305,27 @@ pub fn generate_cut_offset_chamfer(
         positions[i][0] += chamfer_offsets[i][0];
         positions[i][1] += chamfer_offsets[i][1];
         positions[i][2] += chamfer_offsets[i][2];
+    }
+
+    // Drop triangles with coincident corners (post-push).  Forced corner
+    // patches are recorded as quads whose 4th corner repeats the 3rd; their
+    // second triangle stays degenerate after pushes and would otherwise
+    // contribute a duplicated edge.
+    {
+        let mut kept: Vec<u32> = Vec::with_capacity(indices.len());
+        for t in indices.chunks(3) {
+            let p = |k: usize| Vec3::from_array(positions[t[k] as usize]);
+            let (a, b, c) = (p(0), p(1), p(2));
+            const EPS_SQ: f32 = 1e-10;
+            if a.distance_squared(b) <= EPS_SQ
+                || b.distance_squared(c) <= EPS_SQ
+                || c.distance_squared(a) <= EPS_SQ
+            {
+                continue;
+            }
+            kept.extend_from_slice(t);
+        }
+        indices = kept;
     }
 
     ChunkMeshData {
