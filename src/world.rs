@@ -82,20 +82,38 @@ pub fn setup_world(
             })),
         ));
 
-        // Directional light — pointing straight down for clean platformer shadows
+        // Key light — warm sun from the south-east at ~48° elevation,
+        // matching the IBL cubemap's fake sun. An angled key is what makes
+        // slopes read: a straight-down sun lights a 1:2 slope at ~90% of a
+        // flat top, washing all the terrain relief out.
         commands.spawn((
             DirectionalLight {
-                illuminance: 8_000.0,
+                color: Color::srgb(1.0, 0.96, 0.88),
+                illuminance: 9_500.0,
                 shadows_enabled: true,
                 ..default()
             },
-            Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            Transform::IDENTITY.looking_to(Vec3::new(-0.55, -1.0, -0.7).normalize(), Vec3::Y),
         ));
 
-        // Low ambient — IBL on the camera provides the real ambient coloring
+        // Cool skylight fill from the opposite low angle (no shadows) so
+        // faces turned away from the sun stay readable and pick up a blue
+        // tint instead of going flat.
+        commands.spawn((
+            DirectionalLight {
+                color: Color::srgb(0.65, 0.75, 1.0),
+                illuminance: 2_200.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::IDENTITY.looking_to(Vec3::new(0.45, -0.35, 0.55).normalize(), Vec3::Y),
+        ));
+
+        // Low ambient — the IBL cubemap on the camera provides the real
+        // ambient coloring.
         commands.insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.9, 0.9, 1.0),
-            brightness: 50.0,
+            brightness: 40.0,
             ..default()
         });
 

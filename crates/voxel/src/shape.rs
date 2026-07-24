@@ -241,6 +241,12 @@ impl Default for ShapeTable {
         table.shapes.push(slope_cap_shape("wedge_steep", [3, 3, 1, 1]));       // 4
         table.shapes.push(slope_cap_shape("wedge_steep_outer", [3, 1, 1, 1])); // 5
         table.shapes.push(slope_cap_shape("wedge_steep_inner", [3, 3, 3, 1])); // 6
+        // Planar diagonal ramps: the surface for terrain ascending equally
+        // along BOTH axes (the enclosed diagonal rises twice the side step).
+        // Without these, diagonal hillsides tessellate into all-inner-corner
+        // "teeth". Both are planar (h00 - h10 - h01 + h11 == 0).
+        table.shapes.push(slope_cap_shape("wedge_diag", [3, 2, 2, 1]));        // 7
+        table.shapes.push(slope_cap_shape("wedge_steep_diag", [5, 3, 3, 1])); // 8
         table
     }
 }
@@ -253,16 +259,37 @@ pub const SHAPE_WEDGE_INNER: u16 = 3;
 pub const SHAPE_WEDGE_STEEP: u16 = 4;
 pub const SHAPE_WEDGE_STEEP_OUTER: u16 = 5;
 pub const SHAPE_WEDGE_STEEP_INNER: u16 = 6;
+pub const SHAPE_WEDGE_DIAG: u16 = 7;
+pub const SHAPE_WEDGE_STEEP_DIAG: u16 = 8;
+
+/// Corner heights `[h00, h10, h01, h11]` (cells above the cap base) for the
+/// slope-cap shapes, `None` for anything else.  h00 is the local (-X,-Z)
+/// corner before facing rotation.
+pub fn cap_corner_heights(shape: u16) -> Option<[u8; 4]> {
+    match shape {
+        SHAPE_WEDGE => Some([2, 2, 1, 1]),
+        SHAPE_WEDGE_OUTER => Some([2, 1, 1, 1]),
+        SHAPE_WEDGE_INNER => Some([2, 2, 2, 1]),
+        SHAPE_WEDGE_STEEP => Some([3, 3, 1, 1]),
+        SHAPE_WEDGE_STEEP_OUTER => Some([3, 1, 1, 1]),
+        SHAPE_WEDGE_STEEP_INNER => Some([3, 3, 3, 1]),
+        SHAPE_WEDGE_DIAG => Some([3, 2, 2, 1]),
+        SHAPE_WEDGE_STEEP_DIAG => Some([5, 3, 3, 1]),
+        _ => None,
+    }
+}
 
 /// All slope-cap shape ids (everything that smooths a terrain step),
 /// including the classic 1:2 wedge.
-pub const SLOPE_SHAPES: [u16; 6] = [
+pub const SLOPE_SHAPES: [u16; 8] = [
     SHAPE_WEDGE,
     SHAPE_WEDGE_OUTER,
     SHAPE_WEDGE_INNER,
     SHAPE_WEDGE_STEEP,
     SHAPE_WEDGE_STEEP_OUTER,
     SHAPE_WEDGE_STEEP_INNER,
+    SHAPE_WEDGE_DIAG,
+    SHAPE_WEDGE_STEEP_DIAG,
 ];
 
 impl ShapeTable {

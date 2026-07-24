@@ -2032,7 +2032,11 @@ fn worldgen_slope_chunks_mesh_clean() {
             // invisible at render scale, so only assert on visible sizes.
             if len * 0.5 < 0.01 { continue; }
             let avg_n = (nv(0) + nv(1) + nv(2)).normalize_or_zero();
-            if (geo / len).dot(avg_n) < -0.5 {
+            // -0.6: wall-base transition slivers on diagonal caps sit near
+            // -0.55 (nearly perpendicular to their smoothed normals — no
+            // winding is "right" for them); real backfacing defects score
+            // -0.9 and below.
+            if (geo / len).dot(avg_n) < -0.6 {
                 backfacing += 1;
                 if backfacing <= 4 {
                     let c = (p(0) + p(1) + p(2)) / 3.0;
@@ -2088,6 +2092,8 @@ fn dump_shape_gallery() {
         (SHAPE_WEDGE_STEEP, "steep wedge (1:1)"),
         (SHAPE_WEDGE_STEEP_OUTER, "steep outer (1:1)"),
         (SHAPE_WEDGE_STEEP_INNER, "steep inner (1:1)"),
+        (SHAPE_WEDGE_DIAG, "diagonal ramp (1:2)"),
+        (SHAPE_WEDGE_STEEP_DIAG, "steep diagonal (1:1)"),
     ] {
         let mut data = ChunkData::new();
         let shape = shapes.get(id).unwrap();
@@ -2173,4 +2179,137 @@ fn debug_find_slope_runs() {
         let wy = (*y as f32) * 0.5;
         eprintln!("run len {len}: start world ({wx:.0},{wy:.0},{wz:.0}) facing {facing:?} shape {shape}");
     }
+}
+
+/// SEMANTIC placement check: for every slope cap the worldgen places, the
+/// cap's surface must be flush with the neighboring column's SURFACE (cube
+/// top or that column's own cap corners) along every side whose neighbor
+/// stands higher, and at every strictly-higher diagonal corner.
+/// Watertightness can't catch a mis-rotated or wrong-variant cap (walls
+/// seal the gaps); this can.
+#[test]
+fn worldgen_caps_meet_neighbors() {
+    use crate::world_def::WorldDef;
+    use crate::coords::RegionId;
+    use crate::shape::cap_corner_heights;
+    use bevy::math::Vec3;
+
+    let def = WorldDef::standard();
+    let mut region = crate::region::Region::new(RegionId(0), Vec3::ZERO);
+    crate::worldgen::generate_archipelago(&mut region, &def.terrain);
+
+    // Per block column: highest cube top and any cap block.
+    let mut cube_top: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut cap_at: HashMap<(i32, i32), (i32, u16, Facing)> = HashMap::new();
+    for (pos, slot) in region.iter_chunks() {
+        for b in slot.data.blocks.iter() {
+            let gx = pos.x * 32 + b.origin.0 as i32;
+            let gy = pos.y * 32 + b.origin.1 as i32;
+            let gz = pos.z * 32 + b.origin.2 as i32;
+            let col = (gx / 2, gz / 2);
+            if b.shape == 0 {
+                let top = gy + 1;
+                let e = cube_top.entry(col).or_insert(top);
+                if top > *e { *e = top; }
+            } else {
+                cap_at.insert(col, (gy, b.shape, b.facing));
+            }
+        }
+    }
+
+    // Surface corner heights of a column at its 4 block corners, in world
+    // orientation: keys (0,0),(2,0),(0,2),(2,2). None if the column has no
+    // terrain.
+    let corners_of = |col: (i32, i32)| -> Option<HashMap<(i32, i32), i32>> {
+        if let Some(&(gy, shape, facing)) = cap_at.get(&col) {
+            let h = cap_corner_heights(shape)?;
+            let mut m = HashMap::new();
+            for (lx, lz, hh) in [(0.0, 0.0, h[0]), (2.0, 0.0, h[1]), (0.0, 2.0, h[2]), (2.0, 2.0, h[3])] {
+                let p = facing.rotate_block_point(Vec3::new(lx, 0.0, lz), (2, 2, 2));
+                m.insert((p.x.round() as i32, p.z.round() as i32), gy + hh as i32);
+            }
+            Some(m)
+        } else {
+            let &top = cube_top.get(&col)?;
+            let mut m = HashMap::new();
+            for k in [(0, 0), (2, 0), (0, 2), (2, 2)] {
+                m.insert(k, top);
+            }
+            Some(m)
+        }
+    };
+    // Column height as the classifier saw it (cap columns: cap base + 1).
+    let height_of = |col: (i32, i32)| -> Option<i32> {
+        if let Some(&(gy, _, _)) = cap_at.get(&col) {
+            Some(gy + 1)
+        } else {
+            cube_top.get(&col).copied()
+        }
+    };
+
+    let mut violations = 0usize;
+    let mut checked = 0usize;
+    for (&col, &(_gy, shape, facing)) in &cap_at {
+        let (cx, cz) = col;
+        let own = corners_of(col).unwrap();
+        let h = height_of(col).unwrap();
+        // Sides: our two edge corners must equal the neighbor's matching
+        // corners when the neighbor column is higher.
+        for (dx, dz, ours, theirs) in [
+            (-1, 0, [(0, 0), (0, 2)], [(2, 0), (2, 2)]),
+            (1, 0, [(2, 0), (2, 2)], [(0, 0), (0, 2)]),
+            (0, -1, [(0, 0), (2, 0)], [(0, 2), (2, 2)]),
+            (0, 1, [(0, 2), (2, 2)], [(0, 0), (2, 0)]),
+        ] {
+            let ncol = (cx + dx, cz + dz);
+            let Some(hn) = height_of(ncol) else { continue };
+            if hn <= h { continue; }
+            let Some(nc) = corners_of(ncol) else { continue };
+            checked += 1;
+            if own[&ours[0]] != nc[&theirs[0]] || own[&ours[1]] != nc[&theirs[1]] {
+                violations += 1;
+                if violations <= 10 {
+                    eprintln!(
+                        "cap col ({cx},{cz}) shape {shape} facing {facing:?}: edge toward ({dx},{dz}) is {}/{}, neighbor surface {}/{}",
+                        own[&ours[0]], own[&ours[1]], nc[&theirs[0]], nc[&theirs[1]]
+                    );
+                }
+            }
+        }
+        // Diagonals: when only the diagonal is higher, our corner must be
+        // flush with the diagonal column's facing corner.
+        for (dx, dz, ours, theirs) in [
+            (-1, -1, (0, 0), (2, 2)),
+            (1, -1, (2, 0), (0, 2)),
+            (-1, 1, (0, 2), (2, 0)),
+            (1, 1, (2, 2), (0, 0)),
+        ] {
+            let dcol = (cx + dx, cz + dz);
+            let Some(hd) = height_of(dcol) else { continue };
+            let ha = height_of((cx + dx, cz)).unwrap_or(h);
+            let hb = height_of((cx, cz + dz)).unwrap_or(h);
+            if hd > h && ha <= h && hb <= h {
+                let Some(dc) = corners_of(dcol) else { continue };
+                checked += 1;
+                if own[&ours] != dc[&theirs] {
+                    violations += 1;
+                    if violations <= 10 {
+                        eprintln!(
+                            "cap col ({cx},{cz}) shape {shape} facing {facing:?}: corner toward diag ({dx},{dz}) is {}, neighbor corner {}",
+                            own[&ours], dc[&theirs]
+                        );
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("checked {checked} cap contacts, {violations} violations");
+    // Rough terrain legitimately produces some cap-vs-cap mini-cliffs (a
+    // neighbor's cap can rise past ours where gradients disagree), so this
+    // asserts a BOUND, not zero: mis-rotated facings or wrong variants blow
+    // far past it (a systematic error flags ~20%+ of contacts).
+    assert!(
+        violations * 20 <= checked,
+        "{violations}/{checked} cap contacts disagree with neighbors (>5%)"
+    );
 }

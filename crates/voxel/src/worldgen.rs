@@ -16,7 +16,7 @@ use crate::chunk::ChunkData;
 use crate::coords::{ChunkPos, REGION_XZ};
 use crate::chunk::{CHUNK_X, CHUNK_Y, CHUNK_Z};
 use crate::region::Region;
-use crate::shape::{Facing, SHAPE_CUBE, SHAPE_WEDGE, SHAPE_WEDGE_INNER, SHAPE_WEDGE_OUTER};
+use crate::shape::{Facing, SHAPE_CUBE, SHAPE_WEDGE, SHAPE_WEDGE_DIAG, SHAPE_WEDGE_INNER, SHAPE_WEDGE_OUTER, SHAPE_WEDGE_STEEP_DIAG};
 
 // ---------------------------------------------------------------------------
 // Texture palette
@@ -365,7 +365,10 @@ pub fn classify_slope_cap(delta: &dyn Fn(i32, i32) -> i32) -> Option<(u16, Facin
             Some((shape, facing, ch))
         }
         2 => {
-            // Inner corner: two adjacent high sides with equal rise.
+            // Two adjacent high sides with equal rise. When the ENCLOSED
+            // diagonal rises twice the side step, the terrain is a straight
+            // diagonal gradient and the planar diagonal ramp fits exactly;
+            // otherwise the surface folds and it's an inner (valley) corner.
             let (west, south, v) = if high(dw) && high(ds) && dw == ds {
                 (true, true, dw)
             } else if high(ds) && high(de) && ds == de {
@@ -377,6 +380,15 @@ pub fn classify_slope_cap(delta: &dyn Fn(i32, i32) -> i32) -> Option<(u16, Facin
             } else {
                 return None;
             };
+            let ddiag = delta(if west { -1 } else { 1 }, if south { -1 } else { 1 });
+            if ddiag == 2 * v {
+                let (shape, ch) = match v {
+                    1 => (SHAPE_WEDGE_DIAG, 3),
+                    2 => (SHAPE_WEDGE_STEEP_DIAG, 5),
+                    _ => return None,
+                };
+                return Some((shape, corner_facing(west, south), ch));
+            }
             let (shape, ch) = family(v, SHAPE_WEDGE_INNER)?;
             Some((shape, corner_facing(west, south), ch))
         }

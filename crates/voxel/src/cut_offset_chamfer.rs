@@ -1197,14 +1197,18 @@ pub fn generate_cut_offset_chamfer(
             // When both endpoints have patches, emit a quad connecting all
             // four points instead of two separate triangles (which leave a
             // diamond-shaped gap between the split points).
+            // Gap pieces are emitted as recorded (forced) quads: their
+            // corners can sit on sharp edges and move with the fillet
+            // pushes, so winding must be decided AFTER pushes or thin gap
+            // triangles flip into backfacing slivers.
             if !prev_sharp[i] {
                 if needs_patch[ip] {
                     // Both endpoints patched — vertex ip emits this quad in
                     // its next-edge pass; never emit from the prev side.
                 } else {
-                    emit_tri(
-                        &mut positions, &mut normals, &mut uvs, &mut indices,
-                        inner[ip], split_on_prev_edge, inner[i], fn_,
+                    emit_quad_forced(
+                        &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
+                        inner[ip], split_on_prev_edge, inner[i], inner[i], fn_,
                     );
                 }
             }
@@ -1212,14 +1216,14 @@ pub fn generate_cut_offset_chamfer(
                 if needs_patch[j] {
                     // Both endpoints patched — the next side always emits.
                     let split_j = patch_split_prev[j].unwrap();
-                    emit_quad(
+                    emit_quad_forced(
                         &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
                         inner[i], split_on_next_edge, split_j, inner[j], fn_,
                     );
                 } else {
-                    emit_tri(
-                        &mut positions, &mut normals, &mut uvs, &mut indices,
-                        inner[i], split_on_next_edge, inner[j], fn_,
+                    emit_quad_forced(
+                        &mut positions, &mut normals, &mut uvs, &mut indices, &mut quads,
+                        inner[i], split_on_next_edge, inner[j], inner[j], fn_,
                     );
                 }
             }
@@ -1309,12 +1313,25 @@ pub fn generate_cut_offset_chamfer(
         let pushed = |k: usize| -> Vec3 {
             Vec3::from_array(positions[b + k]) + Vec3::from_array(chamfer_offsets[b + k])
         };
+        // Orientation reference: blend the face normal with the (already
+        // smoothed) vertex normals.  Fillet transition quads can end up
+        // nearly perpendicular to their face normal, whose sign then decides
+        // winding by numerical noise — the smoothed normals track the actual
+        // local surface direction.
+        let avg_n = (0..4)
+            .map(|k| Vec3::from_array(normals[b + k]))
+            .sum::<Vec3>()
+            .normalize_or_zero();
+        let mut reference = (quad.expected_normal + avg_n).normalize_or_zero();
+        if reference.length_squared() < 0.5 {
+            reference = quad.expected_normal;
+        }
         let tri = quad_triangulation(
             pushed(0),
             pushed(1),
             pushed(2),
             pushed(3),
-            quad.expected_normal,
+            reference,
             quad.base,
         );
         indices[quad.index_start..quad.index_start + 6].copy_from_slice(&tri);
