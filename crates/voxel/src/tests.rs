@@ -2111,3 +2111,66 @@ fn dump_shape_gallery() {
     std::fs::write(&out_path, format!("[{}]", exhibits.join(","))).unwrap();
     eprintln!("wrote {out_path}");
 }
+
+/// Debug: find the longest straight runs of same-facing straight-wedge caps
+/// (continuous ramps) in the generated archipelago, in world coordinates.
+#[test]
+#[ignore]
+fn debug_find_slope_runs() {
+    use crate::world_def::WorldDef;
+    use crate::coords::RegionId;
+    use bevy::math::Vec3;
+
+    let def = WorldDef::standard();
+    let mut region = crate::region::Region::new(RegionId(0), Vec3::ZERO);
+    crate::worldgen::generate_archipelago(&mut region, &def.terrain);
+
+    // Collect straight-wedge caps globally: (global block col x, z) -> (shape, facing, y)
+    let mut caps: HashMap<(i32, i32), (u16, Facing, i32)> = HashMap::new();
+    for (pos, slot) in region.iter_chunks() {
+        for b in slot.data.blocks.iter() {
+            if b.shape == SHAPE_WEDGE || b.shape == SHAPE_WEDGE_STEEP {
+                let gx = pos.x * 32 + b.origin.0 as i32;
+                let gy = pos.y * 32 + b.origin.1 as i32;
+                let gz = pos.z * 32 + b.origin.2 as i32;
+                caps.insert((gx / 2, gz / 2), (b.shape, b.facing, gy));
+            }
+        }
+    }
+
+    // A chained ramp climbs 2 cells (gentle) per block along the downhill
+    // axis. Walk runs along +x and +z.
+    let mut runs: Vec<(usize, i32, i32, i32, Facing, u16)> = Vec::new();
+    for (&(cx, cz), &(shape, facing, y)) in &caps {
+        for (dx, dz) in [(1i32, 0i32), (0, 1)] {
+            // Only count run starts
+            let prev = caps.get(&(cx - dx, cz - dz));
+            let step = if shape == SHAPE_WEDGE { 1 } else { 2 };
+            if let Some(&(ps, pf, py)) = prev {
+                if ps == shape && pf == facing && (py - y).abs() == step {
+                    continue;
+                }
+            }
+            let mut len = 1;
+            let (mut px, mut pz, mut py) = (cx, cz, y);
+            loop {
+                let Some(&(ns, nf, ny)) = caps.get(&(px + dx, pz + dz)) else { break };
+                if ns != shape || nf != facing || (ny - py).abs() != step {
+                    break;
+                }
+                len += 1; px += dx; pz += dz; py = ny;
+            }
+            if len >= 5 {
+                runs.push((len, cx, cz, y, facing, shape));
+            }
+        }
+    }
+    runs.sort_by_key(|r| std::cmp::Reverse(r.0));
+    for (len, cx, cz, y, facing, shape) in runs.iter().take(12) {
+        // world coords: block col to wu, region centered at -2048
+        let wx = (*cx as f32) * 1.0 - 2048.0;
+        let wz = (*cz as f32) * 1.0 - 2048.0;
+        let wy = (*y as f32) * 0.5;
+        eprintln!("run len {len}: start world ({wx:.0},{wy:.0},{wz:.0}) facing {facing:?} shape {shape}");
+    }
+}

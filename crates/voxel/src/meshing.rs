@@ -616,7 +616,11 @@ fn ear_clip_triangulate(verts: &[Vec3], normal: Vec3) -> Vec<[usize; 3]> {
     let mut tris: Vec<[usize; 3]> = Vec::with_capacity(verts.len().saturating_sub(2));
     while idx.len() > 3 {
         let n = idx.len();
-        let mut clipped = false;
+        // Among all valid ears, clip the best-SHAPED one (normalized ratio of
+        // area to squared edge lengths; 1 = equilateral).  First-fit ear
+        // clipping degenerates into triangle fans full of long slivers, which
+        // show up as shading streaks on large merged faces.
+        let mut best: Option<(usize, f32)> = None;
         for k in 0..n {
             let a = idx[(k + n - 1) % n];
             let b = idx[k];
@@ -645,14 +649,22 @@ fn ear_clip_triangulate(verts: &[Vec3], normal: Vec3) -> Vec<[usize; 3]> {
             }) {
                 continue;
             }
-            tris.push([a, b, c]);
-            idx.remove(k);
-            clipped = true;
-            break;
+            let ab = pts[b] - pts[a];
+            let bc = pts[c] - pts[b];
+            let quality = cross
+                / (ab.length_squared() + bc.length_squared() + ac_len_sq).max(1e-12);
+            if best.map_or(true, |(_, q)| quality > q) {
+                best = Some((k, quality));
+            }
         }
-        if !clipped {
+        let Some((k, _)) = best else {
             break; // degenerate remainder
-        }
+        };
+        let a = idx[(k + n - 1) % n];
+        let b = idx[k];
+        let c = idx[(k + 1) % n];
+        tris.push([a, b, c]);
+        idx.remove(k);
     }
     if idx.len() == 3 {
         let (a, b, c) = (idx[0], idx[1], idx[2]);
