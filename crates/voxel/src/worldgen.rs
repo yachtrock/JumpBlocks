@@ -239,11 +239,14 @@ fn island_height(island: &IslandParams, wx: f32, wz: f32) -> i32 {
     let height_range = island.peak_height as f32 - island.edge_height as f32;
     let base_height = island.edge_height as f32 + t_smooth * height_range;
 
-    // Rolling terrain: broad fBm hills with a touch of fine detail,
-    // fading out toward the coast.
-    let hills = fbm(wx * 0.55, wz * 0.55, seed ^ 0x9E37_79B9, 4);
-    let detail = fbm(wx * 1.9, wz * 1.9, seed ^ 0x1234_5678, 2);
-    let ridge = (hills * 1.5 + detail * 0.4) * island.ridge_height * t;
+    // Rolling terrain: broad, LOW-frequency fBm hills fading out toward the
+    // coast.  High-frequency octaves (< ~8 wu wavelength) pockmark the
+    // hillsides with isolated one-block bumps and pits — each of which gets
+    // rimmed with slope caps and destroys the readable ramps — so the flank
+    // relief stays coarse; coastline character comes from the perimeter
+    // noise instead.
+    let hills = fbm(wx * 0.35, wz * 0.35, seed ^ 0x9E37_79B9, 2);
+    let ridge = hills * 1.7 * island.ridge_height * t;
 
     let total = base_height + ridge;
     total.max(0.0) as i32

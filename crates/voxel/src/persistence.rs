@@ -313,7 +313,7 @@ pub fn save_dirty_chunks(
 // ---------------------------------------------------------------------------
 
 const META_MAGIC: &[u8; 4] = b"JBRG";
-const META_VERSION: u8 = 1;
+const META_VERSION: u8 = 2;
 
 /// Serializable region metadata (written to region.meta).
 #[derive(Debug, Clone)]
@@ -325,6 +325,10 @@ pub struct RegionMeta {
     pub chunk_count: u32,
     /// Data generation counter (for impostor invalidation).
     pub data_generation: u64,
+    /// Version of the terrain generator that produced this region's chunks.
+    /// Saves from older generators (or with no meta at all) are considered
+    /// stale and regenerated on load. Meta v1 files read as 0.
+    pub worldgen_version: u32,
 }
 
 pub fn serialize_region_meta(meta: &RegionMeta) -> Vec<u8> {
@@ -337,6 +341,7 @@ pub fn serialize_region_meta(meta: &RegionMeta) -> Vec<u8> {
     }
     buf.extend_from_slice(&meta.chunk_count.to_le_bytes());
     buf.extend_from_slice(&meta.data_generation.to_le_bytes());
+    buf.extend_from_slice(&meta.worldgen_version.to_le_bytes());
     buf
 }
 
@@ -351,7 +356,7 @@ pub fn deserialize_region_meta(bytes: &[u8]) -> io::Result<RegionMeta> {
 
     let mut ver = [0u8; 1];
     cursor.read_exact(&mut ver)?;
-    if ver[0] != META_VERSION {
+    if ver[0] == 0 || ver[0] > META_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported region meta version {}", ver[0]),
@@ -366,12 +371,15 @@ pub fn deserialize_region_meta(bytes: &[u8]) -> io::Result<RegionMeta> {
     ];
     let chunk_count = read_u32_le(&mut cursor)?;
     let data_generation = read_u64_le(&mut cursor)?;
+    // v1 predates the worldgen version stamp — read as 0 (always stale).
+    let worldgen_version = if ver[0] >= 2 { read_u32_le(&mut cursor)? } else { 0 };
 
     Ok(RegionMeta {
         region_id,
         world_origin,
         chunk_count,
         data_generation,
+        worldgen_version,
     })
 }
 
@@ -476,6 +484,7 @@ mod tests {
             world_origin: [100.0, 0.0, -200.5],
             chunk_count: 1337,
             data_generation: 99,
+            worldgen_version: 7,
         };
         let bytes = serialize_region_meta(&meta);
         let restored = deserialize_region_meta(&bytes).unwrap();
@@ -483,6 +492,26 @@ mod tests {
         assert_eq!(restored.world_origin, [100.0, 0.0, -200.5]);
         assert_eq!(restored.chunk_count, 1337);
         assert_eq!(restored.data_generation, 99);
+        assert_eq!(restored.worldgen_version, 7);
+    }
+
+    #[test]
+    fn v1_region_meta_reads_as_worldgen_version_zero() {
+        // A v1 meta blob (no worldgen_version field) must deserialize with
+        // worldgen_version 0 so old saves are treated as stale.
+        let meta = RegionMeta {
+            region_id: 1,
+            world_origin: [0.0, 0.0, 0.0],
+            chunk_count: 5,
+            data_generation: 3,
+            worldgen_version: 9,
+        };
+        let mut bytes = serialize_region_meta(&meta);
+        bytes[4] = 1; // rewrite version byte to v1
+        bytes.truncate(bytes.len() - 4); // drop the worldgen_version field
+        let restored = deserialize_region_meta(&bytes).unwrap();
+        assert_eq!(restored.worldgen_version, 0);
+        assert_eq!(restored.chunk_count, 5);
     }
 
     #[test]
