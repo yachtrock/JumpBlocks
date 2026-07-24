@@ -406,22 +406,45 @@ pub fn generate_archipelago(region: &mut Region, config: &ArchipelagoConfig) -> 
     let max_cz = max_cz.min(REGION_XZ - 1);
 
     // First pass: a global heightmap at block-column resolution over the
-    // whole bounding box, with a one-column margin so slope-cap
-    // classification can inspect neighbors without re-sampling. A column at
-    // chunk `cx`, block `bxi` lives at ix = (cx - min_cx) * 16 + bxi.
+    // whole bounding box, with a two-column margin so both the smoothing
+    // kernel and slope-cap classification can inspect neighbors without
+    // re-sampling. A column at chunk `cx`, block `bxi` lives at
+    // ix = (cx - min_cx) * 16 + bxi.
     let block_cols = CHUNK_X / 2; // 16 block columns per chunk axis
-    let cols_w = (max_cx - min_cx + 1) * block_cols as i32 + 2;
-    let cols_h = (max_cz - min_cz + 1) * block_cols as i32 + 2;
+    let cols_w = (max_cx - min_cx + 1) * block_cols as i32 + 4;
+    let cols_h = (max_cz - min_cz + 1) * block_cols as i32 + 4;
     let mut grid: Vec<TerrainSample> = Vec::with_capacity((cols_w * cols_h) as usize);
-    for iz in -1..cols_h - 1 {
-        for ix in -1..cols_w - 1 {
+    for iz in -2..cols_h - 2 {
+        for ix in -2..cols_w - 2 {
             let wx = min_cx as f32 + ix as f32 / block_cols as f32;
             let wz = min_cz as f32 + iz as f32 / block_cols as f32;
             grid.push(sample_terrain(config, wx, wz));
         }
     }
+
+    // Smooth the quantized height field with a 3x3 Gaussian.  Raw noise
+    // jitters neighboring columns by a cell, which turns hillsides into a
+    // salt-and-pepper of isolated slope caps (pockmarks) instead of
+    // coherent ramps; a small blur removes single-column bumps and pits
+    // while keeping ridges, terraces, and coastlines.
+    {
+        let idx = |ix: i32, iz: i32| -> usize { (iz * cols_w + ix) as usize };
+        let heights: Vec<i32> = grid.iter().map(|s| s.height).collect();
+        for iz in 1..cols_h - 1 {
+            for ix in 1..cols_w - 1 {
+                let mut sum = 0.0f32;
+                for (dz, row_w) in [(-1i32, [1.0f32, 2.0, 1.0]), (0, [2.0, 4.0, 2.0]), (1, [1.0, 2.0, 1.0])] {
+                    for (k, dx) in [-1i32, 0, 1].iter().enumerate() {
+                        sum += heights[idx(ix + dx, iz + dz)] as f32 * row_w[k];
+                    }
+                }
+                grid[idx(ix, iz)].height = (sum / 16.0).round() as i32;
+            }
+        }
+    }
+
     let sample_col = |ix: i32, iz: i32| -> TerrainSample {
-        grid[((iz + 1) * cols_w + (ix + 1)) as usize]
+        grid[((iz + 2) * cols_w + (ix + 2)) as usize]
     };
 
     let shapes = crate::shape::ShapeTable::default();
