@@ -37,7 +37,7 @@ struct ChunkVertex {
     @location(4) tangent: vec4<f32>,
 #endif
 #ifdef VERTEX_COLORS
-    @location(5) color: vec4<f32>,
+    @location(7) color: vec4<f32>,
 #endif
 #ifdef HAS_CHAMFER_OFFSET
     @location(10) chamfer_offset: vec3<f32>,

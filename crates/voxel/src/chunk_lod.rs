@@ -88,7 +88,10 @@ impl MaterialExtension for DitherFadeExtension {
             attrs.push(Mesh::ATTRIBUTE_TANGENT.at_shader_location(4));
         }
         if layout.0.contains(Mesh::ATTRIBUTE_COLOR) {
-            attrs.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(5));
+            // Location 7 matches Bevy's DEFAULT prepass vertex shader input
+            // (the prepass pipeline uses it — only the forward vertex shader
+            // is custom), and chunk_vertex.wgsl declares the same slot.
+            attrs.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(7));
         }
         if layout.0.contains(ATTRIBUTE_CHAMFER_OFFSET) {
             attrs.push(ATTRIBUTE_CHAMFER_OFFSET.at_shader_location(CHAMFER_OFFSET_LOCATION));
