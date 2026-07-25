@@ -218,6 +218,16 @@ pub fn setup_challenges(
         emissive: LinearRgba::new(0.05, 0.6, 0.15, 1.0),
         ..default()
     });
+    // Signpost meshes (shared): a wooden post with a colored board — the
+    // board is painted the challenge's signature stone color.
+    let post_mesh = meshes.add(Cuboid::new(0.14, 1.15, 0.14));
+    let board_mesh = meshes.add(Cuboid::new(1.05, 0.55, 0.09));
+    let trim_mesh = meshes.add(Cuboid::new(1.15, 0.08, 0.11));
+    let post_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.5, 0.36, 0.2),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
     for (i, c) in def.challenges.iter().enumerate() {
         let pos = cell_base_world(region_origin, c.start_cell);
         commands.spawn((
@@ -226,6 +236,47 @@ pub fn setup_challenges(
             MeshMaterial3d(pad_material.clone()),
             Transform::from_translation(pos + Vec3::Y * 0.06),
         ));
+
+        // Signpost: placed just behind the pad relative to the course
+        // direction, board facing back at the pad.
+        let layout = def.course_layout(i);
+        let toward = layout
+            .stones
+            .get(1)
+            .map(|s| {
+                let w = cell_base_world(region_origin, *s) - pos;
+                Vec3::new(w.x, 0.0, w.z).normalize_or_zero()
+            })
+            .unwrap_or(Vec3::X);
+        let sign_pos = pos - toward * 2.1;
+        let yaw = toward.x.atan2(toward.z);
+        let board_tint = jumpblocks_voxel::worldgen::texture_color(
+            c.stone_textures.first().copied().unwrap_or(0),
+        );
+        let board_material = materials.add(StandardMaterial {
+            base_color: Color::linear_rgba(board_tint[0], board_tint[1], board_tint[2], 1.0),
+            perceptual_roughness: 0.7,
+            ..default()
+        });
+        commands
+            .spawn((
+                Mesh3d(post_mesh.clone()),
+                MeshMaterial3d(post_material.clone()),
+                Transform::from_translation(sign_pos + Vec3::Y * 0.575)
+                    .with_rotation(Quat::from_rotation_y(yaw)),
+            ))
+            .with_children(|parent| {
+                parent.spawn((
+                    Mesh3d(board_mesh.clone()),
+                    MeshMaterial3d(board_material.clone()),
+                    Transform::from_translation(Vec3::new(0.0, 0.35, 0.0)),
+                ));
+                parent.spawn((
+                    Mesh3d(trim_mesh.clone()),
+                    MeshMaterial3d(post_material.clone()),
+                    Transform::from_translation(Vec3::new(0.0, 0.66, 0.0)),
+                ));
+            });
     }
 
     // --- Pedestals (visual crystal above the stamped column) ---
@@ -734,7 +785,7 @@ mod tests {
         let def = test_def();
         let mut progress = PlayerProgress::default();
         progress.trophies.insert(0); // First Steps — island 0
-        progress.trophies.insert(2); // Magma Hop — island 1
+        progress.trophies.insert(8); // Magma Hop — island 1
         assert_eq!(progress.island_trophies(&def, 0), 1);
         assert_eq!(progress.island_trophies(&def, 1), 1);
         assert_eq!(progress.island_trophies(&def, 2), 0);

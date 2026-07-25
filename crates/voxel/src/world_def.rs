@@ -22,8 +22,9 @@ use crate::region::Region;
 use crate::shape::Facing;
 use crate::stamp::Stamper;
 use crate::worldgen::{
-    self, ArchipelagoConfig, IslandParams, TEX_BASALT, TEX_COURSE, TEX_DIRT, TEX_GOAL, TEX_GRASS,
-    TEX_PAD, TEX_PEDESTAL, TEX_SAND, TEX_SKYSTONE, TEX_STONE,
+    self, ArchipelagoConfig, IslandParams, TEX_BASALT, TEX_BLUE, TEX_COURSE, TEX_DIRT, TEX_GOAL,
+    TEX_GRASS, TEX_LIME, TEX_ORANGE, TEX_PAD, TEX_PEDESTAL, TEX_PINK, TEX_PURPLE, TEX_RED,
+    TEX_SAND, TEX_SKYSTONE, TEX_STONE, TEX_TEAL, TEX_WHITE, TEX_YELLOW,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,9 @@ pub struct ChallengeDef {
     /// Kill height in cells: while the challenge is active, dropping below
     /// this Y sends the player back to the start pad.
     pub kill_y_cell: Option<i32>,
+    /// Texture ids cycled along the course stones (single entry = solid
+    /// color). Also colors the start pad ring and signpost board.
+    pub stone_textures: Vec<u16>,
 }
 
 /// A kinematic moving platform oscillating between two points.
@@ -202,52 +206,128 @@ impl WorldDef {
         // --- Challenges ---
         // Start cells are where the player stands: pad is stamped one cell
         // below, so start_cell.y = ground + 1 (top of the pad layer).
-        let c0_start = IVec3::new(4240, ground(4240, 4096) + 1, 4096);
-        let c1_start = IVec3::new(3950, ground(3950, 4040) + 1, 4040);
-        let c2_start = IVec3::new(3456, ground(3456, 4340) + 1, 4340);
-        let c3_start = IVec3::new(3570, ground(3570, 4224) + 1, 4224);
-        let c4_start = IVec3::new(4512, ground(4512, 3660) + 1, 3660);
+        // Haven Isle (island 0) carries eight courses; each has a signature
+        // color used for its stones, start-pad ring, and signpost.
+        let start_at = |x: i32, z: i32| IVec3::new(x, ground(x, z) + 1, z);
 
         let challenges = vec![
+            // 0 — First Steps: gentle untimed arc off the east flank.
             ChallengeDef {
                 name: "First Steps".to_string(),
                 island: 0,
-                start_cell: c0_start,
+                start_cell: start_at(4240, 4096),
                 goal_cell: IVec3::new(4460, 34, 4180),
                 time_limit: None,
                 kill_y_cell: None,
+                stone_textures: vec![TEX_ORANGE],
             },
+            // 1 — Ridge Runner: timed terrain-hugging run to the summit.
             ChallengeDef {
                 name: "Ridge Runner".to_string(),
                 island: 0,
-                start_cell: c1_start,
+                start_cell: start_at(3950, 4040),
                 goal_cell: IVec3::new(4110, ground(4110, 4130) + 8, 4130),
                 time_limit: Some(50.0),
                 kill_y_cell: None,
+                stone_textures: vec![TEX_LIME],
             },
+            // 2 — Sky Arc: high bowed arc out over the west sea and back
+            // down to a floating goal (fall = back to start).
+            ChallengeDef {
+                name: "Sky Arc".to_string(),
+                island: 0,
+                start_cell: start_at(3920, 4180),
+                goal_cell: IVec3::new(3770, 30, 4300),
+                time_limit: None,
+                kill_y_cell: Some(3),
+                stone_textures: vec![TEX_BLUE, TEX_WHITE],
+            },
+            // 3 — Helix Climb: Galaxy-style corkscrew up a floating helix.
+            ChallengeDef {
+                name: "Helix Climb".to_string(),
+                island: 0,
+                start_cell: start_at(4130, 3950),
+                goal_cell: IVec3::new(4180, ground(4180, 3945) + 26, 3945),
+                time_limit: Some(75.0),
+                kill_y_cell: None,
+                stone_textures: vec![TEX_YELLOW],
+            },
+            // 4 — Ferry Hop: stones across the north bay with a moving
+            // platform bridging the middle stretch.
+            ChallengeDef {
+                name: "Ferry Hop".to_string(),
+                island: 0,
+                start_cell: start_at(4040, 4290),
+                goal_cell: IVec3::new(4080, 22, 4430),
+                time_limit: None,
+                kill_y_cell: Some(3),
+                stone_textures: vec![TEX_TEAL],
+            },
+            // 5 — Rainbow Sprint: tight-timer dash over the southeast
+            // shallows on rainbow stones (comet-style).
+            ChallengeDef {
+                name: "Rainbow Sprint".to_string(),
+                island: 0,
+                start_cell: start_at(4210, 3920),
+                goal_cell: IVec3::new(4400, 16, 3740),
+                time_limit: Some(35.0),
+                kill_y_cell: Some(3),
+                stone_textures: vec![
+                    TEX_RED, TEX_ORANGE, TEX_YELLOW, TEX_LIME, TEX_TEAL, TEX_BLUE, TEX_PURPLE,
+                    TEX_PINK,
+                ],
+            },
+            // 6 — Pillar Steps: hops across stone spires rising from the
+            // hillside (each interior stone sits on a stamped pillar).
+            ChallengeDef {
+                name: "Pillar Steps".to_string(),
+                island: 0,
+                start_cell: start_at(4160, 4180),
+                goal_cell: IVec3::new(4270, 44, 4270),
+                time_limit: None,
+                kill_y_cell: None,
+                stone_textures: vec![TEX_PURPLE, TEX_WHITE],
+            },
+            // 7 — Summit Ring: timed lap around the peak.
+            ChallengeDef {
+                name: "Summit Ring".to_string(),
+                island: 0,
+                start_cell: start_at(4030, 4096),
+                goal_cell: IVec3::new(4096, ground(4096, 4160) + 12, 4160),
+                time_limit: Some(60.0),
+                kill_y_cell: None,
+                stone_textures: vec![TEX_RED, TEX_WHITE],
+            },
+            // 8 — Magma Hop (Ember Isle): low bowed arc across the sea.
             ChallengeDef {
                 name: "Magma Hop".to_string(),
                 island: 1,
-                start_cell: c2_start,
+                start_cell: start_at(3456, 4340),
                 goal_cell: IVec3::new(3456, 14, 4560),
                 time_limit: None,
                 kill_y_cell: Some(5),
+                stone_textures: vec![TEX_COURSE],
             },
+            // 9 — Ember Ascent (Ember Isle): spiral hugging the cone.
             ChallengeDef {
                 name: "Ember Ascent".to_string(),
                 island: 1,
-                start_cell: c3_start,
+                start_cell: start_at(3570, 4224),
                 goal_cell: IVec3::new(3464, ground(3464, 4224) + 6, 4224),
                 time_limit: Some(60.0),
                 kill_y_cell: Some(5),
+                stone_textures: vec![TEX_RED, TEX_BASALT],
             },
+            // 10 — Spire Spiral (Skyreach): free-floating spiral with a
+            // moving-platform gap.
             ChallengeDef {
                 name: "Spire Spiral".to_string(),
                 island: 2,
-                start_cell: c4_start,
+                start_cell: start_at(4512, 3660),
                 goal_cell: IVec3::new(4542, 120, 3552),
                 time_limit: Some(90.0),
                 kill_y_cell: Some(30),
+                stone_textures: vec![TEX_SKYSTONE, TEX_WHITE],
             },
         ];
 
@@ -292,23 +372,27 @@ impl WorldDef {
             period: 30.0,
         });
 
-        // The Spire Lift bridges the deliberate gap in the Spire Spiral
-        // course — its endpoints are derived from the actual course stones
-        // so it always lines up.
-        let layout = def.course_layout(4);
-        if let Some((a, b)) = layout.lift_gap {
-            let s1 = layout.stones[a];
-            let s2 = layout.stones[b];
-            let dir = (s2 - s1).as_vec3().normalize_or_zero();
-            let from = s1.as_vec3() + dir * 8.0;
-            let to = s2.as_vec3() - dir * 8.0;
-            def.platforms.push(MovingPlatformDef {
-                name: "Spire Lift".to_string(),
-                from_cell: IVec3::new(from.x as i32, s1.y, from.z as i32),
-                to_cell: IVec3::new(to.x as i32, s2.y, to.z as i32),
-                half_extents: Vec3::new(1.5, 0.25, 1.5),
-                period: 10.0,
-            });
+        // Ferries bridge the deliberate gaps in the Ferry Hop and Spire
+        // Spiral courses — endpoints derived from the actual course stones
+        // so they always line up.
+        for (course_idx, pname, half, period) in
+            [(4usize, "Bay Ferry", 1.75f32, 12.0f32), (10, "Spire Lift", 1.5, 10.0)]
+        {
+            let layout = def.course_layout(course_idx);
+            if let Some((a, b)) = layout.lift_gap {
+                let s1 = layout.stones[a];
+                let s2 = layout.stones[b];
+                let dir = (s2 - s1).as_vec3().normalize_or_zero();
+                let from = s1.as_vec3() + dir * 8.0;
+                let to = s2.as_vec3() - dir * 8.0;
+                def.platforms.push(MovingPlatformDef {
+                    name: pname.to_string(),
+                    from_cell: IVec3::new(from.x as i32, s1.y, from.z as i32),
+                    to_cell: IVec3::new(to.x as i32, s2.y, to.z as i32),
+                    half_extents: Vec3::new(half, 0.25, half),
+                    period,
+                });
+            }
         }
 
         def
@@ -321,10 +405,13 @@ impl WorldDef {
 
         let mut s = Stamper::new(region);
 
-        // Start pads: 3×3 block pad under each start cell.
+        // Start pads: standard 3×3-block pad under each start cell — ring
+        // in the challenge's signature color, green center block.
         for c in &self.challenges {
             let p = c.start_cell;
-            s.platform(p.x - 2, p.y - 1, p.z - 2, 3, 1, 3, TEX_PAD);
+            let ring = c.stone_textures.first().copied().unwrap_or(TEX_COURSE);
+            s.platform(p.x - 2, p.y - 1, p.z - 2, 3, 1, 3, ring);
+            s.platform(p.x, p.y - 1, p.z, 1, 1, 1, TEX_PAD);
         }
 
         // Pedestals: 1-block column, 3 cells tall, next to the stand cell.
@@ -356,10 +443,20 @@ impl WorldDef {
     fn stamp_courses(&self, s: &mut Stamper) {
         for idx in 0..self.challenges.len() {
             let layout = self.course_layout(idx);
+            let texs = &self.challenges[idx].stone_textures;
             // Interior stones only: index 0 is the start pad and the last
             // entry is the goal platform, both stamped separately.
-            for stone in &layout.stones[1..layout.stones.len().saturating_sub(1)] {
-                s.platform(stone.x - 3, stone.y - 1, stone.z - 3, 3, 1, 3, TEX_COURSE);
+            for (si, stone) in layout.stones[1..layout.stones.len().saturating_sub(1)]
+                .iter()
+                .enumerate()
+            {
+                let tex = texs[si % texs.len().max(1)];
+                s.platform(stone.x - 3, stone.y - 1, stone.z - 3, 3, 1, 3, tex);
+                // Pillar Steps: each stone stands on a spire from the ground.
+                if self.challenges[idx].name == "Pillar Steps" {
+                    let g = self.ground(stone.x, stone.z).max(1);
+                    s.column(stone.x, g, stone.y - 1, stone.z, TEX_STONE);
+                }
             }
         }
     }
@@ -396,10 +493,91 @@ impl WorldDef {
                 };
                 CourseLayout::plain(sample_course(&path))
             }
-            // Magma Hop: low bowed arc across the sea.
-            2 => CourseLayout::plain(sample_course(&arc_path(start, goal, 24.0))),
-            // Ember Ascent: spiral hugging the cone.
+            // Sky Arc: high bowed arc out over the west sea — climbs to a
+            // crest mid-course, then descends to the floating goal.
+            2 => {
+                let xz = arc_path(start, goal, 35.0);
+                let crest = start.y.max(goal.y) + 14.0;
+                let path = move |t: f32| {
+                    let p = xz(t);
+                    let arc = (t * std::f32::consts::PI).sin();
+                    let y = start.y + (goal.y - start.y) * t + (crest - start.y) * arc * 0.6;
+                    Vec3::new(p.x, y, p.z)
+                };
+                CourseLayout::plain(sample_course(&path))
+            }
+            // Helix Climb: corkscrew around a fixed axis, rising linearly.
             3 => {
+                let center = Vec3::new(4180.0, 0.0, 3985.0);
+                let spiral = spiral_path(center, start, goal, 55.0, 38.0);
+                let path = move |t: f32| {
+                    let p = spiral(t);
+                    Vec3::new(p.x, start.y + (goal.y - start.y) * t, p.z)
+                };
+                CourseLayout::plain(sample_course(&path))
+            }
+            // Ferry Hop: two stone runs across the bay with a moving
+            // platform bridging the middle.
+            4 => {
+                let xz = arc_path(start, goal, 20.0);
+                let lerp_y = move |t: f32| {
+                    let p = xz(t);
+                    let hover = start.y.max(goal.y) + 4.0;
+                    let y = if t < 0.2 {
+                        start.y + (hover - start.y) * (t / 0.2)
+                    } else if t > 0.8 {
+                        hover + (goal.y - hover) * ((t - 0.8) / 0.2)
+                    } else {
+                        hover
+                    };
+                    Vec3::new(p.x, y, p.z)
+                };
+                let part1 = {
+                    let f = |t: f32| lerp_y(t * 0.42);
+                    sample_course(&f)
+                };
+                let part2 = {
+                    let f = |t: f32| lerp_y(0.58 + t * 0.42);
+                    sample_course(&f)
+                };
+                let gap_a = part1.len() - 1;
+                let mut stones = part1;
+                stones.extend(part2);
+                CourseLayout { lift_gap: Some((gap_a, gap_a + 1)), stones }
+            }
+            // Rainbow Sprint: fast shallow arc over the southeast shallows.
+            5 => CourseLayout::plain(sample_course(&arc_path(start, goal, 26.0))),
+            // Pillar Steps: rising arc; pillars are stamped under the stones.
+            6 => {
+                let xz = arc_path(start, goal, 18.0);
+                let path = move |t: f32| {
+                    let p = xz(t);
+                    Vec3::new(p.x, start.y + (goal.y - start.y) * t, p.z)
+                };
+                CourseLayout::plain(sample_course(&path))
+            }
+            // Summit Ring: a lap around the peak, hugging the terrain.
+            7 => {
+                let center = Vec3::new(4096.0, 0.0, 4096.0);
+                let ring = spiral_path(center, start, goal, 66.0, 58.0);
+                let path = move |t: f32| {
+                    let p = ring(t);
+                    let g = self.ground(p.x as i32, p.z as i32) as f32 + 3.0;
+                    let y = if t < 0.1 {
+                        start.y + (g - start.y) * (t / 0.1)
+                    } else if t > 0.88 {
+                        g + (goal.y - g) * ((t - 0.88) / 0.12)
+                    } else {
+                        g
+                    };
+                    Vec3::new(p.x, y, p.z)
+                };
+                CourseLayout::plain(sample_course(&path))
+            }
+            // Magma Hop: low bowed arc across the sea.
+            8 => CourseLayout::plain(sample_course(&arc_path(start, goal, 24.0))),
+            // Ember Ascent: spiral hugging the cone.
+            9 => {
                 let center = Vec3::new(3456.0, 0.0, 4224.0);
                 let spiral = spiral_path(center, start, goal, 160.0, 40.0);
                 let path = move |t: f32| {
@@ -418,7 +596,7 @@ impl WorldDef {
                 CourseLayout::plain(sample_course(&path))
             }
             // Spire Spiral: free-floating spiral with a moving-platform gap.
-            4 => {
+            10 => {
                 let center = Vec3::new(4512.0, 0.0, 3552.0);
                 let spiral = spiral_path(center, start, goal, 110.0, 55.0);
                 let lerp_y = move |t: f32| {
@@ -591,7 +769,12 @@ mod tests {
     fn standard_def_is_consistent() {
         let def = WorldDef::standard();
         assert_eq!(def.terrain.islands.len(), 4);
-        assert_eq!(def.challenges.len(), 5);
+        assert_eq!(def.challenges.len(), 11);
+        assert_eq!(
+            def.challenges.iter().filter(|c| c.island == 0).count(),
+            8,
+            "Haven Isle carries eight challenges"
+        );
         assert_eq!(def.zones.len(), 3);
         let max_cell = REGION_XZ * CHUNK_X as i32;
         for c in &def.challenges {
@@ -705,21 +888,24 @@ mod tests {
     #[test]
     fn spire_lift_bridges_its_gap() {
         let def = WorldDef::standard();
-        let layout = def.course_layout(4);
-        let (a, b) = layout.lift_gap.expect("Spire Spiral should have a lift gap");
-        let lift = def
-            .platforms
-            .iter()
-            .find(|p| p.name == "Spire Lift")
-            .expect("Spire Lift exists");
-        // Lift endpoints hug the stones on both sides of the gap
-        let s1 = layout.stones[a].as_vec3();
-        let s2 = layout.stones[b].as_vec3();
-        let from = lift.from_cell.as_vec3();
-        let to = lift.to_cell.as_vec3();
-        assert!(Vec2::new(from.x - s1.x, from.z - s1.z).length() <= 12.0);
-        assert!(Vec2::new(to.x - s2.x, to.z - s2.z).length() <= 12.0);
-        assert!((from.y - s1.y).abs() <= 3.0 && (to.y - s2.y).abs() <= 3.0);
+        // Every course with a lift gap gets a ferry whose endpoints hug the
+        // stones on both sides of the gap.
+        for (idx, pname) in [(4usize, "Bay Ferry"), (10, "Spire Lift")] {
+            let layout = def.course_layout(idx);
+            let (a, b) = layout.lift_gap.expect("course should have a lift gap");
+            let lift = def
+                .platforms
+                .iter()
+                .find(|p| p.name == pname)
+                .expect("ferry exists");
+            let s1 = layout.stones[a].as_vec3();
+            let s2 = layout.stones[b].as_vec3();
+            let from = lift.from_cell.as_vec3();
+            let to = lift.to_cell.as_vec3();
+            assert!(Vec2::new(from.x - s1.x, from.z - s1.z).length() <= 12.0, "{pname} from");
+            assert!(Vec2::new(to.x - s2.x, to.z - s2.z).length() <= 12.0, "{pname} to");
+            assert!((from.y - s1.y).abs() <= 3.0 && (to.y - s2.y).abs() <= 3.0, "{pname} y");
+        }
     }
 
     #[test]

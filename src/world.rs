@@ -19,7 +19,7 @@ pub const REGION_ORIGIN: Vec3 = Vec3::new(-2048.0, 0.0, -2048.0);
 /// block shapes, different heightmaps, ...).  Saved worlds stamped with an
 /// older version — or with no region.meta at all — are regenerated from
 /// scratch on load instead of serving stale terrain.
-pub const WORLDGEN_VERSION: u32 = 2;
+pub const WORLDGEN_VERSION: u32 = 3;
 
 /// Resource communicating the spawn point to the player system.
 #[derive(Resource)]
@@ -124,7 +124,9 @@ pub fn setup_world(
     if let Some(mut dither_mats) = dither_materials {
         let chunk_mat = dither_mats.add(ChunkDitherMaterial {
             base: StandardMaterial {
-                base_color: Color::srgb(0.6, 0.5, 0.4),
+                // White: the mesh COLOR attribute (per-block palette)
+                // carries the actual look.
+                base_color: Color::WHITE,
                 ..default()
             },
             extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },

@@ -24,6 +24,8 @@ pub struct ChunkMeshData {
     pub sharp_normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub chamfer_offsets: Vec<[f32; 3]>,
+    /// Per-vertex linear RGBA from the owning block's texture palette.
+    pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
@@ -340,6 +342,7 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut uvs = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices = Vec::new();
 
     let mut stats_blocks = 0u32;
@@ -389,9 +392,11 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
                 .collect();
             let world_normal = compute_world_normal(&world_verts, &face.triangles);
 
+            let color = crate::worldgen::texture_color(block.texture);
             for wv in &world_verts {
                 positions.push(wv.to_array());
                 normals.push(world_normal.to_array());
+                colors.push(color);
             }
             let uv_map = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
             for i in 0..face.vertices.len() { uvs.push(uv_map[i % 4]); }
@@ -412,7 +417,7 @@ fn generate_lod_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shap
 
     let n = positions.len();
     let sharp_normals = normals.clone();
-    ChunkMeshData { positions, normals, sharp_normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], indices }
+    ChunkMeshData { positions, normals, sharp_normals, uvs, chamfer_offsets: vec![[0.0; 3]; n], colors, indices }
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +451,8 @@ pub struct SolidFace {
     /// Original shape face triangulation (grid-aligned).
     /// Indices are into this face's `verts` list (0..verts.len()).
     pub orig_triangles: Vec<[usize; 3]>,
+    /// Texture id of the owning block (drives vertex colors).
+    pub texture: u16,
 }
 
 pub struct SolidMesh {
@@ -486,6 +493,7 @@ struct RawFace {
     block_size: (u8, u8, u8),
     halo: bool,
     orig_triangles: Vec<[usize; 3]>,
+    texture: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -775,6 +783,7 @@ fn try_merge_face_set(
                 block_size: first.block_size,
                 halo: first.halo,
                 orig_triangles: tris,
+                texture: first.texture,
             });
             for &fi in set {
                 consumed[fi] = true;
@@ -1057,6 +1066,7 @@ fn clip_contact_faces(
                 block_size: face.block_size,
                 halo: face.halo,
                 orig_triangles: tris,
+                texture: face.texture,
             });
         }
     }
@@ -1115,6 +1125,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
                 block_size: shape.size,
                 halo: false,
                 orig_triangles: face.triangles.clone(),
+                texture: block.texture,
             };
 
             if face_is_occluded(data, neighbors, shapes, block, face, facing, shape.size) {
@@ -1203,6 +1214,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
                             block_size: shape.size,
                             halo: true,
                             orig_triangles: face.triangles.clone(),
+                            texture: block.texture,
                         };
                         if face_is_occluded_at(data, neighbors, shapes, origin, face, facing, shape.size) {
                             clip_shapes.push(raw);
@@ -1248,6 +1260,7 @@ fn build_solid_mesh(data: &ChunkData, neighbors: &ChunkNeighbors, shapes: &Shape
             block_size: face.block_size,
             halo: face.halo,
             orig_triangles: face.orig_triangles,
+            texture: face.texture,
         });
     }
 
@@ -1381,6 +1394,9 @@ pub fn build_full_res_mesh(data: &ChunkMeshData) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
     mesh.insert_attribute(ATTRIBUTE_CHAMFER_OFFSET, data.chamfer_offsets.clone());
     mesh.insert_attribute(ATTRIBUTE_SHARP_NORMAL, data.sharp_normals.clone());
+    if data.colors.len() == data.positions.len() {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, data.colors.clone());
+    }
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     mesh
 }
@@ -1399,6 +1415,9 @@ pub fn build_lod_mesh(data: &ChunkMeshData) -> Mesh {
     // which causes flashes during LOD transitions.
     mesh.insert_attribute(ATTRIBUTE_CHAMFER_OFFSET, vec![[0.0f32; 3]; n]);
     mesh.insert_attribute(ATTRIBUTE_SHARP_NORMAL, data.normals.clone());
+    if data.colors.len() == n {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, data.colors.clone());
+    }
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     // Generate tangents so IBL specular reflections match the full-res mesh.
     let _ = mesh.generate_tangents();

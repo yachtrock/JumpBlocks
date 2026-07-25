@@ -1372,6 +1372,7 @@ fn union_meshes(a: &ChunkMeshData, b: &ChunkMeshData, b_offset: [f32; 3]) -> Chu
     let mut sharp_normals = a.sharp_normals.clone();
     let mut uvs = a.uvs.clone();
     let mut chamfer_offsets = a.chamfer_offsets.clone();
+    let mut colors = a.colors.clone();
     let mut indices = a.indices.clone();
     let base = positions.len() as u32;
     positions.extend(b.positions.iter().map(|p| {
@@ -1381,8 +1382,9 @@ fn union_meshes(a: &ChunkMeshData, b: &ChunkMeshData, b_offset: [f32; 3]) -> Chu
     sharp_normals.extend_from_slice(&b.sharp_normals);
     uvs.extend_from_slice(&b.uvs);
     chamfer_offsets.extend_from_slice(&b.chamfer_offsets);
+    colors.extend_from_slice(&b.colors);
     indices.extend(b.indices.iter().map(|i| i + base));
-    ChunkMeshData { positions, normals, sharp_normals, uvs, chamfer_offsets, indices }
+    ChunkMeshData { positions, normals, sharp_normals, uvs, chamfer_offsets, colors, indices }
 }
 
 /// A terrace step that crosses a chunk seam: the lower terrace continues
@@ -1964,6 +1966,7 @@ fn worldgen_slope_chunks_mesh_clean() {
                 sharp_normals: m.sharp_normals.clone(),
                 uvs: m.uvs.clone(),
                 chamfer_offsets: m.chamfer_offsets.clone(),
+                colors: m.colors.clone(),
                 indices: m.indices.clone(),
             }
         };

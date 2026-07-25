@@ -713,6 +713,9 @@ pub fn generate_cut_offset_chamfer(
     // Component tag per emitted vertex — used to prevent cross-component
     // fillet push contamination at split vertices.
     let mut emitted_comp: Vec<usize> = Vec::new();
+    // Per-vertex colors from the owning block's texture palette; extended to
+    // cover each face's emissions at the end of its iteration.
+    let mut colors: Vec<[f32; 4]> = Vec::new();
 
     // Per (edge_key, face_index) → (inner_v_at_a, inner_v_at_b) in edge-key
     // order.  Will be used for cross-face strip emission in future phases.
@@ -1231,6 +1234,7 @@ pub fn generate_cut_offset_chamfer(
 
         // Tag all vertices emitted for this face with its component.
         emitted_comp.resize(positions.len(), face_comp_val);
+        colors.resize(positions.len(), crate::worldgen::texture_color(face.texture));
     }
 
     // -----------------------------------------------------------------------
@@ -1365,12 +1369,17 @@ pub fn generate_cut_offset_chamfer(
         indices = kept;
     }
 
+    // Colors cover only per-face emissions; any trailing vertices (none
+    // today) fall back to the legacy tint.
+    colors.resize(positions.len(), crate::worldgen::texture_color(crate::worldgen::TEX_LEGACY));
+
     ChunkMeshData {
         positions,
         normals,
         sharp_normals,
         uvs,
         chamfer_offsets,
+        colors,
         indices,
     }
 }

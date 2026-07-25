@@ -38,6 +38,47 @@ pub const TEX_PAD: u16 = 8;
 pub const TEX_GOAL: u16 = 9;
 pub const TEX_PEDESTAL: u16 = 10;
 pub const TEX_WOOD: u16 = 11;
+// Pure color blocks — for building and Mario-style course furniture.
+pub const TEX_RED: u16 = 12;
+pub const TEX_ORANGE: u16 = 13;
+pub const TEX_YELLOW: u16 = 14;
+pub const TEX_LIME: u16 = 15;
+pub const TEX_TEAL: u16 = 16;
+pub const TEX_BLUE: u16 = 17;
+pub const TEX_PURPLE: u16 = 18;
+pub const TEX_PINK: u16 = 19;
+pub const TEX_WHITE: u16 = 20;
+
+/// Linear-space RGBA for a texture id. The chunk material's base color is
+/// white; this palette is what actually colors the world.
+pub fn texture_color(tex: u16) -> [f32; 4] {
+    let srgb: [f32; 3] = match tex {
+        TEX_GRASS => [0.44, 0.71, 0.36],
+        TEX_DIRT => [0.54, 0.40, 0.27],
+        TEX_STONE => [0.56, 0.55, 0.53],
+        TEX_SAND => [0.88, 0.79, 0.60],
+        TEX_BASALT => [0.38, 0.33, 0.32],
+        TEX_SKYSTONE => [0.64, 0.70, 0.80],
+        TEX_COURSE => [0.96, 0.56, 0.20],
+        TEX_PAD => [0.32, 0.82, 0.46],
+        TEX_GOAL => [0.98, 0.80, 0.26],
+        TEX_PEDESTAL => [0.66, 0.46, 0.86],
+        TEX_WOOD => [0.58, 0.41, 0.24],
+        TEX_RED => [0.90, 0.26, 0.21],
+        TEX_ORANGE => [0.98, 0.58, 0.16],
+        TEX_YELLOW => [0.99, 0.85, 0.21],
+        TEX_LIME => [0.55, 0.87, 0.24],
+        TEX_TEAL => [0.19, 0.78, 0.74],
+        TEX_BLUE => [0.26, 0.52, 0.95],
+        TEX_PURPLE => [0.61, 0.35, 0.90],
+        TEX_PINK => [0.96, 0.48, 0.78],
+        TEX_WHITE => [0.93, 0.93, 0.90],
+        _ => [0.78, 0.68, 0.58], // TEX_LEGACY / unknown: neutral tan
+    };
+    // Cheap sRGB → linear approximation (gamma 2.2 via square is close
+    // enough for palette flats and keeps this dependency-free).
+    [srgb[0] * srgb[0], srgb[1] * srgb[1], srgb[2] * srgb[2], 1.0]
+}
 
 /// Configuration for island generation.
 pub struct IslandGenConfig {

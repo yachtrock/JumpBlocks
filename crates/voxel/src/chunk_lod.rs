@@ -209,7 +209,7 @@ pub fn lod_setup_system(
             .get(&parent_mat.0)
             .map(|m| m.base.clone())
             .unwrap_or_else(|| StandardMaterial {
-                base_color: Color::srgb(0.6, 0.5, 0.4),
+                base_color: Color::WHITE,
                 ..default()
             });
 
@@ -337,7 +337,8 @@ pub fn lod_update_system(
         // Checkerboard: alternate brightness based on chunk XZ+Y parity
         let checker = ((coord.pos.x + coord.pos.z) & 1) == 0;
 
-        let normal_color = Color::srgb(0.6, 0.5, 0.4);
+        // White: per-block vertex colors carry the actual palette.
+        let normal_color = Color::WHITE;
         let (main_color, child_color) = match *debug_mode {
             LodDebugMode::Normal => (normal_color, normal_color),
             LodDebugMode::Tinted => {
