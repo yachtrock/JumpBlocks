@@ -55,6 +55,7 @@ impl Plugin for ChallengePlugin {
                     sync_build_locks,
                     tick_messages,
                     hold_player_until_world_ready,
+                    zone_barrier_fade,
                 ),
             )
             .add_systems(EguiPrimaryContextPass, challenge_hud);
@@ -164,6 +165,25 @@ struct Pedestal {
 #[derive(Component)]
 struct ZoneBarrier {
     zone: usize,
+}
+
+/// Fade locked-zone barrier walls by player proximity: invisible from
+/// afar, gently visible when approaching, clear warning up close.
+fn zone_barrier_fade(
+    barriers: Query<(&Transform, &MeshMaterial3d<StandardMaterial>), With<ZoneBarrier>>,
+    players: Query<&Transform, With<Player>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Ok(player) = players.single() else { return };
+    let p = player.translation;
+    for (tf, mat_handle) in barriers.iter() {
+        let d = Vec2::new(p.x - tf.translation.x, p.z - tf.translation.z).length();
+        // 0 beyond 45 wu, ramping to 0.16 inside 12 wu.
+        let alpha = (1.0 - ((d - 12.0) / 33.0).clamp(0.0, 1.0)) * 0.16;
+        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+            mat.base_color = mat.base_color.with_alpha(alpha);
+        }
+    }
 }
 
 /// Kinematic platform oscillating between two points.
@@ -299,27 +319,50 @@ pub fn setup_challenges(
     }
 
     // --- Zone barriers for still-locked zones ---
-    let barrier_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.95, 0.3, 0.2, 0.12),
-        emissive: LinearRgba::new(0.3, 0.05, 0.02, 1.0),
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
-    });
+    // Not a giant box: four low translucent ribbon walls hugging the zone
+    // perimeter at terrain height, fading in only when the player is close
+    // (see `zone_barrier_fade`).
+    const BARRIER_HEIGHT: f32 = 4.5;
+    const BARRIER_THICKNESS: f32 = 0.25;
     for (i, z) in def.zones.iter().enumerate() {
         if progress.unlocked_zones.contains(&i) {
             continue;
         }
         let (min, max) = zone_world_aabb(region_origin, z);
-        let size = max - min;
-        let center = (min + max) * 0.5;
-        commands.spawn((
-            ZoneBarrier { zone: i },
-            Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
-            MeshMaterial3d(barrier_material.clone()),
-            Transform::from_translation(center),
-            bevy::light::NotShadowCaster,
-        ));
+        let cx = (min.x + max.x) * 0.5;
+        let cz = (min.z + max.z) * 0.5;
+        // Each wall gets its own material instance so proximity fade is
+        // per-wall.
+        let walls: [(Vec3, Vec3); 4] = [
+            (Vec3::new(cx, 0.0, min.z), Vec3::new(max.x - min.x, BARRIER_HEIGHT, BARRIER_THICKNESS)),
+            (Vec3::new(cx, 0.0, max.z), Vec3::new(max.x - min.x, BARRIER_HEIGHT, BARRIER_THICKNESS)),
+            (Vec3::new(min.x, 0.0, cz), Vec3::new(BARRIER_THICKNESS, BARRIER_HEIGHT, max.z - min.z)),
+            (Vec3::new(max.x, 0.0, cz), Vec3::new(BARRIER_THICKNESS, BARRIER_HEIGHT, max.z - min.z)),
+        ];
+        for (wall_center, size) in walls {
+            // Anchor the ribbon to the terrain under the wall's midpoint.
+            let gx = ((wall_center.x - region_origin.x) / jumpblocks_voxel::chunk::VOXEL_SIZE) as i32;
+            let gz = ((wall_center.z - region_origin.z) / jumpblocks_voxel::chunk::VOXEL_SIZE) as i32;
+            let ground_y = def.ground(gx, gz).max(1) as f32 * jumpblocks_voxel::chunk::VOXEL_SIZE;
+            let material = materials.add(StandardMaterial {
+                base_color: Color::srgba(0.95, 0.35, 0.25, 0.0),
+                emissive: LinearRgba::new(0.25, 0.04, 0.02, 1.0),
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None,
+                ..default()
+            });
+            commands.spawn((
+                ZoneBarrier { zone: i },
+                Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
+                MeshMaterial3d(material),
+                Transform::from_translation(Vec3::new(
+                    wall_center.x,
+                    ground_y + size.y * 0.5 - 0.5,
+                    wall_center.z,
+                )),
+                bevy::light::NotShadowCaster,
+            ));
+        }
     }
 
     // --- Moving platforms ---

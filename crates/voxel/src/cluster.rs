@@ -314,7 +314,8 @@ pub fn cluster_management_system(
         let merged_handle = meshes.add(build_cluster_mesh(&merged));
 
         let cluster_color = match *debug_mode {
-            LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
+            // White: vertex colors carry the palette.
+            LodDebugMode::Normal => Color::WHITE,
             LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3),
         };
         let mat = dither_materials.add(ChunkDitherMaterial {
@@ -347,7 +348,7 @@ pub fn cluster_debug_color_system(
 ) {
     if !debug_mode.is_changed() { return; }
     let color = match *debug_mode {
-        LodDebugMode::Normal => Color::srgb(0.6, 0.5, 0.4),
+        LodDebugMode::Normal => Color::WHITE,
         LodDebugMode::Tinted => Color::srgb(0.9, 0.3, 0.3),
     };
     for mat_handle in clusters.iter() {
@@ -365,6 +366,7 @@ struct MergedMeshData {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
@@ -376,6 +378,7 @@ fn merge_lod_meshes(
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut uvs = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices = Vec::new();
 
     for member in members {
@@ -395,6 +398,15 @@ fn merge_lod_meshes(
         }
         normals.extend_from_slice(norm_data);
         uvs.extend_from_slice(uv_data);
+        // Carry per-block palette colors into the merged mesh so distant
+        // clusters match the streamed chunks and handoffs don't pop.
+        if let Some(bevy::mesh::VertexAttributeValues::Float32x4(color_data)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        {
+            colors.extend_from_slice(color_data);
+        } else {
+            colors.resize(positions.len(), [1.0, 1.0, 1.0, 1.0]);
+        }
 
         match mesh_indices {
             Indices::U32(idx) => { for &i in idx { indices.push(base_idx + i); } }
@@ -402,7 +414,7 @@ fn merge_lod_meshes(
         }
     }
 
-    MergedMeshData { positions, normals, uvs, indices }
+    MergedMeshData { positions, normals, uvs, colors, indices }
 }
 
 fn build_cluster_mesh(data: &MergedMeshData) -> Mesh {
@@ -416,6 +428,9 @@ fn build_cluster_mesh(data: &MergedMeshData) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs.clone());
     mesh.insert_attribute(crate::meshing::ATTRIBUTE_CHAMFER_OFFSET, vec![[0.0f32; 3]; n]);
     mesh.insert_attribute(crate::meshing::ATTRIBUTE_SHARP_NORMAL, data.normals.clone());
+    if data.colors.len() == n {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, data.colors.clone());
+    }
     mesh.insert_indices(Indices::U32(data.indices.clone()));
     mesh
 }

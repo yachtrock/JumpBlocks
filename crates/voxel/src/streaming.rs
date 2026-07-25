@@ -169,7 +169,9 @@ pub fn chunk_streaming_system(
         let mut entity_commands = commands.spawn((
             Chunk::new(chunk_data),
             ChunkCoord { region: active_id, pos: *pos },
-            LodTier::Reduced,
+            // Streamed chunks materialize invisible and dither IN via a
+            // Hidden -> Reduced/Full transition — no pop at the stream edge.
+            LodTier::Hidden,
             Transform::from_translation(*world_pos),
             chunk_aabb,
         ));

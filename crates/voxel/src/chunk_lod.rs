@@ -112,9 +112,12 @@ impl MaterialExtension for DitherFadeExtension {
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LodTier {
-    #[default]
     Full,
     Reduced,
+    /// Default for freshly streamed chunks: they dither IN via a
+    /// Hidden → Reduced/Full transition instead of popping visible on
+    /// their first rendered frame.
+    #[default]
     Hidden,
 }
 
@@ -218,7 +221,10 @@ pub fn lod_setup_system(
 
         let main_handle = dither_materials.add(ChunkDitherMaterial {
             base: base.clone(),
-            extension: DitherFadeExtension { fade: 0.0, invert: false, chamfer_amount: 1.0 },
+            // Both start fully faded out; the LOD system fades the right
+            // one in on its first update (prevents a one-frame pop between
+            // mesh attach and the first LOD tick).
+            extension: DitherFadeExtension { fade: 1.0, invert: false, chamfer_amount: 1.0 },
         });
         let child_handle = dither_materials.add(ChunkDitherMaterial {
             base,
