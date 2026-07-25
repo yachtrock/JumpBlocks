@@ -2316,3 +2316,135 @@ fn worldgen_caps_meet_neighbors() {
         "{violations}/{checked} cap contacts disagree with neighbors (>5%)"
     );
 }
+
+/// Repro for the saddle-corner spike: two high terraces meeting only at a
+/// diagonal corner (checkerboard heights). The face normals at the shared
+/// corner nearly cancel, which blew up the corner fillet solves and shot a
+/// needle several units above the terrain. No vertex may end up
+/// significantly above the tallest block.
+#[test]
+fn saddle_corner_has_no_spike() {
+    let shapes = make_shapes();
+    for heights in [
+        [[2, 1], [1, 2]],
+        [[1, 2], [2, 1]],
+        [[3, 1], [1, 3]],
+    ] {
+        let rows: Vec<&[i32]> = heights.iter().map(|r| r.as_slice()).collect();
+        let mut data = ChunkData::new();
+        build_capped_terrain_into(&mut data, &rows, (12, 6, 12), 0..2);
+        let nb = ChunkNeighbors::empty();
+        let r = generate_chunk_mesh(&data, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+        let mesh = r.full_res();
+        let max_h = *heights.iter().flatten().max().unwrap();
+        // Caps can rise up to 2 cells above their column top; anything more
+        // than ~1 wu above that is a runaway push.
+        let ceiling = (6 + max_h + 2) as f32 * 0.5 + 1.0;
+        let mut worst: f32 = f32::MIN;
+        for p in &mesh.positions {
+            worst = worst.max(p[1]);
+        }
+        eprintln!("saddle {heights:?}: highest vertex {worst:.3}, ceiling {ceiling:.3}");
+        assert!(
+            worst <= ceiling,
+            "saddle {heights:?}: vertex spike at y={worst:.3} (ceiling {ceiling:.3})"
+        );
+    }
+}
+
+/// Brute-force hunt: mesh every 3x3 terrain pattern with heights {1,2} and
+/// {1,3} and report any configuration whose mesh has a vertex far above the
+/// terrain (a runaway fillet push spike).
+#[test]
+#[ignore]
+fn debug_hunt_spike_configs() {
+    let shapes = make_shapes();
+    let mut found = 0;
+    for &vals in &[[1i32, 2], [1, 3]] {
+        for bits in 0..(1u32 << 9) {
+            let h = |i: u32| vals[((bits >> i) & 1) as usize];
+            let heights = [
+                [h(0), h(1), h(2)],
+                [h(3), h(4), h(5)],
+                [h(6), h(7), h(8)],
+            ];
+            let rows: Vec<&[i32]> = heights.iter().map(|r| r.as_slice()).collect();
+            let mut data = ChunkData::new();
+            build_capped_terrain_into(&mut data, &rows, (12, 6, 12), 0..3);
+            let nb = ChunkNeighbors::empty();
+            let r = generate_chunk_mesh(&data, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+            let mesh = r.full_res();
+            let max_h = *heights.iter().flatten().max().unwrap();
+            let ceiling = (6 + max_h + 2) as f32 * 0.5 + 1.0;
+            let mut worst: f32 = f32::MIN;
+            for p in &mesh.positions {
+                worst = worst.max(p[1]);
+            }
+            if worst > ceiling {
+                found += 1;
+                if found <= 12 {
+                    eprintln!("SPIKE {heights:?}: y={worst:.2} ceiling={ceiling:.2}");
+                }
+            }
+        }
+    }
+    eprintln!("total spike configs: {found}");
+}
+
+/// Scan every worldgen chunk mesh for spike vertices: any vertex rising
+/// well above the top of the blocks in its own column is a runaway push.
+#[test]
+#[ignore]
+fn debug_scan_world_for_spikes() {
+    use crate::world_def::WorldDef;
+    use crate::coords::RegionId;
+    use bevy::math::Vec3;
+
+    let def = WorldDef::standard();
+    let mut region = crate::region::Region::new(RegionId(0), Vec3::ZERO);
+    def.build_into_region(&mut region);
+
+    let shapes = make_shapes();
+    let mut spikes = 0;
+    let positions: Vec<_> = region.iter_chunks().map(|(p, _)| p).collect();
+    for pos in positions {
+        let slot = region.get_chunk(pos).unwrap();
+        // Column tops in cells (block-local), caps counted up to +5 cells.
+        let mut col_top: HashMap<(i32, i32), i32> = HashMap::new();
+        for b in slot.data.blocks.iter() {
+            let top = b.origin.1 as i32 + if b.shape == 0 { 1 } else { 5 };
+            for dx in 0..2 {
+                for dz in 0..2 {
+                    let e = col_top.entry((b.origin.0 as i32 + dx, b.origin.2 as i32 + dz)).or_insert(top);
+                    if top > *e { *e = top; }
+                }
+            }
+        }
+        if col_top.is_empty() { continue; }
+        let mut nb = ChunkNeighbors::empty();
+        for (dx, dy, dz) in ChunkPos::neighbor_offsets() {
+            if let Some(np) = pos.neighbor(dx, dy, dz) {
+                if let Some(arc) = region.get_chunk_data(np) {
+                    nb.set_arc(dx, dy, dz, arc);
+                }
+            }
+        }
+        let r = generate_chunk_mesh(&slot.data, &nb, &shapes, crate::PresentationMode::CutAndOffset);
+        for p in &r.full_res().positions {
+            let cell = ((p[0] / 0.5) as i32, (p[2] / 0.5) as i32);
+            let Some(&top) = col_top.get(&cell) else { continue };
+            let ceiling = top as f32 * 0.5 + 1.0;
+            if p[1] > ceiling {
+                spikes += 1;
+                if spikes <= 12 {
+                    eprintln!(
+                        "SPIKE chunk {pos} at local ({:.2},{:.2},{:.2}) col top {:.2} — world ({:.1},{:.1},{:.1})",
+                        p[0], p[1], p[2], top as f32 * 0.5,
+                        (pos.x as f32 - 128.0) * 16.0 + p[0], p[1], (pos.z as f32 - 128.0) * 16.0 + p[2],
+                    );
+                }
+            }
+        }
+    }
+    eprintln!("total spike vertices: {spikes}");
+}

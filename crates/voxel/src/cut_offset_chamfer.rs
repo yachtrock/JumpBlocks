@@ -546,6 +546,22 @@ pub fn generate_cut_offset_chamfer(
         map
     };
 
+    // Corner solves invert small matrices (or divide by |n1+n2|) that go
+    // NEAR-SINGULAR at saddle corners where incident face normals nearly
+    // cancel — e.g. two terrace steps meeting only at a diagonal corner.
+    // Unclamped, those solves launch the vertex several units out as a
+    // needle spike. Every fillet feature is O(CHAMFER_WIDTH), so bound the
+    // push there.
+    fn clamp_push(v: Vec3) -> Vec3 {
+        let max = CHAMFER_WIDTH * 3.0;
+        let len_sq = v.length_squared();
+        if len_sq > max * max {
+            v * (max / len_sq.sqrt())
+        } else {
+            v
+        }
+    }
+
     // Per sharp vertex: compute push from a sphere of radius R tangent to
     // all incident face planes.  Direction from incident edge pushes.
     let mut vert_push: HashMap<u32, Vec3> = HashMap::new();
@@ -634,7 +650,7 @@ pub fn generate_cut_offset_chamfer(
                     }
                 }
                 if a.determinant().abs() > 1e-6 {
-                    vert_push.insert(v, a.inverse() * rhs);
+                    vert_push.insert(v, clamp_push(a.inverse() * rhs));
                     vert_bisector.insert(v, bis_sum.normalize_or_zero());
                 }
                 continue;
@@ -683,7 +699,7 @@ pub fn generate_cut_offset_chamfer(
             // The vertex offset: from original corner to the sphere surface.
             let offset = delta * (1.0 - r / delta_len).max(0.0);
 
-            vert_push.insert(v, offset);
+            vert_push.insert(v, clamp_push(offset));
             // Exact sphere normal at the pushed point: from center toward
             // the surface point (outward for convex, inward for concave).
             vert_bisector.insert(v, (delta * sign).normalize_or_zero());
