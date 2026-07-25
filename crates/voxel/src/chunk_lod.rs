@@ -112,12 +112,9 @@ impl MaterialExtension for DitherFadeExtension {
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LodTier {
+    #[default]
     Full,
     Reduced,
-    /// Default for freshly streamed chunks: they dither IN via a
-    /// Hidden → Reduced/Full transition instead of popping visible on
-    /// their first rendered frame.
-    #[default]
     Hidden,
 }
 
@@ -243,6 +240,11 @@ pub fn lod_setup_system(
             .insert((
                 MeshMaterial3d(main_handle.clone()),
                 ChunkLodMaterials { main_handle, child_handle },
+                // Seed a fade-in: the chunk dithers from invisible to its
+                // resting tier instead of popping on its first frame. The
+                // LOD update lets an in-flight transition finish (and
+                // retargets it if the desired tier differs).
+                LodTransition { from: LodTier::Hidden, to: LodTier::Reduced, blend: 0.0 },
             ))
             .add_child(child);
         commands.entity(entity).insert(LodChild(child));
@@ -309,14 +311,10 @@ pub fn lod_update_system(
         let chamfer = 1.0 - ((max_dist - ch_start) / ch_range).clamp(0.0, 1.0);
 
         // --- Compute fade values ---
-        let (main_fade, main_inv, child_fade, child_inv) = if desired == *tier {
-            // At rest — remove any leftover transition
-            if transition_opt.is_some() {
-                commands.entity(entity).remove::<LodTransition>();
-            }
-            rest_fades(*tier)
-        } else if let Some(mut trans) = transition_opt {
-            // Mid-transition — check if target changed
+        // A transition in flight always plays out (retargeted if the
+        // desired tier changes) — including seeded fade-ins whose target
+        // equals the resting tier.
+        let (main_fade, main_inv, child_fade, child_inv) = if let Some(mut trans) = transition_opt {
             if trans.to != desired {
                 // Retarget: start fresh toward new desired
                 trans.from = *tier;
@@ -331,6 +329,8 @@ pub fn lod_update_system(
                 commands.entity(entity).remove::<LodTransition>();
             }
             result
+        } else if desired == *tier {
+            rest_fades(*tier)
         } else {
             // Start new transition
             commands.entity(entity).insert(LodTransition {
