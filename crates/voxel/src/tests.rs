@@ -2432,7 +2432,19 @@ fn debug_scan_world_for_spikes() {
         let r = generate_chunk_mesh(&slot.data, &nb, &shapes, crate::PresentationMode::CutAndOffset);
         for p in &r.full_res().positions {
             let cell = ((p[0] / 0.5) as i32, (p[2] / 0.5) as i32);
-            let Some(&top) = col_top.get(&cell) else { continue };
+            // Compare against the tallest column in the 3x3 cell
+            // neighborhood: cliff-wall vertices legitimately tower over the
+            // column NEXT to the cliff, but a spike rises above everything
+            // around it.
+            let mut top = i32::MIN;
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(&t) = col_top.get(&(cell.0 + dx, cell.1 + dz)) {
+                        top = top.max(t);
+                    }
+                }
+            }
+            if top == i32::MIN { continue; }
             let ceiling = top as f32 * 0.5 + 1.0;
             if p[1] > ceiling {
                 spikes += 1;
