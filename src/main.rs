@@ -11,6 +11,7 @@ mod layers;
 mod native_gamepad;
 mod network;
 mod player;
+mod player_model;
 mod player_state;
 mod scripting;
 mod world;
@@ -589,6 +590,7 @@ fn main() {
         // ChallengePlugin needs DebugUiPlugin's EguiPlugin registered first.
         app.add_plugins(challenge::ChallengePlugin);
         app.add_plugins(build_ui::BuildUiPlugin);
+        app.add_plugins(player_model::PlayerModelPlugin);
         app.add_systems(Update, toggle_wireframe);
         app.add_systems(Startup, send_initial_ui_data);
         app.add_systems(PreUpdate, toggle_inventory);

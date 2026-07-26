@@ -8,7 +8,7 @@ pub struct PlayerStatePlugin;
 
 impl Plugin for PlayerStatePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (detect_player_state, apply_state_visuals));
+        app.add_systems(Update, detect_player_state);
     }
 }
 
@@ -76,26 +76,3 @@ fn detect_player_state(
     }
 }
 
-/// Changes the player body material color based on state.
-fn apply_state_visuals(
-    player_query: Query<(&PlayerState, &Children), (With<Player>, Changed<PlayerState>)>,
-    visual_children: Query<&Children>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mesh_material_query: Query<&MeshMaterial3d<StandardMaterial>>,
-) {
-    for (state, children) in player_query.iter() {
-        // The first child is PlayerVisual, its first child is the body mesh
-        for child in children.iter() {
-            if let Ok(grandchildren) = visual_children.get(child) {
-                // First child of visual pivot is the body capsule
-                if let Some(body_entity) = grandchildren.iter().next() {
-                    if let Ok(mat_handle) = mesh_material_query.get(body_entity) {
-                        if let Some(material) = materials.get_mut(&mat_handle.0) {
-                            material.base_color = state.color();
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
