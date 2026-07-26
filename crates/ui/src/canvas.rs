@@ -52,6 +52,28 @@ impl<'a> Canvas<'a> {
         }));
     }
 
+    /// Draw a solid-color convex polygon (triangle-fan tessellated).
+    /// Used for icon glyphs (block shape silhouettes, arrows, ...).
+    pub fn poly(&mut self, points: &[[f32; 2]], color: [f32; 4]) {
+        if points.len() < 3 {
+            return;
+        }
+        let uvs = self.glyph_cache.lock().unwrap().atlas.white_pixel_uvs();
+        let uv_center = [(uvs[0] + uvs[2]) * 0.5, (uvs[1] + uvs[3]) * 0.5];
+        let mut indices = Vec::with_capacity((points.len() - 2) * 3);
+        for i in 1..points.len() - 1 {
+            indices.extend_from_slice(&[0, i as u32, i as u32 + 1]);
+        }
+        self.commands.push(DrawOp::Mesh(DrawMesh {
+            positions: points.to_vec(),
+            uvs: vec![uv_center; points.len()],
+            indices,
+            color,
+            atlas_page: 0,
+            clip: self.current_clip(),
+        }));
+    }
+
     /// Draw a solid-color rectangle, warped through an FFD simulation.
     pub fn rect_ffd(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4], ffd: &FfdSim) {
         let uvs = self.glyph_cache.lock().unwrap().atlas.white_pixel_uvs();

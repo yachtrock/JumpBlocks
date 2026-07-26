@@ -7,12 +7,14 @@
 // inventory.rhai. Module functions are called as inv::function_name().
 
 import "inventory" as inv;
+import "build" as bld;
 
 /// Called once on first load to initialize persistent state.
 /// Collects state from each module into a single map.
 fn init_state() {
     #{
-        inventory: inv::init_inventory_state()
+        inventory: inv::init_inventory_state(),
+        build: bld::init_build_state()
     }
 }
 
@@ -27,6 +29,12 @@ fn draw(state) {
 
     // --- Inventory panel ---
     state.inventory = inv::draw_inventory(state.inventory, data, ww, wh);
+
+    // --- Building interface (hotbar, shape picker, pause menu) ---
+    if state.build == () {
+        state.build = bld::init_build_state();
+    }
+    state.build = bld::draw_build(state.build, data, ww, wh);
 
     state
 }
@@ -55,11 +63,12 @@ fn draw_hud(data, ww, wh) {
         text(20.0, 54.0, "[TAB] Inventory", 12.0, [0.7, 0.7, 0.7, 0.6]);
     }
 
-    // Button hints from action state (bottom of screen)
+    // Button hints from action state (bottom of screen; raised above the
+    // hotbar while the building interface is showing)
     let hints = data.button_hints;
     if hints.len() > 0 {
         let mode = data.input_mode;
-        let hint_y = wh - 50.0;
+        let hint_y = if data.build.in_area { wh - 148.0 } else { wh - 50.0 };
         let font_size = 14.0;
         let spacing = 180.0;
         let total_width = hints.len() * spacing;

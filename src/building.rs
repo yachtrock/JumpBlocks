@@ -18,13 +18,17 @@
 //! - `place_block(shape, facing, texture)` — place at the current build position
 //! - `rotate_facing_right(facing)` / `rotate_facing_left(facing)` — helpers
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use jumpblocks_voxel::chunk::{
-    Chunk, BlockModification, CHUNK_X, CHUNK_Y, CHUNK_Z, VOXEL_SIZE,
+    Chunk, ChunkData, BlockModification, BLOCK_CELLS, CHUNK_X, CHUNK_Y, CHUNK_Z, VOXEL_SIZE,
 };
-use jumpblocks_voxel::shape::{Facing, SHAPE_WEDGE};
+use jumpblocks_voxel::shape::{
+    cap_corner_heights, rotated_occupied_cells, Facing, ShapeTable, SHAPE_CUBE, SHAPE_WEDGE,
+};
+use jumpblocks_voxel::worldgen::classify_slope_cap;
 use rhai::{Dynamic, Map, INT};
 
 use crate::action_state::{ActionState, ActionStateEngine};
@@ -72,9 +76,9 @@ enum PreviewState {
     #[default]
     Hidden,
     /// Show at the current build position (Rust resolves to world space via chunk transform).
-    AtBuildPosition { facing: Facing },
+    AtBuildPosition { shape: u16, facing: Facing },
     /// Show floating in front of the player (no chunk context needed).
-    InHand { facing: Facing },
+    InHand { shape: u16, facing: Facing },
 }
 
 /// A request to place a block, queued by the script.
@@ -83,6 +87,8 @@ struct PlaceRequest {
     shape: u16,
     facing: Facing,
     texture: u16,
+    /// Auto-shape tool: reshape the surrounding terrain contour afterwards.
+    auto: bool,
 }
 
 /// Inner shared state between Rhai script and ECS systems.
@@ -97,6 +103,23 @@ struct BuildingApiInner {
     preview: PreviewState,
     /// Block placement requests (set by script, drained by post-system).
     place_requests: Vec<PlaceRequest>,
+    /// Current selection from the build UI (persists across frames).
+    selected_shape: u16,
+    selected_texture: u16,
+    auto_shape: bool,
+    in_build_area: bool,
+}
+
+impl BuildingApiInner {
+    /// The shape a placement/preview will actually use: the auto-shape tool
+    /// always drops cubes (the contour pass turns them into slopes).
+    fn effective_shape(&self) -> u16 {
+        if self.auto_shape {
+            SHAPE_CUBE
+        } else {
+            self.selected_shape
+        }
+    }
 }
 
 impl BuildingApiInner {
@@ -107,6 +130,10 @@ impl BuildingApiInner {
             camera_forward: Vec3::NEG_Z,
             preview: PreviewState::Hidden,
             place_requests: Vec::new(),
+            selected_shape: SHAPE_CUBE,
+            selected_texture: 20, // TEX_WHITE
+            auto_shape: false,
+            in_build_area: false,
         }
     }
 
@@ -114,6 +141,7 @@ impl BuildingApiInner {
         self.build_pos = None;
         self.preview = PreviewState::Hidden;
         self.place_requests.clear();
+        // Selection fields persist — they mirror the build UI state.
     }
 }
 
@@ -129,6 +157,16 @@ impl BuildingApi {
             inner: Arc::new(Mutex::new(BuildingApiInner::new())),
         }
     }
+
+    /// Mirror the build UI's current selection into the scripting API.
+    /// Called each frame by the build UI (see `build_ui::update_build_area`).
+    pub fn set_selection(&self, shape: u16, texture: u16, auto: bool, in_area: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.selected_shape = shape;
+        inner.selected_texture = texture;
+        inner.auto_shape = auto;
+        inner.in_build_area = in_area;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +180,10 @@ struct BlockPreview;
 struct PreviewResources {
     entity: Option<Entity>,
     material: Option<Handle<StandardMaterial>>,
-    mesh: Option<Handle<Mesh>>,
+    /// One preview mesh per shape id, built lazily from the ShapeTable.
+    meshes: HashMap<u16, Handle<Mesh>>,
+    /// Which shape the live preview entity currently shows.
+    current_shape: Option<u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +222,7 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
             .register_fn("show_preview", move |facing: INT| {
                 let mut data = inner.lock().unwrap();
                 data.preview = PreviewState::AtBuildPosition {
+                    shape: data.effective_shape(),
                     facing: facing_from_int(facing),
                 };
             });
@@ -194,6 +236,7 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
             .register_fn("show_preview_in_hand", move |facing: INT| {
                 let mut data = inner.lock().unwrap();
                 data.preview = PreviewState::InHand {
+                    shape: data.effective_shape(),
                     facing: facing_from_int(facing),
                 };
             });
@@ -218,14 +261,57 @@ fn register_building_api(mut engine: ResMut<ActionStateEngine>, api: Res<Buildin
             move |shape: INT, facing: INT, texture: INT| {
                 let mut data = inner.lock().unwrap();
                 if data.build_pos.is_some() {
+                    let auto = data.auto_shape;
+                    let shape = if auto { SHAPE_CUBE } else { shape as u16 };
                     data.place_requests.push(PlaceRequest {
-                        shape: shape as u16,
+                        shape,
                         facing: facing_from_int(facing),
                         texture: texture as u16,
+                        auto,
                     });
                 }
             },
         );
+    }
+
+    // selected_shape() -> int — shape chosen in the build UI's shape menu
+    {
+        let inner = inner.clone();
+        engine
+            .rhai_engine_mut()
+            .register_fn("selected_shape", move || -> INT {
+                inner.lock().unwrap().effective_shape() as INT
+            });
+    }
+
+    // selected_texture() -> int — material chosen in the hotbar
+    {
+        let inner = inner.clone();
+        engine
+            .rhai_engine_mut()
+            .register_fn("selected_texture", move || -> INT {
+                inner.lock().unwrap().selected_texture as INT
+            });
+    }
+
+    // auto_shape_mode() -> bool — whether the auto-shape tool is active
+    {
+        let inner = inner.clone();
+        engine
+            .rhai_engine_mut()
+            .register_fn("auto_shape_mode", move || -> bool {
+                inner.lock().unwrap().auto_shape
+            });
+    }
+
+    // in_build_area() -> bool — whether building is currently available
+    {
+        let inner = inner.clone();
+        engine
+            .rhai_engine_mut()
+            .register_fn("in_build_area", move || -> bool {
+                inner.lock().unwrap().in_build_area
+            });
     }
 
     // rotate_facing_right(facing) -> int
@@ -296,6 +382,10 @@ fn apply_building_commands(
     preview_query: Query<Entity, With<BlockPreview>>,
     build_locks: Option<Res<crate::challenge::BuildLocks>>,
     messages: Option<ResMut<crate::challenge::HudMessages>>,
+    shape_table: Res<ShapeTable>,
+    mut build_state: Option<ResMut<crate::build_ui::BuildState>>,
+    catalog: Option<Res<crate::build_ui::ShapeCatalog>>,
+    build_areas: Option<Res<crate::build_ui::BuildAreas>>,
 ) {
     let inner = api.inner.lock().unwrap();
 
@@ -304,14 +394,21 @@ fn apply_building_commands(
     for req in &inner.place_requests {
         if let Some(ref pos) = inner.build_pos {
             if let Ok((mut chunk, chunk_transform)) = chunks.get_mut(pos.chunk_entity) {
-                // Locked zones / active challenge runs prohibit modification
+                // Locked zones / active challenge runs prohibit modification —
+                // but designated build areas (e.g. the spawn sandbox) override
+                // zone locks. Nothing overrides the mid-run freeze.
                 if let Some(ref locks) = build_locks {
                     let world_pos = chunk_transform.transform_point(Vec3::new(
                         (pos.x as f32 + 1.0) * VOXEL_SIZE,
                         (pos.y as f32 + 0.5) * VOXEL_SIZE,
                         (pos.z as f32 + 1.0) * VOXEL_SIZE,
                     ));
-                    if !locks.can_build_at(world_pos) {
+                    let in_designated_area = build_areas
+                        .as_ref()
+                        .is_some_and(|a| a.contains(world_pos));
+                    let allowed = !locks.building_disabled
+                        && (in_designated_area || locks.can_build_at(world_pos));
+                    if !allowed {
                         if let Some(ref mut msgs) = messages {
                             if locks.building_disabled {
                                 msgs.push("Can't build during a challenge run!");
@@ -322,8 +419,38 @@ fn apply_building_commands(
                         continue;
                     }
                 }
+
+                // Material cost: bulkier shapes cost more of the material.
+                let cost = catalog.as_ref().map(|c| c.cost_of(req.shape)).unwrap_or(0);
+                if let Some(ref mut state) = build_state {
+                    let slot = state
+                        .materials
+                        .iter_mut()
+                        .find(|m| m.texture == req.texture);
+                    match slot {
+                        Some(slot) if slot.count >= cost => {
+                            slot.count -= cost;
+                        }
+                        Some(slot) => {
+                            if let Some(ref mut msgs) = messages {
+                                msgs.push(format!(
+                                    "Not enough {} — need {}, have {}.",
+                                    slot.name, cost, slot.count
+                                ));
+                            }
+                            continue;
+                        }
+                        None => {}
+                    }
+                }
+
                 if req.shape == SHAPE_WEDGE {
                     chunk.data.place_wedge(pos.x, pos.y, pos.z, req.facing, req.texture);
+                } else if let Some(shape) = shape_table.get(req.shape) {
+                    let occ = rotated_occupied_cells(shape, req.facing);
+                    chunk
+                        .data
+                        .place_block(req.shape, req.facing, req.texture, pos.x, pos.y, pos.z, &occ);
                 } else {
                     chunk.data.place_std(pos.x, pos.y, pos.z, req.shape, req.facing, req.texture);
                 }
@@ -339,6 +466,22 @@ fn apply_building_commands(
                     "Placed block at ({}, {}, {}) shape={} facing={:?}",
                     pos.x, pos.y, pos.z, req.shape, req.facing
                 );
+
+                // Auto-shape tool: re-cap the surrounding columns so the
+                // terrain contour flows smoothly through the new block.
+                if req.auto {
+                    let mods = auto_reshape_contour(
+                        &mut chunk.data,
+                        pos.x,
+                        pos.z,
+                        req.texture,
+                        &shape_table,
+                    );
+                    if !mods.is_empty() {
+                        info!("Auto-shape re-capped {} columns", mods.len());
+                        chunk.pending_modifications.extend(mods);
+                    }
+                }
             }
         }
     }
@@ -353,13 +496,15 @@ fn apply_building_commands(
                 preview_res.entity = None;
             }
         }
-        PreviewState::AtBuildPosition { facing } => {
+        PreviewState::AtBuildPosition { shape, facing } => {
             if let Some(ref pos) = inner.build_pos {
                 if let Ok((_, chunk_transform)) = chunks.get(pos.chunk_entity) {
+                    // The preview mesh is centered on the 2×2-cell footprint
+                    // at its base, so rotation about Y stays in place.
                     let local_pos = Vec3::new(
-                        pos.x as f32 * VOXEL_SIZE + VOXEL_SIZE * 0.5,
-                        pos.y as f32 * VOXEL_SIZE + VOXEL_SIZE * 0.5,
-                        pos.z as f32 * VOXEL_SIZE + VOXEL_SIZE * 0.5,
+                        (pos.x as f32 + 1.0) * VOXEL_SIZE,
+                        pos.y as f32 * VOXEL_SIZE,
+                        (pos.z as f32 + 1.0) * VOXEL_SIZE,
                     );
                     let world_pos = chunk_transform.transform_point(local_pos);
                     let world_rotation = chunk_transform.rotation
@@ -371,12 +516,14 @@ fn apply_building_commands(
                         &mut preview_res,
                         &mut meshes,
                         &mut materials,
+                        &shape_table,
+                        *shape,
                         transform,
                     );
                 }
             }
         }
-        PreviewState::InHand { facing } => {
+        PreviewState::InHand { shape, facing } => {
             let forward_flat =
                 Vec3::new(inner.camera_forward.x, 0.0, inner.camera_forward.z)
                     .normalize_or_zero();
@@ -388,6 +535,8 @@ fn apply_building_commands(
                 &mut preview_res,
                 &mut meshes,
                 &mut materials,
+                &shape_table,
+                *shape,
                 transform,
             );
         }
@@ -399,22 +548,40 @@ fn spawn_or_update_preview(
     res: &mut PreviewResources,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    shape_table: &ShapeTable,
+    shape: u16,
     transform: Transform,
 ) {
     if res.material.is_none() {
         res.material = Some(materials.add(StandardMaterial {
             base_color: Color::srgba(0.3, 0.6, 1.0, 0.4),
             alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            double_sided: true,
             ..default()
         }));
     }
-    if res.mesh.is_none() {
-        res.mesh = Some(meshes.add(build_wedge_preview_mesh()));
-    }
+    let mesh = res
+        .meshes
+        .entry(shape)
+        .or_insert_with(|| {
+            let m = shape_table
+                .get(shape)
+                .map(build_shape_preview_mesh)
+                .unwrap_or_else(build_wedge_preview_mesh);
+            meshes.add(m)
+        })
+        .clone();
 
     if let Some(entity) = res.entity {
         if commands.get_entity(entity).is_ok() {
-            commands.entity(entity).insert(transform);
+            let mut e = commands.entity(entity);
+            e.insert(transform);
+            if res.current_shape != Some(shape) {
+                e.insert(Mesh3d(mesh));
+                res.current_shape = Some(shape);
+            }
             return;
         }
         res.entity = None;
@@ -423,12 +590,215 @@ fn spawn_or_update_preview(
     let entity = commands
         .spawn((
             BlockPreview,
-            Mesh3d(res.mesh.clone().unwrap()),
+            Mesh3d(mesh),
             MeshMaterial3d(res.material.clone().unwrap()),
             transform,
         ))
         .id();
     res.entity = Some(entity);
+    res.current_shape = Some(shape);
+}
+
+/// Build a translucent preview mesh straight from a shape definition.
+/// Vertices are in cell units with the origin at the block corner; the mesh
+/// is re-centered on the 2×2 footprint so facing rotation spins in place.
+fn build_shape_preview_mesh(shape: &jumpblocks_voxel::shape::BlockShape) -> Mesh {
+    use bevy::mesh::{Indices, PrimitiveTopology};
+
+    let center = Vec3::new(
+        shape.size.0 as f32 * 0.5,
+        0.0,
+        shape.size.2 as f32 * 0.5,
+    );
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for face in &shape.faces {
+        let base = positions.len() as u32;
+        for v in &face.vertices {
+            positions.push((((*v) - center) * VOXEL_SIZE).to_array());
+        }
+        for t in &face.triangles {
+            indices.extend([base + t[0] as u32, base + t[1] as u32, base + t[2] as u32]);
+        }
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh.compute_normals();
+    mesh
+}
+
+// ---------------------------------------------------------------------------
+// Auto-shape tool: contour reshaping
+// ---------------------------------------------------------------------------
+
+/// How far (in block columns) around a placed block the contour is re-capped.
+const AUTO_RADIUS: i32 = 3;
+
+/// What tops a terrain block column.
+struct ColumnTop {
+    /// Cube-surface height in cells: with a slope cap, the height its base
+    /// cube layer would restore to (worldgen convention: cap base at h-1).
+    height: i32,
+    /// Texture of the topmost block (used for the replacement cap).
+    texture: u16,
+    /// The cap block currently on top, if any: (id, shape, facing).
+    cap: Option<(jumpblocks_voxel::chunk::BlockId, u16, Facing)>,
+}
+
+/// Survey a block column (block coords, i.e. cells/2). Returns `None` for
+/// empty columns and for columns topped by something that isn't a plain
+/// cube or a slope cap (don't reshape a player's wedge sculpture).
+fn column_top(data: &ChunkData, bx: usize, bz: usize) -> Option<ColumnTop> {
+    use jumpblocks_voxel::chunk::Cell;
+    let cx = bx * 2;
+    let cz = bz * 2;
+    for y in (0..CHUNK_Y).rev() {
+        let cell = data.get_cell(cx, y, cz);
+        let Cell::Local(id) = cell else {
+            if cell.is_occupied() {
+                // External cell (neighbor-owned) — leave the column alone.
+                return None;
+            }
+            continue;
+        };
+        let block = data.get_block(id)?;
+        if cap_corner_heights(block.shape).is_some() {
+            return Some(ColumnTop {
+                height: block.origin.1 as i32 + 1,
+                texture: block.texture,
+                cap: Some((id, block.shape, block.facing)),
+            });
+        }
+        if block.shape == SHAPE_CUBE {
+            return Some(ColumnTop {
+                height: y as i32 + 1,
+                texture: block.texture,
+                cap: None,
+            });
+        }
+        return None;
+    }
+    None
+}
+
+/// After an auto-shape placement at cell `(cell_x, *, cell_z)`, re-cap the
+/// surrounding columns so the terrain flows smoothly through the new block:
+/// strip existing slope caps back to flat cubes, then re-run the worldgen
+/// cap classifier against the updated height field.
+fn auto_reshape_contour(
+    data: &mut ChunkData,
+    cell_x: usize,
+    cell_z: usize,
+    center_texture: u16,
+    shapes: &ShapeTable,
+) -> Vec<BlockModification> {
+    let bx = (cell_x / 2) as i32;
+    let bz = (cell_z / 2) as i32;
+    let max_bx = (CHUNK_X / 2) as i32 - 1;
+    let max_bz = (CHUNK_Z / 2) as i32 - 1;
+    let in_bounds = |ix: i32, iz: i32| ix >= 0 && iz >= 0 && ix <= max_bx && iz <= max_bz;
+
+    // 1. Height survey, one ring beyond the reshape radius for the deltas.
+    let mut heights: HashMap<(i32, i32), (i32, u16)> = HashMap::new();
+    for ix in bx - AUTO_RADIUS - 1..=bx + AUTO_RADIUS + 1 {
+        for iz in bz - AUTO_RADIUS - 1..=bz + AUTO_RADIUS + 1 {
+            if !in_bounds(ix, iz) {
+                continue;
+            }
+            if let Some(top) = column_top(data, ix as usize, iz as usize) {
+                heights.insert((ix, iz), (top.height, top.texture));
+            }
+        }
+    }
+
+    let mut mods = Vec::new();
+
+    // 2. Normalize: strip existing caps inside the radius back to flat cubes.
+    for ix in bx - AUTO_RADIUS..=bx + AUTO_RADIUS {
+        for iz in bz - AUTO_RADIUS..=bz + AUTO_RADIUS {
+            if !in_bounds(ix, iz) {
+                continue;
+            }
+            let Some(top) = column_top(data, ix as usize, iz as usize) else {
+                continue;
+            };
+            if let Some((id, cap_shape, cap_facing)) = top.cap {
+                let Some(shape) = shapes.get(cap_shape) else { continue };
+                let occ = rotated_occupied_cells(shape, cap_facing);
+                data.remove_block(id, &occ);
+                let base = top.height - 1;
+                if base >= 0 && (base as usize) < CHUNK_Y {
+                    data.place_std(
+                        ix as usize * 2,
+                        base as usize,
+                        iz as usize * 2,
+                        SHAPE_CUBE,
+                        Facing::North,
+                        top.texture,
+                    );
+                }
+            }
+        }
+    }
+
+    // 3. Re-classify each column against the surveyed height field.
+    for ix in bx - AUTO_RADIUS..=bx + AUTO_RADIUS {
+        for iz in bz - AUTO_RADIUS..=bz + AUTO_RADIUS {
+            if !in_bounds(ix, iz) {
+                continue;
+            }
+            let Some(&(h, tex)) = heights.get(&(ix, iz)) else {
+                continue;
+            };
+            if h < 1 {
+                continue;
+            }
+            // Unsurveyed neighbors (chunk edge / empty) count as level.
+            let delta =
+                |dx: i32, dz: i32| heights.get(&(ix + dx, iz + dz)).map(|&(nh, _)| nh - h).unwrap_or(0);
+            let Some((shape_id, facing, ch)) = classify_slope_cap(&delta) else {
+                continue;
+            };
+            let base = h - 1;
+            if base < 0 || base + ch > CHUNK_Y as i32 {
+                continue;
+            }
+
+            // Swap the flat top cube for the cap.
+            let cx = ix as usize * 2;
+            let cz = iz as usize * 2;
+            let Some(top) = column_top(data, ix as usize, iz as usize) else {
+                continue;
+            };
+            if top.cap.is_some() || top.height != h {
+                continue;
+            }
+            if let jumpblocks_voxel::chunk::Cell::Local(id) =
+                data.get_cell(cx, base as usize, cz)
+            {
+                data.remove_block(id, &BLOCK_CELLS);
+            }
+            let Some(shape) = shapes.get(shape_id) else { continue };
+            let occ = rotated_occupied_cells(shape, facing);
+            let texture = if ix == bx && iz == bz { center_texture } else { tex };
+            data.place_block(shape_id, facing, texture, cx, base as usize, cz, &occ);
+            mods.push(BlockModification {
+                x: cx,
+                y: base as usize,
+                z: cz,
+                shape: shape_id,
+                facing,
+                texture,
+            });
+        }
+    }
+
+    mods
 }
 
 // ---------------------------------------------------------------------------
@@ -669,5 +1039,89 @@ fn facing_from_int(v: INT) -> Facing {
         2 => Facing::South,
         3 => Facing::West,
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jumpblocks_voxel::shape::{SHAPE_WEDGE_OUTER};
+
+    /// Flat plateau of cube columns at `height` cells over block columns
+    /// [b0, b1] × [b0, b1].
+    fn flat_terrain(height: usize, b0: usize, b1: usize) -> ChunkData {
+        let mut data = ChunkData::new();
+        for bx in b0..=b1 {
+            for bz in b0..=b1 {
+                for y in 0..height {
+                    data.place_std(bx * 2, y, bz * 2, SHAPE_CUBE, Facing::North, 3);
+                }
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn auto_shape_caps_neighbors_of_a_bump() {
+        let shapes = ShapeTable::default();
+        let mut data = flat_terrain(6, 3, 13);
+
+        // The auto tool just placed one cube on top of column (8, 8).
+        data.place_std(16, 6, 16, SHAPE_CUBE, Facing::North, 12);
+
+        let mods = auto_reshape_contour(&mut data, 16, 16, 12, &shapes);
+        assert!(!mods.is_empty(), "reshape should have re-capped columns");
+
+        // The bump column itself stays flat (all neighbors lower).
+        let center = column_top(&data, 8, 8).expect("center column");
+        assert_eq!(center.height, 7);
+        assert!(center.cap.is_none(), "bump top should stay a cube");
+
+        // Side neighbors get straight wedges rising toward the bump.
+        for (bx, bz, facing) in [
+            (7, 8, Facing::East),
+            (9, 8, Facing::West),
+            (8, 7, Facing::South),
+            (8, 9, Facing::North),
+        ] {
+            let top = column_top(&data, bx, bz).expect("side neighbor");
+            let (_, shape, f) = top.cap.expect("side neighbor should wear a cap");
+            assert_eq!(shape, SHAPE_WEDGE, "column ({bx},{bz})");
+            assert_eq!(f, facing, "column ({bx},{bz})");
+        }
+
+        // Diagonal neighbors get outer (hill) corners.
+        for (bx, bz) in [(7, 7), (9, 7), (7, 9), (9, 9)] {
+            let top = column_top(&data, bx, bz).expect("diagonal neighbor");
+            let (_, shape, _) = top.cap.expect("diagonal neighbor should wear a cap");
+            assert_eq!(shape, SHAPE_WEDGE_OUTER, "column ({bx},{bz})");
+        }
+
+        // Columns beyond the radius stay untouched flat cubes.
+        let far = column_top(&data, 12, 12).expect("far column");
+        assert!(far.cap.is_none());
+        assert_eq!(far.height, 6);
+    }
+
+    #[test]
+    fn auto_shape_is_idempotent_when_recapping() {
+        let shapes = ShapeTable::default();
+        let mut data = flat_terrain(6, 3, 13);
+        data.place_std(16, 6, 16, SHAPE_CUBE, Facing::North, 12);
+
+        auto_reshape_contour(&mut data, 16, 16, 12, &shapes);
+        // A second pass over the same spot (e.g. stacking another cube after
+        // caps exist) must strip and re-derive caps without corrupting cells.
+        data.place_std(16, 7, 16, SHAPE_CUBE, Facing::North, 12);
+        auto_reshape_contour(&mut data, 16, 16, 12, &shapes);
+
+        let center = column_top(&data, 8, 8).expect("center column");
+        assert_eq!(center.height, 8);
+        assert!(center.cap.is_none());
+
+        // Side neighbors now see a +2 step → steep wedge family.
+        let top = column_top(&data, 7, 8).expect("side neighbor");
+        let (_, shape, _) = top.cap.expect("cap expected");
+        assert_eq!(shape, jumpblocks_voxel::shape::SHAPE_WEDGE_STEEP);
     }
 }

@@ -1,47 +1,45 @@
-// Building state — entered when the player selects an inventory item.
-// The script drives block preview and placement via the building API:
+// Building state — auto-entered while the player stands in a buildable area
+// (see build_ui.rs). The build UI owns material/shape/tool selection; this
+// script drives the preview and placement each frame via the building API:
 //   build_position()              → #{ x, y, z } chunk-local voxel coords (or () if none)
-//   show_preview(facing)         → show translucent block at the build position
-//   show_preview_in_hand(facing) → show block floating in front of player
+//   show_preview(facing)         → translucent preview of the selected shape
+//   show_preview_in_hand(facing) → preview floating in front of the player
 //   hide_preview()               → hide the preview
 //   place_block(shape, facing, texture) → place at the current build_position
+//   selected_shape()             → shape chosen in the build UI (cube in auto mode)
+//   selected_texture()           → material chosen in the hotbar
+//   auto_shape_mode()            → true when the auto-shape tool is active
+//   in_build_area()              → false the moment the player leaves the area
 //   rotate_facing_right(f) / rotate_facing_left(f) → facing helpers (0=N 1=E 2=S 3=W)
-//
-// Facing: 0=North 1=East 2=South 3=West
-// Shapes: 0=cube 1=wedge (see ShapeTable in crates/voxel/src/shape.rs)
 
 fn on_enter(ctx) {
-    log("Entered building state with item: " + ctx.item_name);
-    replicate("block_type", ctx.item_name);
-    replicate("slot", ctx.selected_slot);
+    log("Entered building state");
 
-    set_button_hint("Place Block", "F", "ZR");
-    set_button_hint("Put Away", "Esc", "B");
-    set_button_hint("Options", "Q", "ZL");
+    set_button_hint("Place", "F", "ZR");
+    set_button_hint("Shapes", "R", "Y");
+    set_button_hint("Tool", "V", "ZL");
+    set_button_hint_pair("Rotate (hold Q)", "←", "→", "D←", "D→");
 
     #{
-        item_name: ctx.item_name,
-        selected_slot: ctx.selected_slot,
         options_held: false,
         facing: 0
     }
 }
 
 fn on_update(state, input) {
+    // Leaving the buildable area (or opening a menu) puts the tools away.
+    if !in_build_area() {
+        exit_state();
+        return state;
+    }
+
     // Consume inputs so default player bindings don't fire
-    consume_input("GamepadEast");
     consume_input("GamepadRightTrigger");
     consume_input("KeyF");
     consume_input("KeyQ");
     consume_input("GamepadLeftTrigger");
 
     let options_held = input_pressed("GamepadLeftTrigger") || input_pressed("KeyQ");
-
-    // ── Exit ──────────────────────────────────────────────────────────
-    if input_just_pressed("GamepadEast") || input_just_pressed("Escape") {
-        exit_state();
-        return state;
-    }
 
     // ── Build position & preview ─────────────────────────────────────
     let pos = build_position();
@@ -52,53 +50,25 @@ fn on_update(state, input) {
         show_preview_in_hand(state.facing);
     }
 
-    // ── Place block (wedge = shape 2) ────────────────────────────────
+    // ── Place the selected shape with the selected material ──────────
     if input_just_pressed("GamepadRightTrigger") || input_just_pressed("KeyF") {
         if pos != () {
-            place_block(1, state.facing, 1);
-            log("Placed " + state.item_name + " facing " + state.facing);
+            place_block(selected_shape(), state.facing, selected_texture());
         }
     }
 
-    // ── Options panel (hold ZL / Q) ──────────────────────────────────
+    // ── Rotate (hold Q / ZL + arrows or dpad) ────────────────────────
     if options_held {
         consume_input("GamepadDPadLeft");
         consume_input("GamepadDPadRight");
-        consume_input("GamepadDPadUp");
-        consume_input("GamepadDPadDown");
         consume_input("ArrowLeft");
         consume_input("ArrowRight");
-        consume_input("ArrowUp");
-        consume_input("ArrowDown");
 
-        clear_button_hints();
-        set_button_hint_pair("Rotate", "←", "→", "D←", "D→");
-        set_button_hint_pair("Position", "↑", "↓", "D↑", "D↓");
-
-        // Rotate
         if input_just_pressed("GamepadDPadRight") || input_just_pressed("ArrowRight") {
             state.facing = rotate_facing_right(state.facing);
-            log("Facing: " + state.facing);
         }
         if input_just_pressed("GamepadDPadLeft") || input_just_pressed("ArrowLeft") {
             state.facing = rotate_facing_left(state.facing);
-            log("Facing: " + state.facing);
-        }
-
-        // Position up/down — reserved for future use
-        if input_just_pressed("GamepadDPadUp") || input_just_pressed("ArrowUp") {
-            log("Position up");
-        }
-        if input_just_pressed("GamepadDPadDown") || input_just_pressed("ArrowDown") {
-            log("Position down");
-        }
-    } else {
-        // Restore normal hints when options released
-        if state.options_held {
-            clear_button_hints();
-            set_button_hint("Place Block", "F", "ZR");
-            set_button_hint("Put Away", "Esc", "B");
-            set_button_hint("Options", "Q", "ZL");
         }
     }
 

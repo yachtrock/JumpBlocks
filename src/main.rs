@@ -1,4 +1,5 @@
 mod action_state;
+mod build_ui;
 mod building;
 mod camera;
 mod challenge;
@@ -58,12 +59,47 @@ struct GameUiData {
     max_health: f32,
     button_hints: Vec<ButtonHintData>,
     input_mode: String,
+    build: BuildUiData,
+}
+
+/// Everything the HUD needs to draw the building interface.
+#[derive(Clone, Debug, Default)]
+pub struct BuildUiData {
+    pub in_area: bool,
+    pub materials: Vec<MaterialSlotData>,
+    pub selected_slot: usize,
+    pub shapes: Vec<ShapeInfoData>,
+    pub shape_selected: usize,
+    pub shape_menu_open: bool,
+    pub esc_menu_open: bool,
+    pub esc_selected: usize,
+    pub tool: String,
+    pub challenge_active: bool,
+    pub challenge_name: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MaterialSlotData {
+    pub name: String,
+    pub color: [f32; 4],
+    pub count: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShapeInfoData {
+    pub id: u16,
+    pub name: String,
+    pub cost: u32,
 }
 
 #[derive(Clone, Debug)]
 enum GameUiEvent {
     InventoryClosed,
     ItemSelected(usize),
+    /// Building UI interactions: kind is one of
+    /// "slot", "shape", "tool", "shape_menu_closed", "esc_resume",
+    /// "esc_cancel_challenge"; value carries the index/id where relevant.
+    Build { kind: String, value: i64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +212,7 @@ fn toggle_inventory(
             max_health: 100.0,
             button_hints: Vec::new(),
             input_mode: "keyboard".to_string(),
+            build: BuildUiData::default(),
         });
     }
 }
@@ -187,6 +224,7 @@ fn handle_ui_events(
     data_tx: Res<UiDataTx>,
     mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut enter_state_queue: ResMut<action_state::EnterActionStateQueue>,
+    mut build_events: ResMut<build_ui::BuildEventQueue>,
 ) {
     while let Ok(event) = event_rx.0.try_recv() {
         match event {
@@ -208,7 +246,11 @@ fn handle_ui_events(
                     max_health: 100.0,
                     button_hints: Vec::new(),
                     input_mode: "keyboard".to_string(),
+                    build: BuildUiData::default(),
                 });
+            }
+            GameUiEvent::Build { kind, value } => {
+                build_events.0.push((kind, value));
             }
             GameUiEvent::ItemSelected(slot) => {
                 if let Some(item) = inv_state.items.get(slot) {
@@ -243,6 +285,7 @@ fn send_initial_ui_data(data_tx: Res<UiDataTx>, inv_state: Res<InventoryState>) 
         max_health: 100.0,
         button_hints: Vec::new(),
         input_mode: "keyboard".to_string(),
+        build: BuildUiData::default(),
     });
 }
 
@@ -252,6 +295,7 @@ fn sync_game_ui_data(
     inv_state: Res<InventoryState>,
     button_hints: Res<action_state::ButtonHints>,
     input_mode: Res<action_state::InputMode>,
+    build_snapshot: Res<build_ui::BuildUiSnapshot>,
 ) {
     let hints: Vec<ButtonHintData> = button_hints
         .0
@@ -277,6 +321,7 @@ fn sync_game_ui_data(
         max_health: 100.0,
         button_hints: hints,
         input_mode: mode.to_string(),
+        build: build_snapshot.0.clone(),
     });
 }
 
@@ -543,6 +588,7 @@ fn main() {
         ));
         // ChallengePlugin needs DebugUiPlugin's EguiPlugin registered first.
         app.add_plugins(challenge::ChallengePlugin);
+        app.add_plugins(build_ui::BuildUiPlugin);
         app.add_systems(Update, toggle_wireframe);
         app.add_systems(Startup, send_initial_ui_data);
         app.add_systems(PreUpdate, toggle_inventory);

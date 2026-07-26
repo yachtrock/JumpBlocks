@@ -36,8 +36,14 @@ pub fn stub_engine(script_dir: &Path) -> Engine {
     // Input
     engine.register_fn("key_just_pressed", |_key: &str| -> bool { false });
 
+    // Mouse
+    engine.register_fn("mouse_x", || -> FLOAT { 0.0 });
+    engine.register_fn("mouse_y", || -> FLOAT { 0.0 });
+    engine.register_fn("mouse_clicked", || -> bool { false });
+
     // Draw
     engine.register_fn("rect", |_x: FLOAT, _y: FLOAT, _w: FLOAT, _h: FLOAT, _c: Array| {});
+    engine.register_fn("poly", |_pts: Array, _c: Array| {});
     engine.register_fn("rect_ffd", |_x: FLOAT, _y: FLOAT, _w: FLOAT, _h: FLOAT, _c: Array, _f: INT| {});
     engine.register_fn("text", |_x: FLOAT, _y: FLOAT, _t: &str, _s: FLOAT, _c: Array| {});
     engine.register_fn("text_ffd", |_x: FLOAT, _y: FLOAT, _t: &str, _s: FLOAT, _c: Array, _f: INT| {});
@@ -58,6 +64,7 @@ pub fn stub_engine(script_dir: &Path) -> Engine {
     // Events
     engine.register_fn("send_inventory_closed", || {});
     engine.register_fn("send_item_selected", |_slot: INT| {});
+    engine.register_fn("send_build_event", |_kind: &str, _value: INT| {});
 
     engine
 }
@@ -93,6 +100,11 @@ pub fn stub_action_state_engine() -> Engine {
     engine.register_fn("place_block", |_shape: INT, _facing: INT, _texture: INT| {});
     engine.register_fn("rotate_facing_right", |facing: INT| -> INT { (facing + 1) % 4 });
     engine.register_fn("rotate_facing_left", |facing: INT| -> INT { (facing + 3) % 4 });
+    // Build UI selection (true so lint exercises the full on_update body).
+    engine.register_fn("in_build_area", || -> bool { true });
+    engine.register_fn("selected_shape", || -> INT { 0 });
+    engine.register_fn("selected_texture", || -> INT { 20 });
+    engine.register_fn("auto_shape_mode", || -> bool { false });
 
     engine
 }

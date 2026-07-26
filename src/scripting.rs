@@ -30,6 +30,11 @@ enum DrawOp {
         h: f32,
         color: [f32; 4],
     },
+    /// Convex polygon from a flat [x0,y0,x1,y1,...] point list.
+    Poly {
+        points: Vec<[f32; 2]>,
+        color: [f32; 4],
+    },
     RectFfd {
         x: f32,
         y: f32,
@@ -73,6 +78,8 @@ struct Shared {
     events: Vec<GameUiEvent>,
     keys_just_pressed: HashSet<String>,
     window_size: [f32; 2],
+    mouse_pos: [f32; 2],
+    mouse_just_pressed: bool,
     game_data: Dynamic,
 }
 
@@ -85,6 +92,8 @@ impl Shared {
             events: Vec::new(),
             keys_just_pressed: HashSet::new(),
             window_size: [0.0; 2],
+            mouse_pos: [0.0; 2],
+            mouse_just_pressed: false,
             game_data: Dynamic::UNIT,
         }
     }
@@ -179,6 +188,8 @@ impl ScriptEngine {
             s.keys_just_pressed.clear();
 
             s.window_size = [input.window_size.x, input.window_size.y];
+            s.mouse_pos = [input.mouse_pos.x, input.mouse_pos.y];
+            s.mouse_just_pressed = input.mouse_just_pressed[0];
             for code in &input.keys_just_pressed {
                 s.keys_just_pressed.insert(keycode_to_string(*code));
             }
@@ -217,6 +228,9 @@ impl ScriptEngine {
             match op {
                 DrawOp::Rect { x, y, w, h, color } => {
                     canvas.rect(*x, *y, *w, *h, *color);
+                }
+                DrawOp::Poly { points, color } => {
+                    canvas.poly(points, *color);
                 }
                 DrawOp::RectFfd {
                     x,
@@ -277,6 +291,11 @@ impl ScriptEngine {
             );
 
         if changed {
+            // The FileModuleResolver caches imported modules; without a fresh
+            // resolver, `import "build"` etc. would keep returning the module
+            // compiled at startup and edits to imports would never load.
+            self.engine
+                .set_module_resolver(FileModuleResolver::new_with_path(&self.script_dir));
             let (ast, file_mtimes) =
                 load_main_script(&self.engine, &self.main_script, &self.script_dir);
             self.file_mtimes = file_mtimes;
@@ -384,6 +403,54 @@ fn build_engine(shared: Arc<Mutex<Shared>>, script_dir: &Path) -> Engine {
                 });
             },
         );
+    }
+
+    // --- Draw: convex polygon (flat [x0,y0,x1,y1,...] array) ---
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn("poly", move |pts: Array, color: Array| {
+            let c = array_to_color(&color);
+            let mut points = Vec::with_capacity(pts.len() / 2);
+            let mut it = pts.iter();
+            while let (Some(x), Some(y)) = (it.next(), it.next()) {
+                points.push([
+                    x.as_float().unwrap_or(0.0) as f32,
+                    y.as_float().unwrap_or(0.0) as f32,
+                ]);
+            }
+            s.lock().unwrap().draw_ops.push(DrawOp::Poly { points, color: c });
+        });
+    }
+
+    // --- Mouse state ---
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn("mouse_x", move || -> FLOAT {
+            s.lock().unwrap().mouse_pos[0] as FLOAT
+        });
+    }
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn("mouse_y", move || -> FLOAT {
+            s.lock().unwrap().mouse_pos[1] as FLOAT
+        });
+    }
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn("mouse_clicked", move || -> bool {
+            s.lock().unwrap().mouse_just_pressed
+        });
+    }
+
+    // --- Build UI events ---
+    {
+        let s = Arc::clone(&shared);
+        engine.register_fn("send_build_event", move |kind: &str, value: INT| {
+            s.lock().unwrap().events.push(GameUiEvent::Build {
+                kind: kind.to_string(),
+                value,
+            });
+        });
     }
 
     // --- Draw: text ---
@@ -691,6 +758,50 @@ fn game_data_to_dynamic(data: &GameUiData) -> Dynamic {
         })
         .collect();
     map.insert("items".into(), Dynamic::from(items));
+
+    // Building interface data
+    {
+        let b = &data.build;
+        let mut bm = Map::new();
+        bm.insert("in_area".into(), Dynamic::from(b.in_area));
+        bm.insert("selected_slot".into(), Dynamic::from(b.selected_slot as i64));
+        bm.insert("shape_menu_open".into(), Dynamic::from(b.shape_menu_open));
+        bm.insert("esc_menu_open".into(), Dynamic::from(b.esc_menu_open));
+        bm.insert("esc_selected".into(), Dynamic::from(b.esc_selected as i64));
+        bm.insert("shape_selected".into(), Dynamic::from(b.shape_selected as i64));
+        bm.insert("tool".into(), Dynamic::from(b.tool.clone()));
+        bm.insert("challenge_active".into(), Dynamic::from(b.challenge_active));
+        bm.insert(
+            "challenge_name".into(),
+            Dynamic::from(b.challenge_name.clone()),
+        );
+        let mats: Array = b
+            .materials
+            .iter()
+            .map(|m| {
+                let mut mm = Map::new();
+                mm.insert("name".into(), Dynamic::from(m.name.clone()));
+                mm.insert("count".into(), Dynamic::from(m.count as i64));
+                let color: Array = m.color.iter().map(|&c| Dynamic::from(c as f64)).collect();
+                mm.insert("color".into(), Dynamic::from(color));
+                Dynamic::from(mm)
+            })
+            .collect();
+        bm.insert("materials".into(), Dynamic::from(mats));
+        let shapes: Array = b
+            .shapes
+            .iter()
+            .map(|sh| {
+                let mut sm = Map::new();
+                sm.insert("id".into(), Dynamic::from(sh.id as i64));
+                sm.insert("name".into(), Dynamic::from(sh.name.clone()));
+                sm.insert("cost".into(), Dynamic::from(sh.cost as i64));
+                Dynamic::from(sm)
+            })
+            .collect();
+        bm.insert("shapes".into(), Dynamic::from(shapes));
+        map.insert("build".into(), Dynamic::from(bm));
+    }
 
     // Button hints from action state
     let hints: Array = data

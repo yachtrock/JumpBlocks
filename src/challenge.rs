@@ -149,7 +149,7 @@ struct StartPad {
 
 /// The goal entity of the active challenge.
 #[derive(Component)]
-struct GoalMarker {
+pub struct GoalMarker {
     challenge: usize,
 }
 
